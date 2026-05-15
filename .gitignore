@@ -1,4 +1,5 @@
 /target
+/auv2/build
 Cargo.lock.bak
 .DS_Store
 .idea/
