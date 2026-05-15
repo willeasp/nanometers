@@ -1,0 +1,42 @@
+[workspace]
+resolver = "3"
+members = ["nanometers", "xtask"]
+default-members = ["nanometers"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.87"
+authors = ["Wille Asp <wille.asp@live.se>"]
+license = "MIT"
+repository = "https://github.com/willeasp/nanometers"
+
+[workspace.dependencies]
+nih_plug = { git = "https://github.com/BillyDM/nih-plug.git", rev = "25d5e0a0ee4b76d4c8ccd5da2cf4cb200d56e8ab", features = [
+    "assert_process_allocs",
+    "standalone",
+] }
+nih_plug_xtask = { git = "https://github.com/BillyDM/nih-plug.git", rev = "25d5e0a0ee4b76d4c8ccd5da2cf4cb200d56e8ab" }
+
+baseview = { version = "0.1", features = ["opengl"] }
+wgpu = "29"
+raw-window-handle = "0.5"
+raw-window-handle-06 = { package = "raw-window-handle", version = "0.6" }
+
+pollster = "0.4"
+crossbeam = "0.8"
+atomic_float = "1.1"
+serde = { version = "1.0", features = ["derive"] }
+
+log = { version = "0.4", features = [
+    "max_level_debug",
+    "release_max_level_info",
+] }
+
+# DSP / data plumbing
+rtrb = "0.3.3"
+triple_buffer = "9.0.0"
+realfft = "3.0"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

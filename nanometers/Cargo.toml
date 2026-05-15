@@ -1,0 +1,33 @@
+[package]
+name = "nanometers"
+version = "0.0.1"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Chill open-source audio meter plugin with waveform, spectrum, and stereo visualizations."
+
+[lib]
+# `cdylib` for the plugin (CLAP/VST3), `lib` is needed for the standalone target.
+crate-type = ["cdylib", "lib"]
+
+[[bin]]
+name = "nanometers"
+path = "src/standalone.rs"
+
+[dependencies]
+nih_plug.workspace = true
+
+baseview.workspace = true
+wgpu.workspace = true
+raw-window-handle.workspace = true
+raw-window-handle-06.workspace = true
+
+pollster.workspace = true
+crossbeam.workspace = true
+atomic_float.workspace = true
+serde.workspace = true
+log.workspace = true
+
+rtrb.workspace = true
+triple_buffer.workspace = true

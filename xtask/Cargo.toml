@@ -1,0 +1,11 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+description = "Build/bundle helper. Invoked via `cargo xtask`."
+
+[dependencies]
+nih_plug_xtask.workspace = true
