@@ -36,6 +36,7 @@ log = { version = "0.4", features = [
 rtrb = "0.3.3"
 triple_buffer = "9.0.0"
 realfft = "3.0"
+bytemuck = { version = "1.18", features = ["derive"] }
 
 [profile.release]
 lto = "thin"

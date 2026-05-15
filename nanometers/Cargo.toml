@@ -31,3 +31,4 @@ log.workspace = true
 
 rtrb.workspace = true
 triple_buffer.workspace = true
+bytemuck.workspace = true
