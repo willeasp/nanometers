@@ -27,12 +27,12 @@ use crate::{NanometersParams, Shared, StereoFrame};
 /// 4096 ≈ 85 ms at 48 kHz / 21 ms at 192 kHz. Enough to see musical features at any rate.
 const DISPLAY_BUFFER_LEN: usize = 4096;
 
-/// Background clear color — near-black with a faint blue tint. Will become a deliberate
-/// palette choice once the visualization style stabilizes.
+/// Background — near-black with the faintest blue tint. Will become a deliberate palette
+/// choice once the visualization style stabilizes.
 const CLEAR_COLOR: wgpu::Color = wgpu::Color {
-    r: 0.012,
-    g: 0.013,
-    b: 0.020,
+    r: 0.014,
+    g: 0.016,
+    b: 0.022,
     a: 1.0,
 };
 
@@ -304,13 +304,15 @@ impl baseview::WindowHandler for RenderWindow {
         let mut recreate_surface = false;
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture) => Some(texture),
-            wgpu::CurrentSurfaceTexture::Occluded | wgpu::CurrentSurfaceTexture::Timeout => return,
+            // Window not visible or compositor stalled — skip this frame.
+            wgpu::CurrentSurfaceTexture::Occluded
+            | wgpu::CurrentSurfaceTexture::Timeout
+            | wgpu::CurrentSurfaceTexture::Validation => return,
+            // Reconfigure the surface and skip; we'll catch up next frame.
             wgpu::CurrentSurfaceTexture::Suboptimal(_) | wgpu::CurrentSurfaceTexture::Outdated => {
                 None
             }
-            wgpu::CurrentSurfaceTexture::Validation => {
-                unreachable!("no validation error scope registered")
-            }
+            // Device-lost / context dropped — rebuild the surface from the window handle.
             wgpu::CurrentSurfaceTexture::Lost => {
                 recreate_surface = true;
                 None
@@ -328,7 +330,17 @@ impl baseview::WindowHandler for RenderWindow {
             return;
         };
 
-        // Upload the current sample window. 4096 f32 per channel = 16 KB each, ~1 ms total.
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("nanometers-encoder"),
+            });
+
+        // Upload current sample window. queue.write_buffer is scheduled before the submit,
+        // so it must happen before begin_render_pass for the encoded draws to see it.
         self.queue.write_buffer(
             &self.waveform.vertex_buffer_l,
             0,
@@ -339,15 +351,6 @@ impl baseview::WindowHandler for RenderWindow {
             0,
             bytemuck::cast_slice(self.linear_scratch_r.as_slice()),
         );
-
-        let view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("nanometers-encoder"),
-            });
 
         {
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -366,7 +369,6 @@ impl baseview::WindowHandler for RenderWindow {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-
             self.waveform.render(&mut rpass, &self.queue);
         }
 
@@ -415,8 +417,14 @@ struct WaveformUniforms {
 
 struct WaveformRenderer {
     pipeline: wgpu::RenderPipeline,
-    uniform_buffer: wgpu::Buffer,
-    bind_group: wgpu::BindGroup,
+
+    // One uniform + bind group per channel. They're written once at construction with the
+    // channel's static y_offset/y_scale, never touched afterwards. A previous version reused
+    // one buffer and rewrote it between draws — but `queue.write_buffer` is ordered against
+    // the next submit, not against individual encoded draws, so both writes happened first
+    // and the second one won. Resulted in both lines drawing at the R position.
+    bind_group_l: wgpu::BindGroup,
+    bind_group_r: wgpu::BindGroup,
 
     vertex_buffer_l: wgpu::Buffer,
     vertex_buffer_r: wgpu::Buffer,
@@ -444,21 +452,35 @@ impl WaveformRenderer {
             }],
         });
 
-        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("waveform-uniforms"),
-            size: std::mem::size_of::<WaveformUniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        // One uniform per channel, written once with bytemuck. We use `create_buffer_init`
+        // so the data lands at creation — no separate write_buffer that races with the submit.
+        let make_uniform = |label: &str, y_offset: f32| {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(label),
+                contents: bytemuck::bytes_of(&WaveformUniforms {
+                    sample_count: DISPLAY_BUFFER_LEN as u32,
+                    _pad0: 0,
+                    y_offset,
+                    y_scale: 0.4,
+                }),
+                usage: wgpu::BufferUsages::UNIFORM,
+            })
+        };
+        let uniform_buffer_l = make_uniform("waveform-uniforms-L", 0.5);
+        let uniform_buffer_r = make_uniform("waveform-uniforms-R", -0.5);
 
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("waveform-bg"),
-            layout: &bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform_buffer.as_entire_binding(),
-            }],
-        });
+        let make_bg = |label: &str, buf: &wgpu::Buffer| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(label),
+                layout: &bind_group_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buf.as_entire_binding(),
+                }],
+            })
+        };
+        let bind_group_l = make_bg("waveform-bg-L", &uniform_buffer_l);
+        let bind_group_r = make_bg("waveform-bg-R", &uniform_buffer_r);
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("waveform-pl"),
@@ -516,43 +538,24 @@ impl WaveformRenderer {
 
         Self {
             pipeline,
-            uniform_buffer,
-            bind_group,
+            bind_group_l,
+            bind_group_r,
             vertex_buffer_l: make_vbuf("waveform-vbuf-L"),
             vertex_buffer_r: make_vbuf("waveform-vbuf-R"),
             vertex_count: DISPLAY_BUFFER_LEN as u32,
         }
     }
 
-    fn render(&self, rpass: &mut wgpu::RenderPass<'_>, queue: &wgpu::Queue) {
+    fn render(&self, rpass: &mut wgpu::RenderPass<'_>, _queue: &wgpu::Queue) {
         rpass.set_pipeline(&self.pipeline);
-        rpass.set_bind_group(0, &self.bind_group, &[]);
 
-        // L: top half
-        queue.write_buffer(
-            &self.uniform_buffer,
-            0,
-            bytemuck::bytes_of(&WaveformUniforms {
-                sample_count: self.vertex_count,
-                _pad0: 0,
-                y_offset: 0.5,
-                y_scale: 0.4,
-            }),
-        );
+        // L: top half. Uniform was baked in at creation, no per-frame writes needed.
+        rpass.set_bind_group(0, &self.bind_group_l, &[]);
         rpass.set_vertex_buffer(0, self.vertex_buffer_l.slice(..));
         rpass.draw(0..self.vertex_count, 0..1);
 
-        // R: bottom half
-        queue.write_buffer(
-            &self.uniform_buffer,
-            0,
-            bytemuck::bytes_of(&WaveformUniforms {
-                sample_count: self.vertex_count,
-                _pad0: 0,
-                y_offset: -0.5,
-                y_scale: 0.4,
-            }),
-        );
+        // R: bottom half.
+        rpass.set_bind_group(0, &self.bind_group_r, &[]);
         rpass.set_vertex_buffer(0, self.vertex_buffer_r.slice(..));
         rpass.draw(0..self.vertex_count, 0..1);
     }
@@ -562,7 +565,10 @@ const WAVEFORM_WGSL: &str = r#"
 struct Uniforms {
     sample_count: u32,
     _pad0: u32,
+    // Clip-space Y center for this channel: +0.5 for L (top half), -0.5 for R (bottom half).
     y_offset: f32,
+    // Vertical amplitude scale. With y_offset 0.5 and y_scale 0.4, sample = +1 reaches y = 0.9
+    // (near the top edge) and sample = -1 reaches y = 0.1 (near the channel split line).
     y_scale: f32,
 };
 
@@ -576,12 +582,12 @@ fn vs_main(
     let denom = max(f32(u.sample_count) - 1.0, 1.0);
     let x = (f32(idx) / denom) * 2.0 - 1.0;
     let y = u.y_offset + clamp(sample, -1.0, 1.0) * u.y_scale;
-    return vec4<f32>(x, -y, 0.0, 1.0);
+    return vec4<f32>(x, y, 0.0, 1.0);
 }
 
 @fragment
 fn fs_main() -> @location(0) vec4<f32> {
-    // Soft cyan. Glow comes later (multi-pass blur).
+    // Soft cyan against a near-black background. Glow comes later (multi-pass blur).
     return vec4<f32>(0.55, 0.85, 1.0, 1.0);
 }
 "#;
