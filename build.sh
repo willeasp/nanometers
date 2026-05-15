@@ -19,6 +19,10 @@ echo "==> [2/4] Configuring AU wrapper (cmake)..."
 cmake -B auv2/build -S auv2 -DCMAKE_BUILD_TYPE=Release
 
 echo "==> [3/4] Building AU wrapper..."
+# clap-wrapper's incremental build doesn't always re-stitch the .component's Info.plist
+# (the auv2 AudioComponents array gets stamped only at link time). Nuking the bundle forces
+# a relink while keeping the heavy AudioUnitSDK / clap-wrapper objects cached.
+rm -rf auv2/build/nanometers.component
 cmake --build auv2/build --parallel --config Release
 
 # clap-wrapper drops the .component somewhere under auv2/build — find it.
