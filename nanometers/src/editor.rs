@@ -27,6 +27,11 @@ use crate::{NanometersParams, Shared, StereoFrame};
 /// 4096 ≈ 85 ms at 48 kHz / 21 ms at 192 kHz. Enough to see musical features at any rate.
 const DISPLAY_BUFFER_LEN: usize = 4096;
 
+/// Number of stacked passes for additive-glow rendering of the waveform. Must be odd so
+/// there's a central (zero-offset) layer. 9 gives a comfortably soft halo without too many
+/// instances per draw.
+const GLOW_LAYERS: u32 = 9;
+
 /// Background — near-black with the faintest blue tint. Will become a deliberate palette
 /// choice once the visualization style stabilizes.
 const CLEAR_COLOR: wgpu::Color = wgpu::Color {
@@ -513,7 +518,21 @@ impl WaveformRenderer {
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: surface_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    // Additive blending so stacked glow layers sum brightness into a saturated
+                    // core. (src.rgb * src.a) + (dst.rgb * 1.0). Alpha channel is unused for
+                    // display but we still write it to keep the surface coherent.
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::SrcAlpha,
+                            dst_factor: wgpu::BlendFactor::One,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::One,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                    }),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
@@ -549,15 +568,19 @@ impl WaveformRenderer {
     fn render(&self, rpass: &mut wgpu::RenderPass<'_>, _queue: &wgpu::Queue) {
         rpass.set_pipeline(&self.pipeline);
 
+        // Each draw is instanced over GLOW_LAYERS — the vertex shader uses instance_index
+        // to offset y and modulate alpha per layer, producing a Gaussian-falloff stacked-line
+        // glow with additive blending into the swapchain.
+
         // L: top half. Uniform was baked in at creation, no per-frame writes needed.
         rpass.set_bind_group(0, &self.bind_group_l, &[]);
         rpass.set_vertex_buffer(0, self.vertex_buffer_l.slice(..));
-        rpass.draw(0..self.vertex_count, 0..1);
+        rpass.draw(0..self.vertex_count, 0..GLOW_LAYERS);
 
         // R: bottom half.
         rpass.set_bind_group(0, &self.bind_group_r, &[]);
         rpass.set_vertex_buffer(0, self.vertex_buffer_r.slice(..));
-        rpass.draw(0..self.vertex_count, 0..1);
+        rpass.draw(0..self.vertex_count, 0..GLOW_LAYERS);
     }
 }
 
@@ -574,21 +597,48 @@ struct Uniforms {
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
 
+struct VertexOut {
+    @builtin(position) position: vec4<f32>,
+    // Per-layer alpha for the glow stack. The fragment shader uses this directly as alpha,
+    // and the pipeline's additive blending sums the layers into a saturated core with a soft
+    // outer halo.
+    @location(0) alpha: f32,
+};
+
 @vertex
 fn vs_main(
     @location(0) sample: f32,
     @builtin(vertex_index) idx: u32,
-) -> @builtin(position) vec4<f32> {
+    @builtin(instance_index) layer: u32,
+) -> VertexOut {
+    // 9 layers, centered: layer 0..8 → offset -4..+4.
+    let half_layers: i32 = 4;
+    let off: i32 = i32(layer) - half_layers;
+
+    // Per-layer vertical displacement in clip space. With clip y in [-1, 1] over the channel's
+    // half of the window, ~0.006 per pixel-ish unit gives a halo of a few pixels at 720x420
+    // logical with system 2x scaling. Tweak the constant for thinner/fatter glow.
+    let layer_spread: f32 = 0.006;
+    let y_layer_offset: f32 = f32(off) * layer_spread;
+
     let denom = max(f32(u.sample_count) - 1.0, 1.0);
     let x = (f32(idx) / denom) * 2.0 - 1.0;
-    let y = u.y_offset + clamp(sample, -1.0, 1.0) * u.y_scale;
-    return vec4<f32>(x, y, 0.0, 1.0);
+    let y = u.y_offset + clamp(sample, -1.0, 1.0) * u.y_scale + y_layer_offset;
+
+    // Gaussian-ish falloff. exp(-off^2 / 6) gives center ≈ 1.0, ±1 ≈ 0.85, ±2 ≈ 0.51, ±4 ≈ 0.07.
+    // Scale by 0.4 so 9-layer sum saturates white at the line core but stays gentle in the halo.
+    let weight = exp(-f32(off * off) / 6.0) * 0.4;
+
+    var out: VertexOut;
+    out.position = vec4<f32>(x, y, 0.0, 1.0);
+    out.alpha = weight;
+    return out;
 }
 
 @fragment
-fn fs_main() -> @location(0) vec4<f32> {
-    // Soft cyan against a near-black background. Glow comes later (multi-pass blur).
-    return vec4<f32>(0.55, 0.85, 1.0, 1.0);
+fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
+    // Cyan core; alpha is per-layer, additive blending stacks them into a glow.
+    return vec4<f32>(0.55, 0.85, 1.0, in.alpha);
 }
 "#;
 
