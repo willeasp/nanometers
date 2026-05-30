@@ -8,6 +8,7 @@
 //! is (re)built in `prepare` (which gets the viewport width → column count) and uploaded; `render`
 //! draws it. The host sets viewport+scissor, so geometry is emitted in plain [-1, 1] clip space.
 
+pub mod color;
 pub mod store;
 
 use bytemuck::{Pod, Zeroable};
@@ -15,10 +16,14 @@ use std::borrow::Cow;
 use wgpu::util::DeviceExt;
 
 use super::{EventStatus, FrameContext, Module, Rect};
+use color::{Filterbank, band_color};
 use store::{BaseBin, ChannelEnvelope, merge};
 
 /// Base-bin width (ADR 0002). Sample-rate-independent: 0.5 ms → 2000 bins/sec.
 const BIN_SECONDS: f32 = 0.0005;
+/// 3-band filterbank crossovers (ADR 0001; dev-player tuning later, spec §6/§10).
+const BAND_LOW_HZ: f32 = 250.0;
+const BAND_HIGH_HZ: f32 = 4000.0;
 /// Default viewable window (spec §6 — Module config later).
 const DEFAULT_WINDOW_SECONDS: f32 = 5.0;
 /// Per-half amplitude scale. Each channel occupies half the column height (L top, R bottom,
@@ -33,6 +38,7 @@ const MAX_COLUMNS: usize = 2048;
 #[derive(Copy, Clone, Pod, Zeroable)]
 struct Vertex {
     pos: [f32; 2],
+    color: [f32; 3],
 }
 
 pub struct WaveformModule {
@@ -43,6 +49,9 @@ pub struct WaveformModule {
     sample_rate: f32,
     samples_per_bin: usize,
 
+    // 3-band filterbank on the mono sum (ADR 0001), rebuilt when the sample rate changes.
+    filterbank: Option<Filterbank>,
+
     // Fixed-length ring of base bins (length = window_seconds / 0.5 ms, sample-rate-independent),
     // newest at `write_head - 1`. Pre-filled with silence so an unfilled window reads as flat.
     bins: Vec<BaseBin>,
@@ -52,6 +61,7 @@ pub struct WaveformModule {
     acc_min: [f32; 2],
     acc_max: [f32; 2],
     acc_sumsq: [f32; 2],
+    acc_band_sumsq: [f32; 3],
     acc_count: usize,
 
     // Per-frame scratch reused to avoid allocation.
@@ -91,11 +101,18 @@ impl WaveformModule {
         let vertex_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Vertex>() as u64,
             step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &[wgpu::VertexAttribute {
-                shader_location: 0,
-                format: wgpu::VertexFormat::Float32x2,
-                offset: 0,
-            }],
+            attributes: &[
+                wgpu::VertexAttribute {
+                    shader_location: 0,
+                    format: wgpu::VertexFormat::Float32x2,
+                    offset: 0,
+                },
+                wgpu::VertexAttribute {
+                    shader_location: 1,
+                    format: wgpu::VertexFormat::Float32x3,
+                    offset: std::mem::size_of::<[f32; 2]>() as u64,
+                },
+            ],
         };
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -138,11 +155,13 @@ impl WaveformModule {
         Self {
             sample_rate: 0.0,
             samples_per_bin: 0,
+            filterbank: None,
             bins: vec![BaseBin::SILENCE; window_bins],
             write_head: 0,
             acc_min: [f32::INFINITY; 2],
             acc_max: [f32::NEG_INFINITY; 2],
             acc_sumsq: [0.0; 2],
+            acc_band_sumsq: [0.0; 3],
             acc_count: 0,
             linear: vec![BaseBin::SILENCE; window_bins],
             verts: Vec::with_capacity(4 * MAX_COLUMNS),
@@ -157,6 +176,7 @@ impl WaveformModule {
         self.acc_min = [f32::INFINITY; 2];
         self.acc_max = [f32::NEG_INFINITY; 2];
         self.acc_sumsq = [0.0; 2];
+        self.acc_band_sumsq = [0.0; 3];
         self.acc_count = 0;
     }
 
@@ -174,8 +194,12 @@ impl WaveformModule {
                 mean_square: self.acc_sumsq[1] / n,
             },
         ];
-        // band_ms stays 0 until the filterbank (C4 / spec §3.2).
-        self.bins[self.write_head] = BaseBin { env, band_ms: [0.0; 3] };
+        let band_ms = [
+            self.acc_band_sumsq[0] / n,
+            self.acc_band_sumsq[1] / n,
+            self.acc_band_sumsq[2] / n,
+        ];
+        self.bins[self.write_head] = BaseBin { env, band_ms };
         self.write_head = (self.write_head + 1) % self.bins.len();
         self.reset_accumulator();
     }
@@ -189,16 +213,29 @@ impl Module for WaveformModule {
         if ctx.sample_rate != self.sample_rate {
             self.sample_rate = ctx.sample_rate;
             self.samples_per_bin = (ctx.sample_rate * BIN_SECONDS).round().max(1.0) as usize;
+            self.filterbank = Some(Filterbank::new(ctx.sample_rate, BAND_LOW_HZ, BAND_HIGH_HZ));
             self.reset_accumulator();
         }
 
         for &[l, r] in ctx.new {
+            // Spectral color (ADR 0001): filter the mono sum, accumulate per-band power. The
+            // `as_mut` borrow ends before the envelope fold / close_bin touch the rest of `self`.
+            let mono = 0.5 * (l + r);
+            let bands = self
+                .filterbank
+                .as_mut()
+                .map(|fb| fb.process(mono))
+                .unwrap_or([0.0; 3]);
+
             self.acc_min[0] = self.acc_min[0].min(l);
             self.acc_max[0] = self.acc_max[0].max(l);
             self.acc_sumsq[0] += l * l;
             self.acc_min[1] = self.acc_min[1].min(r);
             self.acc_max[1] = self.acc_max[1].max(r);
             self.acc_sumsq[1] += r * r;
+            for k in 0..3 {
+                self.acc_band_sumsq[k] += bands[k] * bands[k];
+            }
             self.acc_count += 1;
             if self.acc_count >= self.samples_per_bin {
                 self.close_bin();
@@ -237,11 +274,15 @@ impl Module for WaveformModule {
             for c in 0..columns {
                 let lo = c * n / columns;
                 let hi = (((c + 1) * n / columns).max(lo + 1)).min(n);
-                let env = merge(&self.linear[lo..hi]).env[ch];
+                let merged = merge(&self.linear[lo..hi]);
+                let env = merged.env[ch];
+                // One color per column from the shared (mono) band energies (ADR 0001); both L and
+                // R in this column carry it, interpolated along time by the rasterizer.
+                let color = band_color(merged.band_ms);
                 let x = -1.0 + 2.0 * (c as f32) / denom;
                 let center = HALF_CENTER[ch];
-                self.verts.push(Vertex { pos: [x, center + env.max * HALF_SCALE] });
-                self.verts.push(Vertex { pos: [x, center + env.min * HALF_SCALE] });
+                self.verts.push(Vertex { pos: [x, center + env.max * HALF_SCALE], color });
+                self.verts.push(Vertex { pos: [x, center + env.min * HALF_SCALE], color });
             }
         }
 
@@ -273,18 +314,22 @@ impl Module for WaveformModule {
 }
 
 const CONTOUR_WGSL: &str = r#"
-struct VsOut { @builtin(position) clip: vec4<f32> };
+struct VsOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) color: vec3<f32>,
+};
 
 @vertex
-fn vs_main(@location(0) pos: vec2<f32>) -> VsOut {
+fn vs_main(@location(0) pos: vec2<f32>, @location(1) color: vec3<f32>) -> VsOut {
     var o: VsOut;
     o.clip = vec4<f32>(pos, 0.0, 1.0);
+    o.color = color;
     return o;
 }
 
 @fragment
-fn fs_main() -> @location(0) vec4<f32> {
-    // M1 monochrome teal fill. Spectral color comes in M3 (filterbank, ADR 0001).
-    return vec4<f32>(0.30, 0.72, 0.82, 1.0);
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    // Per-column spectral color (ADR 0001), interpolated along time by the rasterizer.
+    return vec4<f32>(in.color, 1.0);
 }
 "#;
