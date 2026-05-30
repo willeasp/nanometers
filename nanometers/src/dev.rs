@@ -104,6 +104,11 @@ fn decode(path: &Path) -> Result<(Vec<StereoFrame>, u32), String> {
 /// waveform stays in lockstep with what you hear. Loops forever.
 pub fn spawn(path: PathBuf, mut producer: rtrb::Producer<StereoFrame>) {
     std::thread::spawn(move || {
+        // The whole file is decoded into memory up front (so playback loops cleanly). For a full
+        // song that's a few seconds — and noticeably slower in a debug build — so announce it
+        // immediately, otherwise the window looks frozen at "--.-" until decode finishes.
+        eprintln!("[dev-player] decoding {path:?} (full file; a few seconds — much faster with --release)...");
+        let t0 = std::time::Instant::now();
         let (frames, file_rate) = match decode(&path) {
             Ok(v) => v,
             Err(e) => {
@@ -112,8 +117,9 @@ pub fn spawn(path: PathBuf, mut producer: rtrb::Producer<StereoFrame>) {
             }
         };
         eprintln!(
-            "[dev-player] decoded {} frames @ {file_rate} Hz from {path:?}",
-            frames.len()
+            "[dev-player] decoded {} frames @ {file_rate} Hz in {:.1}s from {path:?}",
+            frames.len(),
+            t0.elapsed().as_secs_f32()
         );
 
         let host = cpal::default_host();
