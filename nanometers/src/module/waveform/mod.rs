@@ -21,8 +21,11 @@ use store::{BaseBin, ChannelEnvelope, merge};
 const BIN_SECONDS: f32 = 0.0005;
 /// Default viewable window (spec §6 — Module config later).
 const DEFAULT_WINDOW_SECONDS: f32 = 5.0;
-/// Vertical amplitude scale: sample ±1 reaches clip y ±0.9, leaving a small margin.
-const Y_SCALE: f32 = 0.9;
+/// Per-half amplitude scale. Each channel occupies half the column height (L top, R bottom,
+/// centered at clip y ±0.5); sample ±1 reaches ±0.45 within its half, leaving a small margin.
+const HALF_SCALE: f32 = 0.45;
+/// Clip-y center of each channel's half: L = +0.5 (top), R = −0.5 (bottom).
+const HALF_CENTER: [f32; 2] = [0.5, -0.5];
 /// Cap on columns built per frame (≈ one per pixel; the window is rarely wider).
 const MAX_COLUMNS: usize = 2048;
 
@@ -56,8 +59,10 @@ pub struct WaveformModule {
     verts: Vec<Vertex>,
 
     pipeline: wgpu::RenderPipeline,
+    // L contour occupies [0, count_l) of the buffer, R contour the next `count_r` vertices.
     vertex_buffer: wgpu::Buffer,
-    vertex_count: u32,
+    vertex_count_l: u32,
+    vertex_count_r: u32,
 }
 
 impl WaveformModule {
@@ -122,8 +127,8 @@ impl WaveformModule {
             cache: None,
         });
 
-        // 2 vertices per column (top/bottom curve), capped at MAX_COLUMNS.
-        let vbuf_bytes = (2 * MAX_COLUMNS * std::mem::size_of::<Vertex>()) as u64;
+        // 2 vertices per column per channel (top/bottom curve, L + R), capped at MAX_COLUMNS.
+        let vbuf_bytes = (4 * MAX_COLUMNS * std::mem::size_of::<Vertex>()) as u64;
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("waveform-vbuf"),
             contents: &vec![0u8; vbuf_bytes as usize],
@@ -140,10 +145,11 @@ impl WaveformModule {
             acc_sumsq: [0.0; 2],
             acc_count: 0,
             linear: vec![BaseBin::SILENCE; window_bins],
-            verts: Vec::with_capacity(2 * MAX_COLUMNS),
+            verts: Vec::with_capacity(4 * MAX_COLUMNS),
             pipeline,
             vertex_buffer,
-            vertex_count: 0,
+            vertex_count_l: 0,
+            vertex_count_r: 0,
         }
     }
 
@@ -208,7 +214,8 @@ impl Module for WaveformModule {
         viewport: Rect,
     ) {
         if self.samples_per_bin == 0 {
-            self.vertex_count = 0;
+            self.vertex_count_l = 0;
+            self.vertex_count_r = 0;
             return;
         }
 
@@ -220,31 +227,38 @@ impl Module for WaveformModule {
         }
 
         let columns = (viewport.w.round() as usize).clamp(1, MAX_COLUMNS);
-        self.verts.clear();
         let denom = (columns.max(2) - 1) as f32;
-        for c in 0..columns {
-            let lo = c * n / columns;
-            let hi = (((c + 1) * n / columns).max(lo + 1)).min(n);
-            let m = merge(&self.linear[lo..hi]);
-            // M1: mono contour — combine L and R into one full-height silhouette.
-            let top = m.env[0].max.max(m.env[1].max);
-            let bot = m.env[0].min.min(m.env[1].min);
-            let x = -1.0 + 2.0 * (c as f32) / denom;
-            self.verts.push(Vertex { pos: [x, top * Y_SCALE] });
-            self.verts.push(Vertex { pos: [x, bot * Y_SCALE] });
+        self.verts.clear();
+
+        // One triangle strip per channel: L in the top half (center +0.5), R in the bottom half
+        // (center −0.5) — within-Module layout only (spec §4). Build L's strip then R's; render
+        // issues a separate draw per range so the two silhouettes don't connect.
+        for ch in 0..2 {
+            for c in 0..columns {
+                let lo = c * n / columns;
+                let hi = (((c + 1) * n / columns).max(lo + 1)).min(n);
+                let env = merge(&self.linear[lo..hi]).env[ch];
+                let x = -1.0 + 2.0 * (c as f32) / denom;
+                let center = HALF_CENTER[ch];
+                self.verts.push(Vertex { pos: [x, center + env.max * HALF_SCALE] });
+                self.verts.push(Vertex { pos: [x, center + env.min * HALF_SCALE] });
+            }
         }
 
         queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&self.verts));
-        self.vertex_count = self.verts.len() as u32;
+        self.vertex_count_l = (2 * columns) as u32;
+        self.vertex_count_r = (2 * columns) as u32;
     }
 
     fn render(&mut self, rpass: &mut wgpu::RenderPass, _viewport: Rect) {
-        if self.vertex_count == 0 {
+        if self.vertex_count_l == 0 {
             return;
         }
         rpass.set_pipeline(&self.pipeline);
         rpass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-        rpass.draw(0..self.vertex_count, 0..1);
+        // L strip, then R strip — separate draws so the top/bottom contours stay disjoint.
+        rpass.draw(0..self.vertex_count_l, 0..1);
+        rpass.draw(self.vertex_count_l..(self.vertex_count_l + self.vertex_count_r), 0..1);
     }
 
     fn on_event(&mut self, _event: &baseview::Event, _viewport: Rect) -> EventStatus {
