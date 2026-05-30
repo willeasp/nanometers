@@ -65,14 +65,19 @@ The SPSC `Consumer` lives behind `Mutex<Consumer>` in `Shared` only because `rtr
 
 Per-channel `bind_group`s for the waveform renderer are deliberate: a previous version reused one uniform buffer and overwrote it between L and R draws, which doesn't work because `queue.write_buffer` is scheduled before the next submit, not interleaved with encoded commands. Both draws ended up reading the second write. Single line where two should be. See `feedback_wgpu_uniform_race` if needed.
 
-## Roadmap (curated, in priority order)
+This describes the code as it stands today (a single renderer). The in-progress rearchitecture into a multi-Module host — each Module owning its pipelines, the audio→GUI seam carrying one pushed sample stream — is designed in [`docs/adr/`](docs/adr/) (0002–0004), not here.
 
-1. **Glow / additive bloom on the waveform.** Multi-pass blur in wgpu: render the line to an offscreen RT, horizontal Gaussian, vertical Gaussian, additive composite over the background. This is the visual identity step.
-2. **Spectral coloring of the waveform.** Color each sample by its dominant frequency content — low freq → red, high freq → light/white. Implement via short rolling FFT windows (or zero-crossing-rate as a cheap proxy), map spectral centroid to a colormap, color the vertices in the same pipeline. Similar to spectrograph color-by-frequency but applied to a time-domain waveform.
-3. **Line thickness.** Metal's `LineStrip` is always 1 device pixel — on Retina that's 0.5 logical pixels and reads as subtle to the point of "did anything render?" Switch to triangle-strip generated quads or fragment-shader-distance-to-line.
-4. **Spectrum analyzer view.** FFT (`realfft`), log-frequency display, Blackman-Harris or Hann window, 50–75% overlap, ballistics on bin magnitudes.
-5. **Goniometer view** with phosphor fade-trail. Render-to-texture ping-pong: dim previous texture by α per frame, draw new XY points additively on top.
-6. **RMS** alongside peak.
+## Roadmap & architecture decisions
+
+In order of authority:
+
+- **Shared vocabulary** — [`CONTEXT.md`](CONTEXT.md). Use these terms; honor the `_Avoid_` lists.
+- **Decisions + rationale** — [`docs/adr/`](docs/adr/). Read the ADRs a task touches before starting.
+- **Per-Module build contracts** — [`docs/specs/`](docs/specs/).
+- **Priority-ordered roadmap** — the "Roadmap" section of [`README.md`](README.md).
+
+If anything in this file disagrees with those, this file is the one that's wrong — fix it here, keep
+the decision there.
 
 ## File layout
 
