@@ -52,7 +52,8 @@ Supporting terms:
 - **K-weighting** — the BS.1770 pre-filter applied before measuring: a high-shelf "head" boost
   plus a high-pass. Models perceived loudness. Coefficients depend on sample rate.
 - **Gating** — the two-stage rule that excludes quiet passages from the Integrated measurement:
-  an absolute gate at −70 LUFS, then a relative gate 10 LU below the ungated mean.
+  an absolute gate at −70 LUFS, then a relative gate 10 LU below the mean of the blocks that passed
+  the absolute gate (per BS.1770 — not the mean of all blocks).
 - **Reset** — the action that clears the Integrated measurement (and any held maxima) so it
   starts accumulating fresh.
 - **Target** — the reference loudness the meter scale is centered on (e.g. −23 LUFS for EBU,

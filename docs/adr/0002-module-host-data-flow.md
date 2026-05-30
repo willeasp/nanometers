@@ -16,13 +16,15 @@ computes what it needs on the GUI thread from that one stream.**
 - **Raw-signal ring** (the existing `rtrb` SPSC ring) — the literal interleaved sample stream. The
   audio thread pushes; the GUI thread is the single consumer.
 - **One consumer drains the ring once per frame** into a reused scratch slice and fans it out as
-  `FrameContext { new: &[StereoFrame], meas: &Measurements }` to every Module. Each Module **reduces
-  online**: it folds only that frame's new samples into its own GUI-side state and keeps nothing it
-  doesn't display.
-- The Waveform stores min / max / mean-square at a **0.5 ms base bin resolution** (derived from
-  sample rate), merging bins down to pixel columns at draw time. The Loudness Module runs K-weighting
-  + 100 ms blocks + gated Integrated entirely GUI-side, keeping its own block history. Column
-  resolution, viewable window, and gating are all chosen *inside the Module*.
+  `FrameContext { new: &[StereoFrame], meas: &Measurements, sample_rate, mono }` to every Module.
+  `sample_rate` and `mono` are host metadata (read once from the audio thread's `initialize`-time
+  values, constant per stream) the host puts on the context so Modules never reach into the audio
+  side for them. Each Module **reduces online**: it folds only that frame's new samples into its own
+  GUI-side state and keeps nothing it doesn't display.
+- The Waveform stores min / max / mean-square **per channel** at a **0.5 ms base bin resolution**
+  (derived from sample rate), merging bins down to pixel columns at draw time. The Loudness Module
+  runs K-weighting + 100 ms bins + gated Integrated entirely GUI-side, keeping its own bin history.
+  Column resolution, viewable window, and gating are all chosen *inside the Module*.
 
 `Measurements` is a second, minor channel: a small set of scalars the audio thread computes because
 they are cheap and broadly useful (today: the decaying peak `AtomicF32`). It is **not** where Module
@@ -95,6 +97,7 @@ Oscilloscope — so it doubles as the domain boundary between the two Modules.
 - **Loss is asymmetric and deliberate.** Visuals — and now meters — tolerate the ring's
   drop-on-starve under a stalled GUI; a reader must not "fix" the drop-on-starve behavior thinking
   it's a bug. Size the ring deep enough that a drop requires a hung window.
-- **Per-column store is shared with [0001].** Waveform columns carry min / max / mean-square (this
-  ADR) *plus* the 3 band-energy floats for spectral coloring (0001). Merging must stay associative —
+- **Per-column store is shared with [0001].** Waveform columns carry min / max / mean-square **per
+  channel** (L, R — this ADR) *plus* a **single shared set** of 3 band-energy floats for spectral
+  coloring (0001; from the mono sum, so one set, not per channel). Merging must stay associative —
   store mean-square, never RMS; average mean-squares and `sqrt` at draw.

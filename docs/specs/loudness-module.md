@@ -31,13 +31,16 @@ All measurement is GUI-side, folded online from each `FrameContext`'s new sample
 - **K-weighting** — two biquads in series per channel (stage 1 high-shelf "head" filter, stage 2
   high-pass / RLB curve). Coefficients are **sample-rate dependent** — compute them from the rate,
   rebuild on change. Filter state is per channel and must see samples in order (the ring is FIFO).
-- **Block unit** — accumulate K-weighted mean-square into **100 ms bins**, the shared atomic unit:
+- **Bin unit** — accumulate K-weighted mean-square into **100 ms bins**, the shared atomic unit
+  ("bin" = the 100 ms unit; "block" is reserved for the 400 ms gating block below):
   - **Momentary** = last **4 bins** (400 ms).
   - **Short-term** = last **30 bins** (3 s).
   - **Integrated** gating blocks = 400 ms windows every 100 ms (75 % overlap = 4 bins each).
-- **Integrated** — keep a **growing `Vec`** of per-block mean-squares since the last reset (cap at a
+- **Integrated** — keep a **growing `Vec`** of per-bin mean-squares since the last reset (cap at a
   24 h runaway guard). Two-stage gate, exact over the whole take: absolute gate at **−70 LUFS**, then
-  a relative gate at **mean − 10 LU**; average the survivors. Recompute on read (GUI thread, cheap).
+  a relative gate at **(mean of the absolute-gated blocks) − 10 LU** (per BS.1770 — the relative
+  threshold references the mean of blocks above −70 LUFS, not the mean of all blocks); average the
+  survivors. Recompute on read (GUI thread, cheap).
 - **Channel weighting** — from the declared input layout: **mono → one channel** (weight 1.0);
   **stereo → sum L + R**. ⚠️ The plugin duplicates a mono input to L = R in `process`; summing that
   reads **+3 LU hot**, so mono must measure a single channel. Do not skip this.
@@ -47,9 +50,10 @@ All measurement is GUI-side, folded online from each `FrameContext`'s new sample
 
 - Implements the `Module` trait ([0002]): `update(&FrameContext, &Queue)` folds new samples;
   `render(&mut RenderPass, viewport: Rect)` draws; `on_event(&Event, viewport) -> EventStatus`
-  handles the reset click.
-- Reads `sample_rate` and `mono` from small atomics in `Shared` (set by the audio thread in
-  `initialize`). While `sample_rate` is 0 (unknown), the meter idles.
+  handles the reset click; `save_config`/`load_config` persist its opaque config ([0003]).
+- Reads `sample_rate` and `mono` from the `FrameContext` ([0002]) — host metadata set from the audio
+  thread's `initialize`-time values, constant per stream; the Module never reaches into the audio
+  side. While `sample_rate` is 0 (unknown), the meter idles.
 
 ## Reset semantics
 

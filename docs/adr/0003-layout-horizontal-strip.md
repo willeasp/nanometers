@@ -18,10 +18,12 @@ Column { instance_id, module_type, width_fraction, config: <opaque, Module-owned
 
 The **host owns the list and the geometry** (order, fractions, which type sits where). Each
 **Module owns its own `config` blob** — Oscilloscope window length, Waveform zoom + band
-boundaries, Loudness target, etc. The host treats config as opaque bytes/JSON it hands back to the
-Module on load and asks for on save; it never reads the fields. This keeps the host ignorant of
-Module internals (same boundary discipline as 0002) and lets each Module — including the Loudness
-agent's — own its config schema without touching host code.
+boundaries, Loudness target, etc. The host treats config as **opaque bytes** it gets from the Module
+via `save_config(&self) -> Vec<u8>` and returns via `load_config(&mut self, &[u8])` — the Module
+trait's persistence pair, alongside `update`/`render` ([0002]) and `on_event` ([0004]) — and never
+reads the fields. This keeps the host ignorant of Module internals (same boundary discipline as
+0002) and lets each Module — including the Loudness agent's — own its config schema without touching
+host code.
 
 This `layout` joins `EditorState` (which today persists only window `size`) and rides the same
 nih-plug persist path into the host project, so a saved project restores its exact arrangement.
@@ -58,7 +60,7 @@ Fractions survive resize for free.
 - **Modules must not reference each other or assume placement.** "To the right of" is not part of any
   Module's definition — placement is purely the user's layout. The glossary was scrubbed of spatial
   relationships to enforce this.
-- **Hit-testing (a later input ADR) is trivial under this model:** a click maps to a column by x; a
+- **Hit-testing ([0004]) is trivial under this model:** a click maps to a column by x; a
   resize maps to the boundary grabbed between two columns. This simplicity is a reason the flat strip
   was chosen.
 - **Geometry feeds the viewport per [0002]:** each column's `width_fraction` × surface width is the

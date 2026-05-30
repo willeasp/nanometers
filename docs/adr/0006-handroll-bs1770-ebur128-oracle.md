@@ -5,12 +5,12 @@ EBU R128 — K-weighting, mean-square windowing, and the two-stage gated Integra
 mature `ebur128` crate already computes all of this correctly (plus LRA and true-peak) and is
 maintained. Per [0002] the measurement runs GUI-side, driven frame-by-frame off the ring drain,
 which both a hand-roll and the crate satisfy equally. The rest of the renderer is deliberately
-hand-rolled (the glow Oscilloscope), and the project values learning the domain and a lean shipped
+hand-rolled (the Oscilloscope renderer), and the project values learning the domain and a lean shipped
 binary — but loudness correctness, the gating especially, is fiddly and easy to get subtly wrong.
 
 ## The decision
 
-**Hand-roll the BS.1770 chain ourselves** — K-weighting biquads, 100 ms-block mean-square, the M / S
+**Hand-roll the BS.1770 chain ourselves** — K-weighting biquads, 100 ms-bin mean-square, the M / S
 sliding windows, the two-stage gated Integrated, and channel weighting — and **add `ebur128` as a
 dev-dependency only**, used in tests as an oracle: feed reference signals (a −23 LUFS sine, pink
 noise, gated silence cases) and assert our M / S / I match the crate within a tight tolerance

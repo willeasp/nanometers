@@ -21,7 +21,7 @@ Three routes:
   rasterize into an atlas, queue sections of text.
 - **Hand-rolled** — a bitmap atlas / `font8x8`, drawn as textured quads.
 
-The rest of the renderer is deliberately hand-rolled (the glow Oscilloscope), so taking a
+The rest of the renderer is deliberately hand-rolled (the Oscilloscope renderer), so taking a
 dependency here breaks that ethos. But glyph rasterization — atlas packing, hinting, kerning,
 subpixel AA — is the canonical GUI rabbit hole, and there is no payoff in owning it at our scale.
 A further constraint settles it: we want to *choose* a typeface, not *design* one, which rules out
