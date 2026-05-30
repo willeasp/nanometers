@@ -11,8 +11,11 @@ license = "MIT"
 repository = "https://github.com/willeasp/nanometers"
 
 [workspace.dependencies]
+# `assert_process_allocs` is NOT enabled here: it aborts on an allocation nih-plug's own
+# standalone wrapper makes on the first guarded `process` call, which would break the standalone
+# dev binary (and the dev-player). It's re-enabled for shipping builds via the `rt-assert` feature
+# (see nanometers/Cargo.toml), which build.sh passes to `cargo xtask bundle`.
 nih_plug = { git = "https://github.com/BillyDM/nih-plug.git", rev = "25d5e0a0ee4b76d4c8ccd5da2cf4cb200d56e8ab", features = [
-    "assert_process_allocs",
     "standalone",
 ] }
 nih_plug_xtask = { git = "https://github.com/BillyDM/nih-plug.git", rev = "25d5e0a0ee4b76d4c8ccd5da2cf4cb200d56e8ab" }

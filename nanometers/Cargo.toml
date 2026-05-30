@@ -15,8 +15,22 @@ crate-type = ["cdylib", "lib"]
 name = "nanometers"
 path = "src/standalone.rs"
 
+[features]
+# Dev-only file player: decode a song and stream it through the waveform without a loopback
+# device. Off by default so the shipped plugin never links symphonia/cpal.
+dev-player = ["dep:symphonia", "dep:cpal"]
+
+# Realtime-safety assertion: aborts if the audio thread allocates. Enabled only for shipping
+# builds (build.sh passes it to `cargo xtask bundle`) — nih-plug's standalone wrapper itself
+# trips it on the first process call, so it can't be on for `cargo run` of the standalone.
+rt-assert = ["nih_plug/assert_process_allocs"]
+
 [dependencies]
 nih_plug.workspace = true
+
+# Dev-player only. cpal pinned to nih-plug's version to avoid a duplicate native dependency.
+symphonia = { version = "0.5", optional = true, default-features = false, features = ["mp3"] }
+cpal = { version = "0.17", optional = true }
 
 baseview.workspace = true
 wgpu.workspace = true

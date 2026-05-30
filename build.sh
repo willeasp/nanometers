@@ -13,7 +13,9 @@ if [[ "${1:-}" == "--debug" ]]; then
 fi
 
 echo "==> [1/4] Building CLAP via cargo (${PROFILE})..."
-cargo xtask bundle nanometers ${CARGO_FLAGS}
+# rt-assert turns on nih-plug's audio-thread allocation guard for the shipped plugin. It's a
+# shipping-only feature because nih-plug's standalone wrapper trips it (see Cargo.toml).
+cargo xtask bundle nanometers ${CARGO_FLAGS} --features rt-assert
 
 echo "==> [2/4] Configuring AU wrapper (cmake)..."
 cmake -B auv2/build -S auv2 -DCMAKE_BUILD_TYPE=Release

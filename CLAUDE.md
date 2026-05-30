@@ -15,6 +15,26 @@ killall -9 AudioComponentRegistrar         # nudge macOS to re-register if auval
 
 `build.sh` does three things in order: `cargo xtask bundle` → CMake build of `auv2/` → copy the resulting `.clap` and `.component` into `~/Library/Audio/Plug-Ins/`. Always re-test in Logic with a NEW project (see Cache traps below).
 
+## Standalone dev-player (fastest way to watch the meter react to real audio)
+
+```sh
+NANO_DEV_FILE="/path/to/song.mp3" RUST_LOG=warn \
+  cargo run --features dev-player --bin nanometers -- --backend dummy
+```
+
+The `dev-player` feature (off by default, so the shipped plugin never links `symphonia`/`cpal`) decodes the file, plays it to the default output device, and streams the same samples into the waveform ring — looping forever. Any `symphonia` format (mp3/flac/wav/aac). It runs on the `dummy` backend so nih-plug doesn't also try to grab an audio device; `src/dev.rs` owns the output stream and the ring producer outright (`samples_tx` becomes `None` in `process`). No BlackHole, no DAW. Audio goes to the system default output — if you hear nothing, check it's not routed to idle Bluetooth earbuds (the device name is logged at startup).
+
+Plain mic input also works but is fiddlier — nih-plug's CPAL standalone won't connect an input unless asked, the laptop mic is mono, and the requested sample rate must match the device:
+
+```sh
+cargo run --bin nanometers -- --audio-layout 2 \
+  --input-device "MacBook Pro-mikrofon" --sample-rate 44100 --period-size 1024
+```
+
+`--audio-layout 2` selects the mono-input layout (the second entry in `AUDIO_IO_LAYOUTS`); `--input-device ""` lists devices. Default sample rate is 48 kHz, so on a 44.1 kHz device you get a `Received 558 samples, while the configured buffer size is 512` panic unless you pass `--sample-rate 44100`.
+
+**`assert_process_allocs` / `rt-assert`.** nih-plug's audio-thread allocation guard aborts the standalone on startup — nih-plug's *own* standalone wrapper allocates on the first guarded `process` call (both cpal and dummy backends), so it's nothing in our code. It is therefore NOT a default feature. It's re-enabled only for shipping builds via the local `rt-assert` feature, which `build.sh` passes to `cargo xtask bundle`. Don't move it back into the always-on `nih_plug` features or every `cargo run` of the standalone (and the dev-player) will abort with `Memory allocation of N bytes failed`.
+
 ## Working style
 
 - **Push back, don't validate.** If a proposal is flawed, name the flaw. User explicitly wants this over agreeable nodding.
@@ -60,7 +80,8 @@ Per-channel `bind_group`s for the waveform renderer are deliberate: a previous v
 nanometers/
 ├── nanometers/             # plugin crate
 │   ├── src/lib.rs          # Plugin/Params/Shared — audio-thread side
-│   └── src/editor.rs       # Editor/RenderWindow/WaveformRenderer — GUI-thread side
+│   ├── src/editor.rs       # Editor/RenderWindow/WaveformRenderer — GUI-thread side
+│   └── src/dev.rs          # dev-player: file decode → output + waveform ring (feature-gated)
 ├── xtask/                  # `cargo xtask bundle ...` shim around nih_plug_xtask
 ├── auv2/CMakeLists.txt     # clap-wrapper invocation that emits the AU bundle
 └── build.sh                # cargo bundle → cmake → install

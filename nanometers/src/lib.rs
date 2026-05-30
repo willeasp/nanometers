@@ -15,6 +15,9 @@ use std::{
 mod editor;
 use editor::{EditorState, NanometersEditor};
 
+#[cfg(feature = "dev-player")]
+mod dev;
+
 /// Window default, in logical pixels.
 pub const INITIAL_WIDTH: u32 = 720;
 pub const INITIAL_HEIGHT: u32 = 420;
@@ -43,8 +46,10 @@ pub struct Nanometers {
     params: Arc<NanometersParams>,
     shared: Arc<Shared>,
 
-    /// Audio-thread-owned producer for the sample ring. Wait-free push.
-    samples_tx: rtrb::Producer<StereoFrame>,
+    /// Audio-thread-owned producer for the sample ring. Wait-free push. `Option` so the
+    /// dev-player (when enabled) can take ownership and feed the ring from a decoded file
+    /// instead — rtrb is single-producer, so only one side may hold this.
+    samples_tx: Option<rtrb::Producer<StereoFrame>>,
 
     /// Per-sample multiplicative decay for peak meter ballistics. Computed in `initialize`
     /// from the host's sample rate so the visible decay is independent of rate.
@@ -67,7 +72,7 @@ impl Default for Nanometers {
                 peak_r: AtomicF32::new(0.0),
                 samples_rx: Mutex::new(samples_rx),
             }),
-            samples_tx,
+            samples_tx: Some(samples_tx),
             peak_decay_per_sample: 1.0,
         }
     }
@@ -135,6 +140,17 @@ impl Plugin for Nanometers {
         // Solve `decay^N = 0.25` for the per-sample factor where N = sr * decay_ms / 1000.
         let samples_for_12db_drop = buffer_config.sample_rate as f64 * PEAK_DECAY_MS / 1000.0;
         self.peak_decay_per_sample = 0.25_f64.powf(samples_for_12db_drop.recip()) as f32;
+
+        // Dev-only: if a song was requested, hand the ring producer to the file player thread. It
+        // takes over feeding the waveform (and plays the file out loud), so `process` stops
+        // pushing — see the `Option` guard there. Run with `--backend dummy`.
+        #[cfg(feature = "dev-player")]
+        if let Ok(path) = std::env::var("NANO_DEV_FILE") {
+            if let Some(producer) = self.samples_tx.take() {
+                dev::spawn(std::path::PathBuf::from(path), producer);
+            }
+        }
+
         true
     }
 
@@ -169,7 +185,10 @@ impl Plugin for Nanometers {
 
             // Wait-free push. If the ring is somehow full (GUI starved for ~700 ms) we drop
             // the oldest-still-unread frame by discarding the new one. Acceptable for a meter.
-            let _ = self.samples_tx.push([l, r]);
+            // `samples_tx` is `None` only when the dev-player owns the ring instead.
+            if let Some(tx) = self.samples_tx.as_mut() {
+                let _ = tx.push([l, r]);
+            }
         }
 
         self.shared.peak_l.store(peak_l, Ordering::Relaxed);
