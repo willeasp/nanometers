@@ -306,8 +306,12 @@ impl Module for WaveformModule {
         }
 
         let columns = (viewport.w.round() as usize).clamp(1, MAX_COLUMNS);
-        let denom = (columns.max(2) - 1) as f32;
         let cols = self.store.build_columns(columns);
+        // Place column c at the CENTER of pixel c in the `columns`-wide offscreen: x = (2c+1)/N − 1.
+        // This keeps columns exactly on the pixel grid (vs spanning edge-to-edge over N−1 intervals,
+        // which drifts ~1px across the width), so a whole-column scroll is a clean whole-pixel shift
+        // and a feature stops shimmering/sliding as it scrolls.
+        let inv_cols = 1.0 / columns as f32;
 
         // One triangle strip per channel: L top half (center +0.5), R bottom half (−0.5) — spec §4.
         self.verts.clear();
@@ -320,7 +324,7 @@ impl Module for WaveformModule {
                     hue[1] + (1.0 - hue[1]) * COLOR_WHITE_MIX,
                     hue[2] + (1.0 - hue[2]) * COLOR_WHITE_MIX,
                 ];
-                let x = -1.0 + 2.0 * (c as f32) / denom;
+                let x = (2.0 * c as f32 + 1.0) * inv_cols - 1.0;
                 let center = HALF_CENTER[ch];
                 self.verts.push(Vertex { pos: [x, center + env.max * HALF_SCALE], color });
                 self.verts.push(Vertex { pos: [x, center + env.min * HALF_SCALE], color });
