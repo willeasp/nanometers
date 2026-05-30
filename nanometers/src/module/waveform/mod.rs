@@ -37,12 +37,31 @@ const MAX_COLUMNS: usize = 2048;
 const COLOR_WHITE_MIX: f32 = 0.18;
 /// MSAA sample count for the Waveform's own offscreen target (0007 — host pass stays single-sample).
 const MSAA_SAMPLES: u32 = 4;
+/// Each display column is this many physical px wide. ≥2 px band-limits the contour so a sharp 1px
+/// feature can't pulse in brightness as the sub-pixel scroll offset sweeps (a 1px feature at a
+/// half-pixel offset splits its energy across two pixels → dimmer; a 2px feature keeps a
+/// full-brightness leading pixel at any offset). The columns-wide offscreen is linearly upscaled
+/// to the viewport at composite.
+const PIXELS_PER_COLUMN: f32 = 2.0;
+/// Scroll-smoothing time constant (seconds). The per-frame EMA coefficient is derived from this and
+/// the measured frame dt, so the smoothing (which low-passes the ±20% per-frame sample-drain
+/// jitter into a constant visual velocity) is frame-rate-independent — same feel at 60 and 120 Hz.
+const SCROLL_TAU: f64 = 0.04;
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 struct Vertex {
     pos: [f32; 2],
     color: [f32; 3],
+}
+
+/// Composite uniform: sub-pixel horizontal sampling offset (in UV) that slides the resolved
+/// contour smoothly between whole-column steps. `x_offset` is added to the sampled UV.x.
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+struct CompositeUniform {
+    x_offset: f32,
+    _pad: [f32; 3],
 }
 
 /// Per-viewport-size offscreen render target: a 4× MSAA color texture the contour draws into, plus
@@ -68,9 +87,20 @@ pub struct WaveformModule {
     // Composite pipeline (samples the resolved offscreen texture into the host's shared pass).
     composite_pipeline: wgpu::RenderPipeline,
     composite_layout: wgpu::BindGroupLayout,
+    composite_uniform: wgpu::Buffer,
     sampler: wgpu::Sampler,
     format: wgpu::TextureFormat,
     offscreen: Option<Offscreen>,
+
+    /// Smoothed scroll position in display-column units (low-passed target); its fraction is the
+    /// sub-pixel composite offset. `scroll_init` snaps it to the true position when uninitialized
+    /// or after a scale change (column count or sample rate), so there's no sweep across the
+    /// discontinuity. `last_*` detect those scale changes; `last_frame` clocks the dt-scaled EMA.
+    display_pos: f64,
+    scroll_init: bool,
+    last_columns: usize,
+    last_sample_rate: f32,
+    last_frame: Option<std::time::Instant>,
 }
 
 impl WaveformModule {
@@ -175,6 +205,16 @@ impl WaveformModule {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
         let composite_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -215,6 +255,11 @@ impl WaveformModule {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
+        let composite_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("waveform-composite-uniform"),
+            contents: bytemuck::bytes_of(&CompositeUniform { x_offset: 0.0, _pad: [0.0; 3] }),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
 
         Self {
             store,
@@ -225,9 +270,15 @@ impl WaveformModule {
             verts: Vec::with_capacity(4 * MAX_COLUMNS),
             composite_pipeline,
             composite_layout,
+            composite_uniform,
             sampler,
             format,
             offscreen: None,
+            display_pos: 0.0,
+            scroll_init: false,
+            last_columns: 0,
+            last_sample_rate: 0.0,
+            last_frame: None,
         }
     }
 
@@ -275,6 +326,10 @@ impl WaveformModule {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&self.sampler),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.composite_uniform.as_entire_binding(),
+                },
             ],
         });
         self.offscreen = Some(Offscreen { width: w, height: h, msaa_view, resolved_view, composite_bind_group });
@@ -283,6 +338,10 @@ impl WaveformModule {
 
 impl Module for WaveformModule {
     fn update(&mut self, ctx: &FrameContext, _queue: &wgpu::Queue) {
+        if ctx.sample_rate != self.last_sample_rate {
+            self.last_sample_rate = ctx.sample_rate;
+            self.scroll_init = false; // store clears its clocks on a rate change → re-anchor scroll
+        }
         self.store.set_sample_rate(ctx.sample_rate);
         if !self.store.is_active() {
             return;
@@ -305,12 +364,43 @@ impl Module for WaveformModule {
             return;
         }
 
-        let columns = (viewport.w.round() as usize).clamp(1, MAX_COLUMNS);
-        let cols = self.store.build_columns(columns);
-        // Place column c at the CENTER of pixel c in the `columns`-wide offscreen: x = (2c+1)/N − 1.
-        // This keeps columns exactly on the pixel grid (vs spanning edge-to-edge over N−1 intervals,
-        // which drifts ~1px across the width), so a whole-column scroll is a clean whole-pixel shift
-        // and a feature stops shimmering/sliding as it scrolls.
+        // Band-limit: ~2 px per column so the contour has no 1px features to pulse under sub-pixel
+        // scroll. The columns-wide offscreen is upscaled to the viewport at composite.
+        let columns =
+            ((viewport.w / PIXELS_PER_COLUMN).round() as usize).clamp(1, MAX_COLUMNS);
+        if columns != self.last_columns {
+            self.last_columns = columns;
+            self.scroll_init = false; // column scale (and thus the position unit) changed → re-anchor
+        }
+        let bpc = (self.store.window_bins() / columns).max(1);
+
+        // Smooth the scroll position toward the true (sample-derived) position with a dt-scaled EMA
+        // so it's frame-rate-independent. The integer part anchors which columns we render; the
+        // fraction is the sub-pixel composite offset. Snapping when uninitialized/after a scale
+        // change avoids a sweep across the discontinuity.
+        let now = std::time::Instant::now();
+        let dt = self
+            .last_frame
+            .map(|t| (now - t).as_secs_f64())
+            .unwrap_or(1.0 / 60.0);
+        self.last_frame = Some(now);
+        let target = self.store.scroll_position_cols(columns);
+        if self.scroll_init {
+            let alpha = 1.0 - (-dt / SCROLL_TAU).exp();
+            self.display_pos += (target - self.display_pos) * alpha;
+        } else {
+            self.display_pos = target;
+            self.scroll_init = true;
+        }
+        // Clamp the rightmost drawn column to the last fully-closed one so the live edge never shows
+        // a partial/empty column (esp. on the snap frame). frac stays the sub-pixel of display_pos.
+        let rightmost_col = (self.display_pos.floor() as i64).min(self.store.last_full_column(bpc));
+        let frac = (self.display_pos - self.display_pos.floor()) as f32; // [0, 1) columns
+
+        let cols = self.store.build_columns(columns, bpc, rightmost_col);
+        // Place column c at the CENTER of pixel c in the `columns`-wide offscreen: x = (2c+1)/N − 1,
+        // keeping columns exactly on the pixel grid. The sub-pixel scroll comes from the composite
+        // offset below, not from moving these vertices (which would re-introduce shimmer).
         let inv_cols = 1.0 / columns as f32;
 
         // One triangle strip per channel: L top half (center +0.5), R bottom half (−0.5) — spec §4.
@@ -334,8 +424,18 @@ impl Module for WaveformModule {
         self.vertex_count_l = (2 * columns) as u32;
         self.vertex_count_r = (2 * columns) as u32;
 
+        // Sub-pixel scroll: shift the composite sample left by `frac` of one column (= one pixel).
+        // Linear filtering interpolates → smooth motion between whole-column steps.
+        queue.write_buffer(
+            &self.composite_uniform,
+            0,
+            bytemuck::bytes_of(&CompositeUniform { x_offset: frac * inv_cols, _pad: [0.0; 3] }),
+        );
+
         // Offscreen MSAA pass: draw both contour strips, resolved to a single-sample texture (0007).
-        self.ensure_offscreen(device, viewport.w.round() as u32, viewport.h.round() as u32);
+        // The offscreen is `columns` wide (1 texel/column); the composite upscales it to the
+        // viewport, so a column becomes PIXELS_PER_COLUMN px and there are no 1px features to pulse.
+        self.ensure_offscreen(device, columns as u32, viewport.h.round() as u32);
         let off = self.offscreen.as_ref().unwrap();
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("waveform-offscreen"),
@@ -404,7 +504,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 "#;
 
 // Full-screen triangle that samples the resolved offscreen contour. Three verts cover the viewport.
+// The sub-pixel scroll offset shifts the sampled UV.x left (clamp sampler smears <1px at the edges).
 const COMPOSITE_WGSL: &str = r#"
+struct Uniforms { x_offset: f32 };
+@group(0) @binding(2) var<uniform> u: Uniforms;
+
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
@@ -416,7 +520,9 @@ fn vs_main(@builtin(vertex_index) idx: u32) -> VsOut {
     var uv = vec2<f32>(f32((idx << 1u) & 2u), f32(idx & 2u));
     var o: VsOut;
     o.clip = vec4<f32>(uv * 2.0 - 1.0, 0.0, 1.0);
-    o.uv = vec2<f32>(uv.x, 1.0 - uv.y); // flip Y: framebuffer origin top-left
+    // Shift sampling right by x_offset (content appears to scroll left), and flip Y for the
+    // framebuffer's top-left origin.
+    o.uv = vec2<f32>(uv.x + u.x_offset, 1.0 - uv.y);
     return o;
 }
 
