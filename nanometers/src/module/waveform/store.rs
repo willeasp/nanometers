@@ -10,6 +10,14 @@
 //! shared** set of 3 band mean-squares from the mono sum (ADR 0001 — one set, not per channel).
 //! Mean-square is stored, never RMS: averaging RMS isn't associative, so we average mean-squares
 //! across a column and take the `sqrt` only at draw (ADR 0002).
+//!
+//! `WaveStore` owns this state (ring + accumulator + filterbank) and the GPU-free column building,
+//! so it's unit-testable without a wgpu device — `WaveformModule` is a thin GPU wrapper over it.
+
+use super::color::Filterbank;
+
+/// Base-bin width (ADR 0002). Sample-rate-independent: 0.5 ms → 2000 bins/sec.
+pub const BIN_SECONDS: f32 = 0.0005;
 
 /// Per-channel amplitude envelope over a bin.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -76,6 +84,153 @@ pub fn merge(bins: &[BaseBin]) -> BaseBin {
     out
 }
 
+/// The Waveform's GPU-free state: the base-bin ring, the in-progress accumulator, the 3-band
+/// filterbank, and the column building. Folds samples in, hands back merged display columns.
+///
+/// Display columns are anchored to ABSOLUTE bin boundaries (multiples of bins-per-column) via the
+/// monotonic `bins_closed` counter — so a column covers a fixed absolute bin range and its merged
+/// value is frozen once computed. A feature therefore keeps constant height as it scrolls; the grid
+/// just shifts by whole columns. (`tests::feature_keeps_constant_height_as_it_scrolls` pins this.)
+pub struct WaveStore {
+    bins: Vec<BaseBin>,
+    bins_closed: u64,
+
+    sample_rate: f32,
+    samples_per_bin: usize,
+    band_low_hz: f32,
+    band_high_hz: f32,
+    filterbank: Option<Filterbank>,
+
+    acc_min: [f32; 2],
+    acc_max: [f32; 2],
+    acc_sumsq: [f32; 2],
+    acc_band_sumsq: [f32; 3],
+    acc_count: usize,
+
+    linear: Vec<BaseBin>, // reused scratch for oldest→newest linearization
+}
+
+impl WaveStore {
+    pub fn new(window_bins: usize, band_low_hz: f32, band_high_hz: f32) -> Self {
+        let window_bins = window_bins.max(1);
+        Self {
+            bins: vec![BaseBin::SILENCE; window_bins],
+            bins_closed: 0,
+            sample_rate: 0.0,
+            samples_per_bin: 0,
+            band_low_hz,
+            band_high_hz,
+            filterbank: None,
+            acc_min: [f32::INFINITY; 2],
+            acc_max: [f32::NEG_INFINITY; 2],
+            acc_sumsq: [0.0; 2],
+            acc_band_sumsq: [0.0; 3],
+            acc_count: 0,
+            linear: vec![BaseBin::SILENCE; window_bins],
+        }
+    }
+
+    /// `true` once a sample rate is known and samples can be folded.
+    pub fn is_active(&self) -> bool {
+        self.samples_per_bin > 0
+    }
+
+    /// (Re)configure for a sample rate — recomputes bins size + rebuilds the filterbank. No-op if
+    /// unchanged. A rate of 0 leaves the store idle.
+    pub fn set_sample_rate(&mut self, sample_rate: f32) {
+        if sample_rate <= 0.0 || sample_rate == self.sample_rate {
+            return;
+        }
+        self.sample_rate = sample_rate;
+        self.samples_per_bin = (sample_rate * BIN_SECONDS).round().max(1.0) as usize;
+        self.filterbank = Some(Filterbank::new(sample_rate, self.band_low_hz, self.band_high_hz));
+        self.reset_accumulator();
+    }
+
+    fn reset_accumulator(&mut self) {
+        self.acc_min = [f32::INFINITY; 2];
+        self.acc_max = [f32::NEG_INFINITY; 2];
+        self.acc_sumsq = [0.0; 2];
+        self.acc_band_sumsq = [0.0; 3];
+        self.acc_count = 0;
+    }
+
+    /// Fold one stereo frame into the current base bin (closing it on a 0.5 ms boundary).
+    pub fn push(&mut self, l: f32, r: f32) {
+        if self.samples_per_bin == 0 {
+            return;
+        }
+        // Spectral color (ADR 0001): filter the mono sum, accumulate per-band power.
+        let mono = 0.5 * (l + r);
+        let bands = self
+            .filterbank
+            .as_mut()
+            .map(|fb| fb.process(mono))
+            .unwrap_or([0.0; 3]);
+
+        self.acc_min[0] = self.acc_min[0].min(l);
+        self.acc_max[0] = self.acc_max[0].max(l);
+        self.acc_sumsq[0] += l * l;
+        self.acc_min[1] = self.acc_min[1].min(r);
+        self.acc_max[1] = self.acc_max[1].max(r);
+        self.acc_sumsq[1] += r * r;
+        for k in 0..3 {
+            self.acc_band_sumsq[k] += bands[k] * bands[k];
+        }
+        self.acc_count += 1;
+        if self.acc_count >= self.samples_per_bin {
+            self.close_bin();
+        }
+    }
+
+    fn close_bin(&mut self) {
+        let n = self.acc_count.max(1) as f32;
+        let env = [
+            ChannelEnvelope { min: self.acc_min[0], max: self.acc_max[0], mean_square: self.acc_sumsq[0] / n },
+            ChannelEnvelope { min: self.acc_min[1], max: self.acc_max[1], mean_square: self.acc_sumsq[1] / n },
+        ];
+        let band_ms = [
+            self.acc_band_sumsq[0] / n,
+            self.acc_band_sumsq[1] / n,
+            self.acc_band_sumsq[2] / n,
+        ];
+        let pos = (self.bins_closed % self.bins.len() as u64) as usize;
+        self.bins[pos] = BaseBin { env, band_ms };
+        self.bins_closed = self.bins_closed.wrapping_add(1);
+        self.reset_accumulator();
+    }
+
+    /// Merge the stored bins into `columns` display columns (oldest→newest), anchored to absolute
+    /// bin boundaries so a feature's column value is stable across scroll positions.
+    pub fn build_columns(&mut self, columns: usize) -> Vec<BaseBin> {
+        let columns = columns.max(1);
+        let n = self.bins.len();
+        let total = self.bins_closed;
+        let head = (total % n as u64) as usize;
+        for i in 0..n {
+            self.linear[i] = self.bins[(head + i) % n];
+        }
+
+        let bpc = (n / columns).max(1) as i128;
+        let win_start = total as i128 - n as i128; // oldest absolute bin still in the ring
+        let last_boundary = ((total as i128) / bpc) * bpc; // bpc-aligned right edge
+
+        let mut out = Vec::with_capacity(columns);
+        for c in 0..columns {
+            let end_abs = last_boundary - ((columns - 1 - c) as i128) * bpc;
+            let start_abs = end_abs - bpc;
+            let lo = start_abs.max(win_start);
+            let hi = end_abs.min(total as i128);
+            out.push(if lo < hi {
+                merge(&self.linear[(lo - win_start) as usize..(hi - win_start) as usize])
+            } else {
+                BaseBin::SILENCE
+            });
+        }
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -101,6 +256,60 @@ mod tests {
     #[test]
     fn merge_empty_is_silence() {
         assert_eq!(merge(&[]), BaseBin::SILENCE);
+    }
+
+    /// Feed a distinctive loud "kick", capture its display column's height, scroll it left by
+    /// feeding more silence, and assert the SAME kick has the SAME height at the new position —
+    /// the property the absolute-bin anchoring is supposed to guarantee (user-requested).
+    #[test]
+    fn feature_keeps_constant_height_as_it_scrolls() {
+        const SR: f32 = 48000.0;
+        const COLUMNS: usize = 200;
+        let spb = (SR * BIN_SECONDS).round() as usize; // samples per 0.5 ms bin
+        let mut s = WaveStore::new(2000, 250.0, 4000.0); // 1 s window
+        s.set_sample_rate(SR);
+
+        let silence = |s: &mut WaveStore, bins: usize| {
+            for _ in 0..bins * spb {
+                s.push(0.0, 0.0);
+            }
+        };
+
+        silence(&mut s, 100);
+        // The kick: a few full-scale bins, distinct from the silence around it.
+        for _ in 0..6 * spb {
+            s.push(0.9, -0.9);
+        }
+        silence(&mut s, 40);
+
+        let cols1 = s.build_columns(COLUMNS);
+        let (idx1, kick1) = cols1
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.env[0].max.partial_cmp(&b.1.env[0].max).unwrap())
+            .unwrap();
+        let h1 = kick1.env[0].max;
+        assert!(h1 > 0.5, "kick should be a tall column, got {h1}");
+
+        // Scroll it well to the left by feeding a lot more silence, then rebuild.
+        silence(&mut s, 300);
+        let cols2 = s.build_columns(COLUMNS);
+        let (idx2, kick2) = cols2
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.env[0].max.partial_cmp(&b.1.env[0].max).unwrap())
+            .unwrap();
+
+        assert!(idx2 < idx1, "kick must have scrolled left: {idx1} -> {idx2}");
+        assert!(
+            (kick1.env[0].max - kick2.env[0].max).abs() < 1e-6
+                && (kick1.env[0].min - kick2.env[0].min).abs() < 1e-6,
+            "kick height must be stable as it scrolls: was max={} min={}, now max={} min={}",
+            kick1.env[0].max,
+            kick1.env[0].min,
+            kick2.env[0].max,
+            kick2.env[0].min
+        );
     }
 
     #[test]

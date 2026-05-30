@@ -1,12 +1,14 @@
 //! Waveform Module (ADRs 0001 / 0007 + `docs/specs/waveform-module.md`).
 //!
-//! A scrolling amplitude-envelope view: per channel, a filled min/max contour, newest sample at
-//! the right edge. Replaces the fake glow on the Oscilloscope (0007). Built in milestones (spec §9):
-//! M1 here is the mono, monochrome, scrolling contour fill on a fixed window.
+//! A scrolling amplitude-envelope view: per channel, a filled min/max contour, spectrally colored,
+//! newest sample at the right edge. Replaces the fake glow on the Oscilloscope (0007).
 //!
-//! Threading: samples fold into 0.5 ms base bins in `update`; the per-column triangle-strip geometry
-//! is (re)built in `prepare` (which gets the viewport width → column count) and uploaded; `render`
-//! draws it. The host sets viewport+scissor, so geometry is emitted in plain [-1, 1] clip space.
+//! Split of concerns: [`store::WaveStore`] owns the GPU-free state (base-bin ring, accumulator,
+//! filterbank) and the column building (unit-tested, incl. scroll stability); this module is the
+//! thin GPU wrapper. `update` folds `ctx.new` into the store; `prepare` builds the per-column
+//! contour geometry for the viewport width into an offscreen MSAA target and resolves it; `render`
+//! composites that resolved texture into the column. Geometry is plain [-1, 1] clip space — the
+//! host sets viewport+scissor.
 
 pub mod color;
 pub mod store;
@@ -16,11 +18,9 @@ use std::borrow::Cow;
 use wgpu::util::DeviceExt;
 
 use super::{EventStatus, FrameContext, Module, Rect};
-use color::{Filterbank, band_color};
-use store::{BaseBin, ChannelEnvelope, merge};
+use color::band_color;
+use store::WaveStore;
 
-/// Base-bin width (ADR 0002). Sample-rate-independent: 0.5 ms → 2000 bins/sec.
-const BIN_SECONDS: f32 = 0.0005;
 /// 3-band filterbank crossovers (ADR 0001; dev-player tuning later, spec §6/§10).
 const BAND_LOW_HZ: f32 = 250.0;
 const BAND_HIGH_HZ: f32 = 4000.0;
@@ -34,8 +34,9 @@ const HALF_CENTER: [f32; 2] = [0.5, -0.5];
 /// Cap on columns built per frame (≈ one per pixel; the window is rarely wider).
 const MAX_COLUMNS: usize = 2048;
 /// Gentle global desaturation: mix each column color this far toward white (ADR 0001 dev-tuning).
-/// 0 = full saturation, 1 = white. Softens the palette without changing hues.
 const COLOR_WHITE_MIX: f32 = 0.18;
+/// MSAA sample count for the Waveform's own offscreen target (0007 — host pass stays single-sample).
+const MSAA_SAMPLES: u32 = 4;
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -44,40 +45,32 @@ struct Vertex {
     color: [f32; 3],
 }
 
+/// Per-viewport-size offscreen render target: a 4× MSAA color texture the contour draws into, plus
+/// the resolved single-sample texture + a bind group to sample it when compositing (ADR 0007).
+struct Offscreen {
+    width: u32,
+    height: u32,
+    msaa_view: wgpu::TextureView,
+    resolved_view: wgpu::TextureView,
+    composite_bind_group: wgpu::BindGroup,
+}
+
 pub struct WaveformModule {
-    // The viewable window is captured as the ring length (`bins.len()`). The `window_seconds`
-    // config value + persistence land in Phase F (spec §6).
+    store: WaveStore,
 
-    // Derived from the host sample rate; 0 until the first non-zero `FrameContext::sample_rate`.
-    sample_rate: f32,
-    samples_per_bin: usize,
-
-    // 3-band filterbank on the mono sum (ADR 0001), rebuilt when the sample rate changes.
-    filterbank: Option<Filterbank>,
-
-    // Fixed-length ring of base bins (length = window_seconds / 0.5 ms, sample-rate-independent).
-    // `bins_closed` is the monotonic total ever closed; the ring slot for absolute bin `a` is
-    // `a % bins.len()`. Display columns are anchored to ABSOLUTE bin boundaries (see `prepare`) so
-    // a column's value is frozen once computed — that's what kills the scroll jitter.
-    bins: Vec<BaseBin>,
-    bins_closed: u64,
-
-    // In-progress base bin accumulator (per channel: min/max/Σsquares + a sample counter).
-    acc_min: [f32; 2],
-    acc_max: [f32; 2],
-    acc_sumsq: [f32; 2],
-    acc_band_sumsq: [f32; 3],
-    acc_count: usize,
-
-    // Per-frame scratch reused to avoid allocation.
-    linear: Vec<BaseBin>,
-    verts: Vec<Vertex>,
-
-    pipeline: wgpu::RenderPipeline,
-    // L contour occupies [0, count_l) of the buffer, R contour the next `count_r` vertices.
+    // Contour pipeline (draws into the offscreen MSAA target).
+    contour_pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
     vertex_count_l: u32,
     vertex_count_r: u32,
+    verts: Vec<Vertex>,
+
+    // Composite pipeline (samples the resolved offscreen texture into the host's shared pass).
+    composite_pipeline: wgpu::RenderPipeline,
+    composite_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    format: wgpu::TextureFormat,
+    offscreen: Option<Offscreen>,
 }
 
 impl WaveformModule {
@@ -90,19 +83,19 @@ impl WaveformModule {
         format: wgpu::TextureFormat,
         window_seconds: f32,
     ) -> Self {
-        let window_bins = (window_seconds / BIN_SECONDS).round().max(1.0) as usize;
+        let window_bins = (window_seconds / store::BIN_SECONDS).round().max(1.0) as usize;
+        let store = WaveStore::new(window_bins, BAND_LOW_HZ, BAND_HIGH_HZ);
 
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("waveform-shader"),
+        // ── Contour pipeline: colored triangle strips, rendered MSAA into the offscreen target ──
+        let contour_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("waveform-contour-shader"),
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(CONTOUR_WGSL)),
         });
-
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("waveform-pl"),
+        let contour_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("waveform-contour-pl"),
             bind_group_layouts: &[],
             immediate_size: 0,
         });
-
         let vertex_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Vertex>() as u64,
             step_mode: wgpu::VertexStepMode::Vertex,
@@ -119,23 +112,22 @@ impl WaveformModule {
                 },
             ],
         };
-
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("waveform-pipeline"),
-            layout: Some(&pipeline_layout),
+        let contour_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("waveform-contour-pipeline"),
+            layout: Some(&contour_pl),
             vertex: wgpu::VertexState {
-                module: &shader,
+                module: &contour_shader,
                 entry_point: Some("vs_main"),
                 buffers: &[vertex_layout],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
-                module: &shader,
+                module: &contour_shader,
                 entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
-                    blend: None, // opaque fill over the cleared background
+                    blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
@@ -144,12 +136,14 @@ impl WaveformModule {
                 ..Default::default()
             },
             depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
+            multisample: wgpu::MultisampleState {
+                count: MSAA_SAMPLES,
+                ..Default::default()
+            },
             multiview_mask: None,
             cache: None,
         });
 
-        // 2 vertices per column per channel (top/bottom curve, L + R), capped at MAX_COLUMNS.
         let vbuf_bytes = (4 * MAX_COLUMNS * std::mem::size_of::<Vertex>()) as u64;
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("waveform-vbuf"),
@@ -157,151 +151,169 @@ impl WaveformModule {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
 
+        // ── Composite pipeline: full-viewport quad sampling the resolved offscreen texture ──
+        let composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("waveform-composite-shader"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(COMPOSITE_WGSL)),
+        });
+        let composite_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("waveform-composite-bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let composite_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("waveform-composite-pl"),
+            bind_group_layouts: &[Some(&composite_layout)],
+            immediate_size: 0,
+        });
+        let composite_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("waveform-composite-pipeline"),
+            layout: Some(&composite_pl),
+            vertex: wgpu::VertexState {
+                module: &composite_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &composite_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    // Premultiplied-ish alpha so the transparent offscreen background lets the
+                    // host clear-color show through and only the contour composites.
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("waveform-sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
         Self {
-            sample_rate: 0.0,
-            samples_per_bin: 0,
-            filterbank: None,
-            bins: vec![BaseBin::SILENCE; window_bins],
-            bins_closed: 0,
-            acc_min: [f32::INFINITY; 2],
-            acc_max: [f32::NEG_INFINITY; 2],
-            acc_sumsq: [0.0; 2],
-            acc_band_sumsq: [0.0; 3],
-            acc_count: 0,
-            linear: vec![BaseBin::SILENCE; window_bins],
-            verts: Vec::with_capacity(4 * MAX_COLUMNS),
-            pipeline,
+            store,
+            contour_pipeline,
             vertex_buffer,
             vertex_count_l: 0,
             vertex_count_r: 0,
+            verts: Vec::with_capacity(4 * MAX_COLUMNS),
+            composite_pipeline,
+            composite_layout,
+            sampler,
+            format,
+            offscreen: None,
         }
     }
 
-    fn reset_accumulator(&mut self) {
-        self.acc_min = [f32::INFINITY; 2];
-        self.acc_max = [f32::NEG_INFINITY; 2];
-        self.acc_sumsq = [0.0; 2];
-        self.acc_band_sumsq = [0.0; 3];
-        self.acc_count = 0;
-    }
-
-    fn close_bin(&mut self) {
-        let n = self.acc_count.max(1) as f32;
-        let env = [
-            ChannelEnvelope {
-                min: self.acc_min[0],
-                max: self.acc_max[0],
-                mean_square: self.acc_sumsq[0] / n,
-            },
-            ChannelEnvelope {
-                min: self.acc_min[1],
-                max: self.acc_max[1],
-                mean_square: self.acc_sumsq[1] / n,
-            },
-        ];
-        let band_ms = [
-            self.acc_band_sumsq[0] / n,
-            self.acc_band_sumsq[1] / n,
-            self.acc_band_sumsq[2] / n,
-        ];
-        let pos = (self.bins_closed % self.bins.len() as u64) as usize;
-        self.bins[pos] = BaseBin { env, band_ms };
-        self.bins_closed = self.bins_closed.wrapping_add(1);
-        self.reset_accumulator();
+    /// (Re)allocate the offscreen MSAA + resolved textures when the viewport size changes (the
+    /// reviewer's caching note). Guards against zero/sub-1px sizes during a collapsed column.
+    fn ensure_offscreen(&mut self, device: &wgpu::Device, w: u32, h: u32) {
+        let w = w.max(1);
+        let h = h.max(1);
+        if let Some(o) = &self.offscreen {
+            if o.width == w && o.height == h {
+                return;
+            }
+        }
+        let msaa = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("waveform-msaa"),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: MSAA_SAMPLES,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let resolved = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("waveform-resolved"),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let msaa_view = msaa.create_view(&wgpu::TextureViewDescriptor::default());
+        let resolved_view = resolved.create_view(&wgpu::TextureViewDescriptor::default());
+        let composite_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("waveform-composite-bg"),
+            layout: &self.composite_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&resolved_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        });
+        self.offscreen = Some(Offscreen { width: w, height: h, msaa_view, resolved_view, composite_bind_group });
     }
 }
 
 impl Module for WaveformModule {
     fn update(&mut self, ctx: &FrameContext, _queue: &wgpu::Queue) {
-        if ctx.sample_rate <= 0.0 {
-            return; // unknown rate — idle (spec)
+        self.store.set_sample_rate(ctx.sample_rate);
+        if !self.store.is_active() {
+            return;
         }
-        if ctx.sample_rate != self.sample_rate {
-            self.sample_rate = ctx.sample_rate;
-            self.samples_per_bin = (ctx.sample_rate * BIN_SECONDS).round().max(1.0) as usize;
-            self.filterbank = Some(Filterbank::new(ctx.sample_rate, BAND_LOW_HZ, BAND_HIGH_HZ));
-            self.reset_accumulator();
-        }
-
         for &[l, r] in ctx.new {
-            // Spectral color (ADR 0001): filter the mono sum, accumulate per-band power. The
-            // `as_mut` borrow ends before the envelope fold / close_bin touch the rest of `self`.
-            let mono = 0.5 * (l + r);
-            let bands = self
-                .filterbank
-                .as_mut()
-                .map(|fb| fb.process(mono))
-                .unwrap_or([0.0; 3]);
-
-            self.acc_min[0] = self.acc_min[0].min(l);
-            self.acc_max[0] = self.acc_max[0].max(l);
-            self.acc_sumsq[0] += l * l;
-            self.acc_min[1] = self.acc_min[1].min(r);
-            self.acc_max[1] = self.acc_max[1].max(r);
-            self.acc_sumsq[1] += r * r;
-            for k in 0..3 {
-                self.acc_band_sumsq[k] += bands[k] * bands[k];
-            }
-            self.acc_count += 1;
-            if self.acc_count >= self.samples_per_bin {
-                self.close_bin();
-            }
+            self.store.push(l, r);
         }
     }
 
     fn prepare(
         &mut self,
-        _device: &wgpu::Device,
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
-        _encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut wgpu::CommandEncoder,
         viewport: Rect,
     ) {
-        if self.samples_per_bin == 0 {
+        if !self.store.is_active() {
             self.vertex_count_l = 0;
             self.vertex_count_r = 0;
             return;
         }
 
-        // Linearize the ring oldest→newest: `linear[i]` holds absolute bin `(total - n + i)`.
-        let n = self.bins.len();
-        let total = self.bins_closed;
-        let head = (total % n as u64) as usize;
-        for i in 0..n {
-            self.linear[i] = self.bins[(head + i) % n];
-        }
-
         let columns = (viewport.w.round() as usize).clamp(1, MAX_COLUMNS);
         let denom = (columns.max(2) - 1) as f32;
-        self.verts.clear();
-
-        // Anchor columns to ABSOLUTE bin boundaries (multiples of `bpc`) instead of re-dividing the
-        // sliding window each frame. A column covers a fixed absolute bin range, so its merged
-        // value is identical frame-to-frame until it scrolls off — no per-frame re-merge jitter.
-        // The whole grid shifts left by whole columns as new boundaries complete (smooth scroll).
-        let bpc = (n / columns).max(1) as i128; // base bins per display column
-        let win_start = total as i128 - n as i128; // oldest absolute bin still in the ring
-        let last_boundary = ((total as i128) / bpc) * bpc; // right edge, bpc-aligned
-
-        // Pre-merge one column per screen position (shared by both channels — same bins).
-        let mut col_bins: Vec<BaseBin> = Vec::with_capacity(columns);
-        for c in 0..columns {
-            let end_abs = last_boundary - ((columns - 1 - c) as i128) * bpc;
-            let start_abs = end_abs - bpc;
-            let lo = start_abs.max(win_start);
-            let hi = end_abs.min(total as i128);
-            col_bins.push(if lo < hi {
-                merge(&self.linear[(lo - win_start) as usize..(hi - win_start) as usize])
-            } else {
-                BaseBin::SILENCE
-            });
-        }
+        let cols = self.store.build_columns(columns);
 
         // One triangle strip per channel: L top half (center +0.5), R bottom half (−0.5) — spec §4.
+        self.verts.clear();
         for ch in 0..2 {
-            for (c, merged) in col_bins.iter().enumerate() {
+            for (c, merged) in cols.iter().enumerate() {
                 let env = merged.env[ch];
-                // One color per column from the shared (mono) band energies (ADR 0001), softened
-                // toward white; interpolated along time by the rasterizer.
                 let hue = band_color(merged.band_ms);
                 let color = [
                     hue[0] + (1.0 - hue[0]) * COLOR_WHITE_MIX,
@@ -314,21 +326,46 @@ impl Module for WaveformModule {
                 self.verts.push(Vertex { pos: [x, center + env.min * HALF_SCALE], color });
             }
         }
-
         queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&self.verts));
         self.vertex_count_l = (2 * columns) as u32;
         self.vertex_count_r = (2 * columns) as u32;
+
+        // Offscreen MSAA pass: draw both contour strips, resolved to a single-sample texture (0007).
+        self.ensure_offscreen(device, viewport.w.round() as u32, viewport.h.round() as u32);
+        let off = self.offscreen.as_ref().unwrap();
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("waveform-offscreen"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &off.msaa_view,
+                resolve_target: Some(&off.resolved_view),
+                ops: wgpu::Operations {
+                    // Transparent clear so only the contour composites over the host background.
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.contour_pipeline);
+        pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+        pass.draw(0..self.vertex_count_l, 0..1);
+        pass.draw(self.vertex_count_l..(self.vertex_count_l + self.vertex_count_r), 0..1);
     }
 
     fn render(&mut self, rpass: &mut wgpu::RenderPass, _viewport: Rect) {
+        let Some(off) = &self.offscreen else { return };
         if self.vertex_count_l == 0 {
             return;
         }
-        rpass.set_pipeline(&self.pipeline);
-        rpass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-        // L strip, then R strip — separate draws so the top/bottom contours stay disjoint.
-        rpass.draw(0..self.vertex_count_l, 0..1);
-        rpass.draw(self.vertex_count_l..(self.vertex_count_l + self.vertex_count_r), 0..1);
+        // Composite the resolved (antialiased) contour over the host's cleared background. A
+        // full-viewport quad is generated in the vertex shader from the vertex index.
+        rpass.set_pipeline(&self.composite_pipeline);
+        rpass.set_bind_group(0, &off.composite_bind_group, &[]);
+        rpass.draw(0..3, 0..1);
     }
 
     fn on_event(&mut self, _event: &baseview::Event, _viewport: Rect) -> EventStatus {
@@ -358,7 +395,32 @@ fn vs_main(@location(0) pos: vec2<f32>, @location(1) color: vec3<f32>) -> VsOut 
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    // Per-column spectral color (ADR 0001), interpolated along time by the rasterizer.
     return vec4<f32>(in.color, 1.0);
+}
+"#;
+
+// Full-screen triangle that samples the resolved offscreen contour. Three verts cover the viewport.
+const COMPOSITE_WGSL: &str = r#"
+struct VsOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) idx: u32) -> VsOut {
+    // (0,0),(2,0),(0,2) in UV → a triangle covering the [0,1] viewport.
+    var uv = vec2<f32>(f32((idx << 1u) & 2u), f32(idx & 2u));
+    var o: VsOut;
+    o.clip = vec4<f32>(uv * 2.0 - 1.0, 0.0, 1.0);
+    o.uv = vec2<f32>(uv.x, 1.0 - uv.y); // flip Y: framebuffer origin top-left
+    return o;
+}
+
+@group(0) @binding(0) var tex: texture_2d<f32>;
+@group(0) @binding(1) var samp: sampler;
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    return textureSample(tex, samp, in.uv);
 }
 "#;
