@@ -8,8 +8,11 @@
 //! the last 4 bins (400 ms), Short-term the last 30 (3 s), and each new bin closes a 400 ms gating
 //! block (4 bins, stepped every 100 ms = 75 % overlap) feeding the gated Integrated measurement.
 //! Bin-quantization means M/S lag the true sliding window by up to 100 ms on transients — on the
-//! steady reference signals the conformance tests use, the values match `ebur128` to well within
-//! the 0.1 LU tolerance.
+//! steady reference signals the conformance tests use, we match `ebur128` to ~1e-11 LU — floating-
+//! point round-off from summation order, i.e. as close as f64 gets without replicating its exact
+//! accumulation loop. Loudness is computed in f64 throughout; the cast to f32 happens only at the
+//! display boundary (the atomic store / the text), where it costs ~1e-6 LU — still far below the
+//! meter's displayed digit.
 
 use std::collections::VecDeque;
 
@@ -145,16 +148,23 @@ impl LoudnessDsp {
     }
 
     /// Fold one stereo frame into the measurement. In mono mode only the left channel is used.
+    /// Production path: the audio ring carries f32.
     pub fn push_frame(&mut self, l: f32, r: f32) {
+        self.push_frame_f64(l as f64, r as f64);
+    }
+
+    /// f64 input path. The K-weighting and accumulation are f64 either way; this exists so the
+    /// conformance tests can isolate the algorithm from f32 input rounding.
+    pub fn push_frame_f64(&mut self, l: f64, r: f64) {
         let yl = self
             .stage2
-            .process(&mut self.st2[0], self.stage1.process(&mut self.st1[0], l as f64));
+            .process(&mut self.st2[0], self.stage1.process(&mut self.st1[0], l));
         self.bin_sumsq[0] += yl * yl;
 
         if self.channels == Channels::Stereo {
             let yr = self
                 .stage2
-                .process(&mut self.st2[1], self.stage1.process(&mut self.st1[1], r as f64));
+                .process(&mut self.st2[1], self.stage1.process(&mut self.st1[1], r));
             self.bin_sumsq[1] += yr * yr;
         }
 
@@ -209,21 +219,21 @@ impl LoudnessDsp {
         Some(sum / take as f64)
     }
 
-    pub fn momentary_lufs(&self) -> f32 {
+    pub fn momentary_lufs(&self) -> f64 {
         self.mean_square_last(MOMENTARY_BINS)
             .map(lufs)
-            .unwrap_or(f64::NEG_INFINITY) as f32
+            .unwrap_or(f64::NEG_INFINITY)
     }
 
-    pub fn short_term_lufs(&self) -> f32 {
+    pub fn short_term_lufs(&self) -> f64 {
         self.mean_square_last(SHORT_TERM_BINS)
             .map(lufs)
-            .unwrap_or(f64::NEG_INFINITY) as f32
+            .unwrap_or(f64::NEG_INFINITY)
     }
 
     /// Two-stage gated Integrated loudness over all blocks since reset: absolute gate at
     /// −70 LUFS, then a relative gate 10 LU below the abs-gated mean.
-    pub fn integrated_lufs(&self) -> f32 {
+    pub fn integrated_lufs(&self) -> f64 {
         let abs_gated: Vec<f64> = self
             .blocks
             .iter()
@@ -231,7 +241,7 @@ impl LoudnessDsp {
             .filter(|&z| lufs(z) >= ABSOLUTE_GATE_LUFS)
             .collect();
         if abs_gated.is_empty() {
-            return f32::NEG_INFINITY;
+            return f64::NEG_INFINITY;
         }
 
         let mean_abs = abs_gated.iter().sum::<f64>() / abs_gated.len() as f64;
@@ -243,11 +253,11 @@ impl LoudnessDsp {
             .filter(|&z| lufs(z) >= rel_threshold)
             .collect();
         if rel_gated.is_empty() {
-            return f32::NEG_INFINITY;
+            return f64::NEG_INFINITY;
         }
 
         let mean_rel = rel_gated.iter().sum::<f64>() / rel_gated.len() as f64;
-        lufs(mean_rel) as f32
+        lufs(mean_rel)
     }
 }
 
@@ -257,7 +267,15 @@ mod tests {
     use ebur128::{EbuR128, Mode};
 
     const FS: f64 = 48000.0;
-    const TOL: f64 = 0.1; // LU
+    const TOL: f64 = 1e-9; // LU — f64 core matches ebur128 to ~1e-11 (summation round-off); headroom
+
+    /// Print ours-vs-ebur128 and return the absolute delta, so a `--nocapture` run shows exactly
+    /// how tight we are.
+    fn delta(label: &str, ours: f64, theirs: f64) -> f64 {
+        let d = (ours - theirs).abs();
+        eprintln!("{label}: ours={ours:.10}  ebu={theirs:.10}  Δ={d:.3e} LU");
+        d
+    }
 
     fn run_ours(interleaved: &[f32]) -> LoudnessDsp {
         let mut d = LoudnessDsp::new(FS, Channels::Stereo);
@@ -308,9 +326,10 @@ mod tests {
         let sig = sine_stereo(1000.0, 0.5, 5.0);
         let ours = run_ours(&sig);
         let (m, s, i) = ebu(&sig);
-        assert!((ours.momentary_lufs() as f64 - m).abs() < TOL, "M {} vs {m}", ours.momentary_lufs());
-        assert!((ours.short_term_lufs() as f64 - s).abs() < TOL, "S {} vs {s}", ours.short_term_lufs());
-        assert!((ours.integrated_lufs() as f64 - i).abs() < TOL, "I {} vs {i}", ours.integrated_lufs());
+        let dm = delta("sine M", ours.momentary_lufs(), m);
+        let ds = delta("sine S", ours.short_term_lufs(), s);
+        let di = delta("sine I", ours.integrated_lufs(), i);
+        assert!(dm < TOL && ds < TOL && di < TOL);
     }
 
     #[test]
@@ -318,9 +337,35 @@ mod tests {
         let sig = white_stereo(0.3, 5.0);
         let ours = run_ours(&sig);
         let (m, s, i) = ebu(&sig);
-        assert!((ours.momentary_lufs() as f64 - m).abs() < TOL, "M {} vs {m}", ours.momentary_lufs());
-        assert!((ours.short_term_lufs() as f64 - s).abs() < TOL, "S {} vs {s}", ours.short_term_lufs());
-        assert!((ours.integrated_lufs() as f64 - i).abs() < TOL, "I {} vs {i}", ours.integrated_lufs());
+        let dm = delta("noise M", ours.momentary_lufs(), m);
+        let ds = delta("noise S", ours.short_term_lufs(), s);
+        let di = delta("noise I", ours.integrated_lufs(), i);
+        assert!(dm < TOL && ds < TOL && di < TOL);
+    }
+
+    #[test]
+    fn f64_input_isolates_algorithm() {
+        // Feed BOTH the identical f64 samples (no f32 input rounding on either side). This pins
+        // down whether the f32-path delta is precision or a genuine algorithm/coefficient gap.
+        let n = (FS * 5.0) as usize;
+        let mut sig = Vec::with_capacity(n * 2);
+        for i in 0..n {
+            let s = 0.5 * (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / FS).sin();
+            sig.push(s);
+            sig.push(s);
+        }
+        let mut d = LoudnessDsp::new(FS, Channels::Stereo);
+        for f in sig.chunks_exact(2) {
+            d.push_frame_f64(f[0], f[1]);
+        }
+        let mut e = EbuR128::new(2, FS as u32, Mode::M | Mode::S | Mode::I).unwrap();
+        e.add_frames_f64(&sig).unwrap();
+        let dm = delta("f64 M", d.momentary_lufs(), e.loudness_momentary().unwrap());
+        let ds = delta("f64 S", d.short_term_lufs(), e.loudness_shortterm().unwrap());
+        let di = delta("f64 I", d.integrated_lufs(), e.loudness_global().unwrap());
+        // Identical f64 input on both sides → ~1e-11 LU: the algorithm and coefficients match
+        // ebur128 to machine precision; the only residual is summation order.
+        assert!(dm < TOL && ds < TOL && di < TOL);
     }
 
     #[test]
@@ -329,10 +374,7 @@ mod tests {
         sig.extend(std::iter::repeat(0.0f32).take((FS * 4.0) as usize * 2));
         let ours = run_ours(&sig);
         let (_, _, i) = ebu(&sig);
-        assert!(
-            (ours.integrated_lufs() as f64 - i).abs() < TOL,
-            "I {} vs {i}",
-            ours.integrated_lufs()
-        );
+        let di = delta("gated I", ours.integrated_lufs(), i);
+        assert!(di < TOL);
     }
 }
