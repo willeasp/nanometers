@@ -7,3 +7,4 @@ Cargo.lock.bak
 *.swp
 .claude/scheduled_tasks.lock
 .claude/worktrees/
+.superpowers/
