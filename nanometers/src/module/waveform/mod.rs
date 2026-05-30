@@ -30,15 +30,10 @@ use store::WaveStore;
 /// 3-band filterbank crossovers (ADR 0001; dev-player tuning later, spec §6/§10).
 const BAND_LOW_HZ: f32 = 250.0;
 const BAND_HIGH_HZ: f32 = 4000.0;
-/// Viewable window the display targets (spec §6 — Module config later). The actual window is
-/// refresh-snapped a hair off this so the scroll is an exact integer px/frame.
+/// Viewable window the display spans (spec §6 — Module config later).
 const DISPLAY_WINDOW_SECONDS: f64 = 5.0;
-/// The base-bin store holds more than the display window so the left edge never clips. The display
-/// span peaks at ~7.5s when px_per_frame rounds to 1 on a narrow window; 8s covers it.
+/// The base-bin store holds more than the display window so the left edge never clips.
 const STORE_WINDOW_SECONDS: f32 = 8.0;
-/// A frame longer than this is a gap (occlusion, stall) — its dt is ignored for the fps estimate so
-/// it doesn't poison the lock and force a spurious relock.
-const GAP_SECONDS: f64 = 0.1;
 /// Per-half amplitude scale: L top half (clip-y center +0.5), R bottom half (−0.5); sample ±1
 /// reaches ±0.45 within its half.
 const HALF_SCALE: f32 = 0.45;
@@ -49,101 +44,115 @@ const MAX_COLUMNS: usize = 4096;
 const COLOR_WHITE_MIX: f32 = 0.18;
 /// MSAA sample count for the Waveform's own offscreen target (0007 — host pass stays single-sample).
 const MSAA_SAMPLES: u32 = 4;
-/// Re-lock the scroll clock when the measured fps drifts more than this fraction from the locked
-/// value, so a stable refresh gives a stable px/frame.
-const FPS_RELOCK_FRAC: f64 = 0.08;
-/// Seed the refresh estimate only once two consecutive clean frames agree within this fraction, so a
-/// single outlier (init lag, an occlusion-recovery frame) can't lock in a wrong fps.
-const FPS_AGREE_FRAC: f64 = 0.15;
-/// Slow tracking weight on each new clean frame once seeded (the estimate is already close).
-const FPS_EMA_ALPHA: f64 = 0.05;
 
-/// The display runs a small BUFFER of closed columns behind the live edge, so it can advance by a
-/// fixed whole `px_per_frame` every frame (driven by the frame clock) while the buffer absorbs the
-/// audio's bursty per-frame arrival. This decoupling is what makes the scroll uniform — without it
-/// the display tracks the jittery closed-bin edge directly. Units are columns; at ~200 samples/col,
-/// 12 cols ≈ 50 ms of display latency (imperceptible for a meter). The clock is held at TARGET by a
-/// hysteretic ±1px nudge: a Schmitt trigger latches a single-pixel correction when avail leaves
-/// [LOW, HIGH] and releases it only back at TARGET, so a value hovering at a band edge can't flip
-/// the step every frame. A gross desync (> RESYNC, or anchor ahead of the edge) is a discontinuity
-/// — a rate-change refill, first fill, long-stall recovery — and snaps rather than crawling.
-const BUFFER_TARGET_COLUMNS: i64 = 12;
-const BUFFER_LOW_COLUMNS: i64 = 6;
-const BUFFER_HIGH_COLUMNS: i64 = 24;
-const BUFFER_RESYNC_COLUMNS: i64 = 40;
+/// The newest drawn column is held this far (in samples) behind the live audio edge. The integer
+/// pixel step never depends on the bursty audio arrival; this slack is what lets it run uniformly
+/// without the edge ever overtaking it. ~50 ms — imperceptible, comfortably > per-frame arrival jitter.
+const BUFFER_SECONDS: f64 = 0.05;
+/// No new closed audio for longer than this → paused; freeze the scroll. Loose enough that ordinary
+/// bursty arrival isn't mistaken for a pause.
+const PAUSE_SECONDS: f64 = 0.1;
+/// Floor on samples-per-column (a column must hold at least one base bin's worth).
+const MIN_SAMPLES_PER_COL: f64 = 1.0;
+/// Samples-per-column is only trimmed when it's more than this fraction off the buffer-holding
+/// target — so steady state is a FROZEN zoom plus a pure integer scroll (no per-frame motion in the
+/// float at all), and the trim only cancels slow drift. Wider than per-frame arrival jitter.
+const SPP_DEADBAND_FRAC: f64 = 0.02;
+/// When it does trim, low-pass the zoom toward the target by this much per frame (slow → the rare
+/// correction is a sub-pixel zoom nudge spread over many frames, never a visible jump).
+const SPP_TRIM_ALPHA: f64 = 0.02;
+/// Tracking weight for the rough refresh estimate (used only to pick the integer pixel step).
+const FPS_EMA_ALPHA: f64 = 0.1;
+/// Only change the integer pixel step once the ideal (continuous) step is this far past the current
+/// one — hysteresis so a refresh hovering at a rounding boundary can't flap the step.
+const PX_HYSTERESIS: f64 = 0.35;
 
-/// Integer pixels the contour moves per display frame: round the ideal continuous rate
-/// (`columns / (window · fps)`) to the nearest whole pixel, at least 1.
-fn pixels_per_frame(columns: usize, window_seconds: f64, fps: f64) -> i64 {
+/// Integer pixels the contour moves per render: round the ideal continuous rate
+/// (`columns / (window · fps)`) to a whole pixel, at least 1. The rounding is robust — a fps estimate
+/// off by several percent still picks the same integer — and `samples_per_col` absorbs the residual.
+fn choose_px_per_frame(columns: usize, window_seconds: f64, fps: f64) -> i64 {
     if window_seconds <= 0.0 || fps <= 0.0 {
         return 1;
     }
     ((columns as f64 / (window_seconds * fps)).round() as i64).max(1)
 }
 
-/// Samples each column spans so the audio column-rate equals the display rate (`px_per_frame · fps`)
-/// — i.e. `samples_per_col · px_per_frame · fps == sample_rate`, which is what makes the uniform
-/// integer scroll drift-free.
-fn samples_per_column(sample_rate: f64, px_per_frame: i64, fps: f64) -> f64 {
-    let denom = px_per_frame as f64 * fps;
-    if denom <= 0.0 {
-        return 1.0;
+/// One frame of the scroll. Pure controller (no GPU), so it's unit-testable. The column anchor
+/// advances by EXACTLY `px_per_frame` whole pixels — integer arithmetic, no rounding, the one thing
+/// that moves the picture, so motion is dead-uniform. The display/audio clock mismatch is absorbed
+/// by trimming `spp` (samples-per-column = zoom) toward the value that holds the newest column
+/// `buffer_samples` behind the live edge — but only outside a deadband, so steady state is a frozen
+/// zoom + pure integer scroll. Returns the new `(scroll_col, spp)`; the drawn column is `scroll_col`.
+fn advance_scroll(
+    scroll_col: i64,
+    spp: f64,
+    px_per_frame: i64,
+    closed: u64,
+    buffer_samples: f64,
+    alpha: f64,
+    audio_live: bool,
+) -> (i64, f64) {
+    if !audio_live {
+        return (scroll_col, spp); // paused → freeze both anchor and zoom
     }
-    sample_rate / denom
-}
-
-/// One frame's update to the refresh-rate estimator. `inst` is the clamped instantaneous fps, or
-/// `None` for a gap frame (occlusion/stall) which is ignored. Returns the new
-/// `(fps_est, seeded, prev_clean)`. Seeds (to the mean) only when two consecutive clean frames agree
-/// within `FPS_AGREE_FRAC` — so the lock is established from a representative pair, never a lone
-/// outlier — then tracks slowly. Pure, so the policy is unit-testable without a frame clock.
-fn fps_estimate(
-    inst: Option<f64>,
-    fps_est: f64,
-    seeded: bool,
-    prev_clean: Option<f64>,
-) -> (f64, bool, Option<f64>) {
-    let Some(inst) = inst else {
-        return (fps_est, seeded, prev_clean); // gap frame: leave everything as-is
+    let col = scroll_col + px_per_frame; // pure integer step — no float, no rounding
+    let target = (closed as f64 - buffer_samples) / (col as f64 + 1.0);
+    let spp = if (target - spp).abs() > spp * SPP_DEADBAND_FRAC {
+        spp + alpha * (target - spp) // outside the deadband → trim the zoom toward target
+    } else {
+        spp // inside the deadband → frozen; nothing but the integer anchor moves
     };
-    if seeded {
-        return (fps_est * (1.0 - FPS_EMA_ALPHA) + inst * FPS_EMA_ALPHA, true, prev_clean);
-    }
-    match prev_clean {
-        Some(prev) if (inst - prev).abs() / prev <= FPS_AGREE_FRAC => {
-            (0.5 * (inst + prev), true, prev_clean) // two agree → seed
-        }
-        _ => (fps_est, false, Some(inst)), // first clean frame, or a disagreement → retry next pair
-    }
+    let spp = spp.max(MIN_SAMPLES_PER_COL);
+    // Never draw past the newest fully-closed column (startup/underrun) → clamp the anchor back.
+    let max_col = (closed as f64 / spp).floor() as i64 - 1;
+    (col.min(max_col), spp)
 }
 
-/// Advance the buffered scroll anchor one frame. Pure controller (no GPU), so the smoothness logic
-/// is unit-testable. Given the current anchor, the newest fully-closed column `last_full`, the
-/// per-frame pixel step, and the hysteresis latch `correcting` (−1/0/+1), returns the new
-/// `(scroll_col, correcting)`. Invariant on return: `scroll_col <= last_full` (never renders an
-/// unclosed/partial column). See `BUFFER_TARGET_COLUMNS` for the band semantics.
-fn advance_scroll(scroll_col: i64, last_full: i64, px_per_frame: i64, correcting: i8) -> (i64, i8) {
-    let avail = last_full - scroll_col;
-    // Gross desync (discontinuity) → snap behind the edge instead of crawling back over many frames.
-    if avail < 0 || avail > BUFFER_RESYNC_COLUMNS {
-        return (last_full - BUFFER_TARGET_COLUMNS, 0);
-    }
-    // Schmitt trigger: latch a ±1 correction at a band edge, release only back at TARGET.
-    let mut c = correcting;
-    if c == 0 {
-        if avail > BUFFER_HIGH_COLUMNS {
-            c = 1;
-        } else if avail < BUFFER_LOW_COLUMNS {
-            c = -1;
+/// Per-frame scroll diagnostics (gated on `NANO_DEBUG_SCROLL`). Confirms the smoothness claim with
+/// data: over a window it reports the per-frame pixel step (min/max — equal means dead-uniform, no
+/// rounding wobble) and the samples-per-col span (the zoom "breathing", which should be tiny).
+#[derive(Default)]
+struct ScrollDbg {
+    on: bool,
+    n: u32,
+    last_col: i64,
+    d_min: i64,
+    d_max: i64,
+    spp_min: f64,
+    spp_max: f64,
+}
+
+impl ScrollDbg {
+    fn tick(&mut self, col: i64, spp: f64, px_per_frame: i64) {
+        if !self.on {
+            return;
         }
-    } else if (c > 0 && avail <= BUFFER_TARGET_COLUMNS) || (c < 0 && avail >= BUFFER_TARGET_COLUMNS) {
-        c = 0;
+        if self.n == 0 {
+            self.d_min = i64::MAX;
+            self.d_max = i64::MIN;
+            self.spp_min = f64::MAX;
+            self.spp_max = f64::MIN;
+        } else {
+            let d = col - self.last_col;
+            self.d_min = self.d_min.min(d);
+            self.d_max = self.d_max.max(d);
+        }
+        self.spp_min = self.spp_min.min(spp);
+        self.spp_max = self.spp_max.max(spp);
+        self.last_col = col;
+        self.n += 1;
+        if self.n >= 240 {
+            eprintln!(
+                "[nano-scroll] px/frame={px_per_frame} step Δ {}..{} | spp {:.3}..{:.3} (zoom span {:.4}%)",
+                self.d_min,
+                self.d_max,
+                self.spp_min,
+                self.spp_max,
+                (self.spp_max - self.spp_min) / self.spp_min * 100.0
+            );
+            self.n = 0;
+        }
     }
-    let mut step = px_per_frame + c as i64;
-    if step > avail {
-        step = avail.max(0); // never cross the live edge (pause/severe stall → freeze on it)
-    }
-    (scroll_col + step.max(0), c)
 }
 
 #[repr(C)]
@@ -180,19 +189,19 @@ pub struct WaveformModule {
     format: wgpu::TextureFormat,
     offscreen: Option<Offscreen>,
 
-    // Scroll clock (the subway-sign uniform integer-pixel scroll).
-    fps_est: f64,
+    // Scroll clock: fixed integer pixels/render, samples-per-col trims to hold the buffer (see
+    // `advance_scroll`). The pixel motion is pure integer — no float, no rounding.
+    fps_est: f64,    // rough refresh estimate, only to pick the integer pixel step
     fps_seeded: bool,
-    prev_clean_fps: Option<f64>, // last clean inst-fps awaiting a second agreeing frame to seed
-    locked_fps: f64,
     px_per_frame: i64,
-    samples_per_col: f64,
-    scroll_col: i64, // display anchor in whole columns (= pixels), buffered behind the live edge
-    correcting: i8,  // hysteresis latch for the ±1px buffer-depth nudge (−1/0/+1)
+    samples_per_col: f64, // zoom = samples per column; the slowly-trimmed control variable
+    scroll_col: i64,      // integer column anchor (= rightmost pixel), advanced by px_per_frame
     scroll_init: bool,
-    last_columns: usize,
+    last_closed: u64,                    // closed_samples last frame, to detect audio progress
+    last_audio_advance: Option<Instant>, // when audio last advanced — drives pause detection
     last_sample_rate: f32,
     last_frame: Option<Instant>,
+    scroll_dbg: ScrollDbg,
 }
 
 impl WaveformModule {
@@ -342,16 +351,18 @@ impl WaveformModule {
             offscreen: None,
             fps_est: 60.0,
             fps_seeded: false,
-            prev_clean_fps: None,
-            locked_fps: 0.0,
             px_per_frame: 1,
             samples_per_col: 1.0,
             scroll_col: 0,
-            correcting: 0,
             scroll_init: false,
-            last_columns: 0,
+            last_closed: 0,
+            last_audio_advance: None,
             last_sample_rate: 0.0,
             last_frame: None,
+            scroll_dbg: ScrollDbg {
+                on: std::env::var_os("NANO_DEBUG_SCROLL").is_some(),
+                ..Default::default()
+            },
         }
     }
 
@@ -407,7 +418,9 @@ impl Module for WaveformModule {
     fn update(&mut self, ctx: &FrameContext, _queue: &wgpu::Queue) {
         if ctx.sample_rate != self.last_sample_rate {
             self.last_sample_rate = ctx.sample_rate;
-            self.scroll_init = false; // store clears its clocks on a rate change → re-anchor
+            // Store clears its sample clock on a rate change → re-anchor the scroll from scratch.
+            self.last_closed = 0;
+            self.scroll_init = false;
         }
         self.store.set_sample_rate(ctx.sample_rate);
         if !self.store.is_active() {
@@ -431,58 +444,72 @@ impl Module for WaveformModule {
             return;
         }
 
-        // Measure the refresh rate to size the uniform pixel step. A gap frame (occlusion/stall,
-        // dt > GAP_SECONDS) is passed as None so its huge dt can't poison the estimate; seeding then
-        // waits for two clean frames to agree (no lock to a startup outlier — see `fps_estimate`).
+        let columns = (viewport.w.round() as usize).clamp(1, MAX_COLUMNS);
+        let sr = self.last_sample_rate as f64;
         let now = Instant::now();
         let dt = self.last_frame.map(|t| (now - t).as_secs_f64());
         self.last_frame = Some(now);
-        let inst = dt
-            .filter(|&d| d < GAP_SECONDS)
-            .map(|d| (1.0 / d.max(1e-4)).clamp(20.0, 360.0));
-        let (fps, seeded, prev) = fps_estimate(inst, self.fps_est, self.fps_seeded, self.prev_clean_fps);
-        self.fps_est = fps;
-        self.fps_seeded = seeded;
-        self.prev_clean_fps = prev;
-        if !self.fps_seeded {
-            // No trustworthy refresh measurement yet — don't lock the scroll clock to a guess. One
-            // or two blank frames at startup are invisible.
-            self.vertex_count_l = 0;
-            self.vertex_count_r = 0;
-            return;
+
+        // Rough refresh estimate — used ONLY to pick the integer pixel step. A few % error is fine
+        // (it's just rounding); the samples-per-col control loop absorbs the residual. Gap frames
+        // (occlusion/stall) are skipped so they can't drag it.
+        if let Some(dt) = dt {
+            if dt > 0.0 && dt < PAUSE_SECONDS {
+                let inst = (1.0 / dt).clamp(20.0, 360.0);
+                self.fps_est = if self.fps_seeded {
+                    self.fps_est * (1.0 - FPS_EMA_ALPHA) + inst * FPS_EMA_ALPHA
+                } else {
+                    self.fps_seeded = true;
+                    inst
+                };
+            }
+        }
+        // Pick the fixed pixel step, with hysteresis so a refresh at a rounding boundary can't flap it.
+        let continuous = columns as f64 / (DISPLAY_WINDOW_SECONDS * self.fps_est.max(1.0));
+        if !self.scroll_init || (continuous - self.px_per_frame as f64).abs() > PX_HYSTERESIS {
+            self.px_per_frame = choose_px_per_frame(columns, DISPLAY_WINDOW_SECONDS, self.fps_est);
         }
 
-        let columns = (viewport.w.round() as usize).clamp(1, MAX_COLUMNS);
-        let sr = self.last_sample_rate as f64;
-
-        // (Re)lock the pixel step + column width on a real scale change (uninitialized, viewport
-        // resize, rate change, or a settled refresh that drifted past FPS_RELOCK_FRAC). Rare now, so
-        // re-anchoring the buffer here is fine.
-        let fps_drifted = self.locked_fps > 0.0
-            && (self.fps_est - self.locked_fps).abs() / self.locked_fps > FPS_RELOCK_FRAC;
-        let relock = !self.scroll_init || columns != self.last_columns || fps_drifted;
-        if relock {
-            self.last_columns = columns;
-            self.locked_fps = self.fps_est;
-            self.px_per_frame = pixels_per_frame(columns, DISPLAY_WINDOW_SECONDS, self.fps_est);
-            self.samples_per_col = samples_per_column(sr, self.px_per_frame, self.fps_est);
+        // Pause detection: bursty per-frame arrival is fine; only a sustained stall freezes the scroll.
+        let closed = self.store.closed_samples();
+        if closed > self.last_closed {
+            self.last_closed = closed;
+            self.last_audio_advance = Some(now);
         }
-        // The newest fully-closed column (rightmost columns must be fully populated).
-        let last_full = (self.store.closed_samples() as f64 / self.samples_per_col).floor() as i64 - 1;
-        if relock {
-            // Re-anchor the buffer behind the live edge; the subway clock takes over next frame.
-            self.scroll_col = last_full - BUFFER_TARGET_COLUMNS;
-            self.correcting = 0;
+        let audio_live = self
+            .last_audio_advance
+            .map(|t| (now - t).as_secs_f64() < PAUSE_SECONDS)
+            .unwrap_or(false);
+
+        let buffer_samples = BUFFER_SECONDS * sr;
+        // Anchor the integer column + zoom once, behind the live edge, when audio and a refresh
+        // estimate are both available. A few blank startup frames are invisible.
+        if !self.scroll_init {
+            if !self.fps_seeded || (closed as f64) <= buffer_samples {
+                self.vertex_count_l = 0;
+                self.vertex_count_r = 0;
+                return;
+            }
+            self.samples_per_col = (sr / (self.px_per_frame as f64 * self.fps_est)).max(MIN_SAMPLES_PER_COL);
+            self.scroll_col = ((closed as f64 - buffer_samples) / self.samples_per_col).floor().max(0.0) as i64;
             self.scroll_init = true;
-        } else {
-            // Subway scroll: advance by EXACTLY px_per_frame off the frame clock, with a hysteretic
-            // ±1px nudge that keeps the display buffered behind the live edge (see `advance_scroll`).
-            let (sc, c) = advance_scroll(self.scroll_col, last_full, self.px_per_frame, self.correcting);
-            self.scroll_col = sc;
-            self.correcting = c;
         }
+
+        // Advance: exactly px_per_frame whole pixels (the only thing that moves the picture); the
+        // zoom trims sub-pixel, deadbanded, to hold the buffer against clock drift (see `advance_scroll`).
+        let (col, spp) = advance_scroll(
+            self.scroll_col,
+            self.samples_per_col,
+            self.px_per_frame,
+            closed,
+            buffer_samples,
+            SPP_TRIM_ALPHA,
+            audio_live,
+        );
+        self.scroll_col = col;
+        self.samples_per_col = spp;
+        self.scroll_dbg.tick(col, spp, self.px_per_frame);
         let rightmost_col = self.scroll_col;
-        debug_assert!(rightmost_col <= last_full, "scroll anchor must stay behind the live edge");
         let cols = self.store.build_columns(columns, self.samples_per_col, rightmost_col);
 
         // Columns at exact pixel centers in the `columns`-wide offscreen: x = (2c+1)/N − 1.
@@ -605,104 +632,64 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pixels_per_frame_rounds_to_whole_pixels() {
-        // 1224 px over 5 s at 120 Hz → 1224/600 = 2.04 → 2 px/frame.
-        assert_eq!(pixels_per_frame(1224, 5.0, 120.0), 2);
-        // Same window at 60 Hz → 1224/300 = 4.08 → 4 px/frame (twice as many, half the rate).
-        assert_eq!(pixels_per_frame(1224, 5.0, 60.0), 4);
-        // Never zero.
-        assert_eq!(pixels_per_frame(100, 100.0, 60.0), 1);
+    fn px_per_frame_rounds_to_a_whole_step() {
+        // 1200 px over 5 s at 120 Hz → 1200/600 = 2.0 → 2 px/frame.
+        assert_eq!(choose_px_per_frame(1200, 5.0, 120.0), 2);
+        // Same window at 60 Hz → 1200/300 = 4.0 → 4 px/frame (half the rate, twice as many).
+        assert_eq!(choose_px_per_frame(1200, 5.0, 60.0), 4);
+        // Never zero, even on a tiny/odd window.
+        assert_eq!(choose_px_per_frame(50, 5.0, 120.0), 1);
+    }
+
+    // ── advance_scroll: fixed integer pixels/frame, samples-per-col trims to hold the buffer ──
+    // Steady-state reference: 1200 px / 5 s @ 120 Hz, sr 48 kHz → px_per_frame 2, spp 200, the
+    // newest drawn column sits buffer = 0.05·48000 = 2400 samples behind the live edge.
+
+    #[test]
+    fn scroll_steps_a_fixed_whole_pixel_amount() {
+        // At the control loop's fixed point (target == spp), the anchor advances by exactly
+        // px_per_frame and spp doesn't move — dead-uniform motion, no zoom breathing.
+        // closed chosen so (closed − buffer)/(col+1) == spp: col=602, spp=200 → closed = 200·603+2400.
+        let closed = (200.0 * 603.0 + 2400.0) as u64;
+        let (col, spp) = advance_scroll(600, 200.0, 2, closed, 2400.0, 0.02, true);
+        assert_eq!(col, 602, "anchor advanced by exactly px_per_frame");
+        assert!((spp - 200.0).abs() < 1e-6, "spp steady at the fixed point, got {spp}");
     }
 
     #[test]
-    fn samples_per_column_makes_rates_match() {
-        // The drift-free invariant: samples_per_col · (px_per_frame · fps) == sample_rate, so the
-        // audio produces columns at exactly the rate the display consumes them.
-        let sr = 48000.0;
-        let ppf = pixels_per_frame(1224, 5.0, 120.0); // 2
-        let spc = samples_per_column(sr, ppf, 120.0);
-        assert!((spc - 200.0).abs() < 1e-9, "48000/(2·120) = 200 samples/col");
-        assert!((spc * ppf as f64 * 120.0 - sr).abs() < 1e-6, "rates match → no drift");
-    }
-
-    // ── fps_estimate: seed only when two clean frames agree; then track slowly ──
-
-    #[test]
-    fn fps_gap_frame_leaves_estimate_unchanged() {
-        // A gap (occlusion/stall) is passed as None and must not move the estimate or the latch.
-        assert_eq!(fps_estimate(None, 60.0, false, Some(58.0)), (60.0, false, Some(58.0)));
-        assert_eq!(fps_estimate(None, 120.0, true, None), (120.0, true, None));
+    fn scroll_absorbs_clock_mismatch_into_spp_not_the_step() {
+        // Audio edge ahead of the steady point: the STEP stays px_per_frame (uniform), while spp
+        // trims toward the higher target — the mismatch goes into the (invisible) zoom, not the pixel.
+        let (col, spp) = advance_scroll(600, 200.0, 2, 130_000, 2400.0, 0.02, true);
+        assert_eq!(col, 602, "pixel step is unchanged by the mismatch");
+        let target = (130_000.0 - 2400.0) / 603.0; // ≈ 211.6
+        let expected = 200.0 + 0.02 * (target - 200.0);
+        assert!((spp - expected).abs() < 1e-6, "spp low-passes toward target, got {spp}");
+        assert!(spp > 200.0 && spp < 201.0, "trim is a tiny fraction of a sample, got {spp}");
     }
 
     #[test]
-    fn fps_first_clean_frame_records_but_does_not_seed() {
-        // One clean frame is not enough — record it, leave fps_est untouched until a second agrees.
-        assert_eq!(fps_estimate(Some(120.0), 60.0, false, None), (60.0, false, Some(120.0)));
+    fn scroll_freezes_when_audio_is_not_live() {
+        // Paused (audio edge stale): neither the anchor nor the zoom moves.
+        assert_eq!(advance_scroll(600, 200.0, 2, 130_000, 2400.0, 0.02, false), (600, 200.0));
     }
 
     #[test]
-    fn fps_two_agreeing_frames_seed_to_their_mean() {
-        // Two consecutive clean frames within AGREE_FRAC → seed (mean), so a lone outlier can't.
-        let (fps, seeded, _) = fps_estimate(Some(120.0), 60.0, false, Some(118.0));
-        assert!((fps - 119.0).abs() < 1e-9);
-        assert!(seeded);
+    fn scroll_never_draws_past_the_closed_edge() {
+        // If the anchor would land past the newest closed column (startup/underrun), clamp it back so
+        // the newest drawn column is always fully closed: (col+1)·spp ≤ closed (with the trimmed spp).
+        let (col, spp) = advance_scroll(600, 200.0, 2, 100_000, 2400.0, 0.02, true);
+        assert!(col < 600 + 2, "anchor was clamped back from the would-be step");
+        assert!(
+            (col as f64 + 1.0) * spp <= 100_000.0,
+            "newest column must be fully closed: ({col}+1)·{spp} > 100000"
+        );
     }
 
     #[test]
-    fn fps_disagreeing_frame_is_rejected_as_outlier() {
-        // A 60→120 jump (e.g. an occlusion-recovery frame): don't seed, retry against the latest.
-        assert_eq!(fps_estimate(Some(120.0), 60.0, false, Some(60.0)), (60.0, false, Some(120.0)));
-    }
-
-    #[test]
-    fn fps_seeded_frame_tracks_with_slow_ema() {
-        let (fps, seeded, _) = fps_estimate(Some(119.0), 120.0, true, None);
-        assert!((fps - 119.95).abs() < 1e-9, "120·0.95 + 119·0.05");
-        assert!(seeded);
-    }
-
-    // ── advance_scroll: uniform px/frame with a hysteretic ±1 nudge toward the buffer target ──
-
-    #[test]
-    fn scroll_advances_by_exact_px_per_frame_when_buffered() {
-        // avail == TARGET (12), inside the band → no correction, exactly px_per_frame.
-        assert_eq!(advance_scroll(100, 112, 2, 0), (102, 0));
-    }
-
-    #[test]
-    fn scroll_catches_up_one_pixel_when_latency_runs_high() {
-        // avail (30) > HIGH (24) → latch +1, step px_per_frame + 1.
-        assert_eq!(advance_scroll(0, 30, 2, 0), (3, 1));
-    }
-
-    #[test]
-    fn scroll_correction_latches_through_the_band_then_releases_at_target() {
-        // Latched +1 persists while avail is between TARGET and HIGH (no per-frame flap)…
-        assert_eq!(advance_scroll(0, 20, 2, 1), (3, 1));
-        // …and releases (back to plain px_per_frame) once avail returns to TARGET.
-        assert_eq!(advance_scroll(0, 12, 2, 1), (2, 0));
-    }
-
-    #[test]
-    fn scroll_eases_off_one_pixel_when_buffer_runs_low() {
-        // avail (4) < LOW (6) → latch −1 so the buffer refills.
-        assert_eq!(advance_scroll(0, 4, 2, 0), (1, -1));
-    }
-
-    #[test]
-    fn scroll_snaps_on_gross_desync_instead_of_crawling() {
-        // avail (200) ≫ RESYNC (40): a discontinuity (rate-change refill) → snap behind the edge,
-        // don't crawl hundreds of +1 frames. Latch clears.
-        assert_eq!(advance_scroll(0, 200, 2, 1), (188, 0));
-        // Anchor somehow ahead of the live edge (avail < 0) also snaps.
-        assert_eq!(advance_scroll(100, 50, 2, 0), (38, 0));
-    }
-
-    #[test]
-    fn scroll_never_crosses_the_live_edge_on_stall() {
-        // Buffer drained to the edge (avail 0, e.g. paused): step clamps to 0, anchor frozen at edge.
-        assert_eq!(advance_scroll(11, 11, 2, 0), (11, -1));
-        // avail 1 with px_per_frame 2: would overshoot, clamps to land exactly on the edge.
-        assert_eq!(advance_scroll(10, 11, 2, 0), (11, -1));
+    fn scroll_clamps_spp_to_a_sane_floor() {
+        // A pathological target can't drive samples-per-col below the floor (columns must hold ≥1 bin).
+        let (_, spp) = advance_scroll(600, super::MIN_SAMPLES_PER_COL, 2, 0, 2400.0, 1.0, true);
+        assert!(spp >= super::MIN_SAMPLES_PER_COL);
     }
 }
