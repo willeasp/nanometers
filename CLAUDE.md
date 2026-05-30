@@ -4,6 +4,17 @@ Chill open-source audio meter plugin (Logic, FL Studio, Ableton, REAPER, Bitwig)
 
 Read this file before non-trivial work — most of it is hard-won and not derivable from the code alone.
 
+## The code is the source of truth
+
+For how nanometers actually behaves *right now*, the code wins — over this file, the ADRs, the
+specs, the README, all of it. Prose drifts; the code is what runs. Don't describe, claim, or rely on
+behavior you haven't confirmed in the source (or by running it) — see *Verify before claiming done*
+below. When a doc and the code disagree about current behavior, the doc is stale; fix the doc to match.
+
+The exception is *intent*, not behavior: the ADRs, specs, and glossary are the source of truth for
+decisions, contracts, and vocabulary — much of which isn't built yet. Code that contradicts an
+accepted ADR is a bug to fix (or an ADR to deliberately supersede), never a license to ignore it.
+
 ## Build / install / test
 
 ```sh
