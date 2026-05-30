@@ -226,25 +226,32 @@ impl WaveStore {
         self.samples_per_bin
     }
 
-    /// The continuous (sub-column) scroll position of the newest sample, in display-column units,
-    /// for a strip of `display_columns` columns. Monotonic; its integer part is the newest whole
-    /// column, its fraction the sub-pixel offset within the next. 0 while idle.
-    pub fn scroll_position_cols(&self, display_columns: usize) -> f64 {
-        if self.samples_per_bin == 0 || display_columns == 0 {
-            return 0.0;
-        }
-        let bpc = (self.bins.len() / display_columns).max(1);
-        let samples_per_col = (bpc * self.samples_per_bin) as f64;
-        self.samples_folded as f64 / samples_per_col
+    /// Total samples folded since the last reset — the live scroll edge is `samples_folded /
+    /// samples_per_col` columns.
+    pub fn samples_folded(&self) -> u64 {
+        self.samples_folded
     }
 
-    /// Merge the stored bins into `num` display columns (oldest→newest), each `bpc` base bins wide,
-    /// the rightmost column being absolute column `rightmost_col`. Columns are anchored to absolute
-    /// bin boundaries (column k covers bins `[k·bpc, (k+1)·bpc)`), so a feature's column value is
-    /// frozen as it scrolls. Columns off the ring (or before recording started) read as silence.
-    pub fn build_columns(&mut self, num: usize, bpc: usize, rightmost_col: i64) -> Vec<BaseBin> {
+    /// Samples that have closed into base bins (excludes the in-progress accumulator). A display
+    /// column whose sample range ends within this is fully populated.
+    pub fn closed_samples(&self) -> u64 {
+        self.bins_closed * self.samples_per_bin as u64
+    }
+
+    /// Merge the base bins into `num` display columns (oldest→newest), each spanning
+    /// `samples_per_col` samples (refresh-derived, so the scroll can advance by whole pixels at a
+    /// rate that matches the audio). The rightmost column is absolute column `rightmost_col`; column
+    /// `k` covers samples `[k·spc, (k+1)·spc)`, mapped to the overlapping base bins (≤0.5 ms edge
+    /// slop). Anchored to absolute sample boundaries, so a feature's column value is frozen as it
+    /// scrolls. Columns off the ring (or before recording started) read as silence.
+    pub fn build_columns(
+        &mut self,
+        num: usize,
+        samples_per_col: f64,
+        rightmost_col: i64,
+    ) -> Vec<BaseBin> {
         let num = num.max(1);
-        let bpc = bpc.max(1) as i128;
+        let spb = self.samples_per_bin.max(1) as f64;
         let n = self.bins.len();
         let total = self.bins_closed as i128;
         let head = (self.bins_closed % n as u64) as usize;
@@ -255,11 +262,13 @@ impl WaveStore {
 
         let mut out = Vec::with_capacity(num);
         for c in 0..num {
-            let abs_col = rightmost_col as i128 - (num as i128 - 1 - c as i128);
-            let start_abs = abs_col * bpc;
-            let end_abs = start_abs + bpc;
-            let lo = start_abs.max(win_start);
-            let hi = end_abs.min(total);
+            let abs_col = (rightmost_col - (num as i64 - 1 - c as i64)) as f64;
+            let start_sample = abs_col * samples_per_col;
+            // Base bins overlapping this column's sample range (floor/ceil → ≤1 bin of slop).
+            let lo_bin = (start_sample / spb).floor() as i128;
+            let hi_bin = ((start_sample + samples_per_col) / spb).ceil() as i128;
+            let lo = lo_bin.max(win_start);
+            let hi = hi_bin.min(total);
             out.push(if lo < hi {
                 merge(&self.linear[(lo - win_start) as usize..(hi - win_start) as usize])
             } else {
@@ -298,34 +307,38 @@ mod tests {
     }
 
     #[test]
-    fn scroll_position_advances_with_samples() {
+    fn sample_counters_track_pushes() {
         const SR: f32 = 48000.0;
         let mut s = WaveStore::new(2000, 250.0, 4000.0);
         s.set_sample_rate(SR);
-        // display_columns = 200 → bpc = 2000/200 = 10 → samples_per_col = 10·24 = 240.
-        assert_eq!(s.scroll_position_cols(200), 0.0);
+        let spb = s.samples_per_bin() as u64; // 24 @ 48k
+        assert_eq!(s.samples_folded(), 0);
         for _ in 0..240 {
             s.push(0.0, 0.0);
         }
-        assert!((s.scroll_position_cols(200) - 1.0).abs() < 1e-9, "one column after 240 samples");
-        for _ in 0..120 {
+        assert_eq!(s.samples_folded(), 240);
+        // closed_samples counts only whole bins (240/24 = 10 bins closed → 240 samples closed).
+        assert_eq!(s.closed_samples(), 10 * spb);
+        // A half-open bin: 12 more samples → folded 252, but still 10 closed bins.
+        for _ in 0..12 {
             s.push(0.0, 0.0);
         }
-        assert!((s.scroll_position_cols(200) - 1.5).abs() < 1e-9, "half a column more after 120");
+        assert_eq!(s.samples_folded(), 252);
+        assert_eq!(s.closed_samples(), 10 * spb);
     }
 
     /// Feed a distinctive loud "kick", capture its display column's height, scroll it left by
     /// feeding more silence, and assert the SAME kick has the SAME height at the new position —
-    /// the property the absolute-bin anchoring guarantees, exercised through the real scroll-anchor
-    /// path the Module uses (`scroll_position_cols().floor()` → `build_columns` anchor).
+    /// the property the sample-anchored columns guarantee, exercised through the Module's real
+    /// anchor path (`floor(samples_folded / samples_per_col)` → `build_columns`).
     #[test]
     fn feature_keeps_constant_height_as_it_scrolls() {
         const SR: f32 = 48000.0;
         const COLUMNS: usize = 200;
+        const SPC: f64 = 240.0; // samples per column
         let spb = (SR * BIN_SECONDS).round() as usize;
         let mut s = WaveStore::new(2000, 250.0, 4000.0); // 1 s window
         s.set_sample_rate(SR);
-        let bpc = s.window_bins() / COLUMNS;
 
         let silence = |s: &mut WaveStore, bins: usize| {
             for _ in 0..bins * spb {
@@ -339,8 +352,8 @@ mod tests {
         }
         silence(&mut s, 40);
 
-        let rightmost1 = s.scroll_position_cols(COLUMNS).floor() as i64;
-        let cols1 = s.build_columns(COLUMNS, bpc, rightmost1);
+        let rightmost1 = (s.samples_folded() as f64 / SPC).floor() as i64;
+        let cols1 = s.build_columns(COLUMNS, SPC, rightmost1);
         let (idx1, kick1) = cols1
             .iter()
             .enumerate()
@@ -349,8 +362,8 @@ mod tests {
         assert!(kick1.env[0].max > 0.5, "kick should be a tall column");
 
         silence(&mut s, 300); // scroll it well to the left
-        let rightmost2 = s.scroll_position_cols(COLUMNS).floor() as i64;
-        let cols2 = s.build_columns(COLUMNS, bpc, rightmost2);
+        let rightmost2 = (s.samples_folded() as f64 / SPC).floor() as i64;
+        let cols2 = s.build_columns(COLUMNS, SPC, rightmost2);
         let (idx2, kick2) = cols2
             .iter()
             .enumerate()

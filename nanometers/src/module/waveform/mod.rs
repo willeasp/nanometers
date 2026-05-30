@@ -3,18 +3,24 @@
 //! A scrolling amplitude-envelope view: per channel, a filled min/max contour, spectrally colored,
 //! newest sample at the right edge. Replaces the fake glow on the Oscilloscope (0007).
 //!
-//! Split of concerns: [`store::WaveStore`] owns the GPU-free state (base-bin ring, accumulator,
-//! filterbank) and the column building (unit-tested, incl. scroll stability); this module is the
-//! thin GPU wrapper. `update` folds `ctx.new` into the store; `prepare` builds the per-column
-//! contour geometry for the viewport width into an offscreen MSAA target and resolves it; `render`
-//! composites that resolved texture into the column. Geometry is plain [-1, 1] clip space — the
-//! host sets viewport+scissor.
+//! Scroll (the "subway sign" model — uniform integer-pixel movement):
+//! the contour moves by a FIXED integer number of pixels every display frame, paced by the frame
+//! clock, NOT by how many samples drained that frame (whose ±20% jitter was the source of the
+//! micro-jumping). Each column is sized to an exact span of samples derived from the refresh rate —
+//! `samples_per_col = sample_rate / (px_per_frame · fps)` — so the audio produces columns at exactly
+//! the rate the display consumes them: no drift, and every frame is an identical clean pixel shift.
+//! No sub-pixel interpolation → crisp 1px columns, no transient brightness pulse.
+//!
+//! Split of concerns: [`store::WaveStore`] owns the GPU-free base-bin store + sample-anchored column
+//! building (unit-tested). The contour renders into an own 4× MSAA offscreen (0007) for edge AA,
+//! resolved and composited 1:1 into the column.
 
 pub mod color;
 pub mod store;
 
 use bytemuck::{Pod, Zeroable};
 use std::borrow::Cow;
+use std::time::Instant;
 use wgpu::util::DeviceExt;
 
 use super::{EventStatus, FrameContext, Module, Rect};
@@ -24,44 +30,50 @@ use store::WaveStore;
 /// 3-band filterbank crossovers (ADR 0001; dev-player tuning later, spec §6/§10).
 const BAND_LOW_HZ: f32 = 250.0;
 const BAND_HIGH_HZ: f32 = 4000.0;
-/// Default viewable window (spec §6 — Module config later).
-const DEFAULT_WINDOW_SECONDS: f32 = 5.0;
-/// Per-half amplitude scale. Each channel occupies half the column height (L top, R bottom,
-/// centered at clip y ±0.5); sample ±1 reaches ±0.45 within its half, leaving a small margin.
+/// Viewable window the display targets (spec §6 — Module config later). The actual window is
+/// refresh-snapped a hair off this so the scroll is an exact integer px/frame.
+const DISPLAY_WINDOW_SECONDS: f64 = 5.0;
+/// The base-bin store holds a bit more than the display window so the left edge never clips.
+const STORE_WINDOW_SECONDS: f32 = 6.0;
+/// Per-half amplitude scale: L top half (clip-y center +0.5), R bottom half (−0.5); sample ±1
+/// reaches ±0.45 within its half.
 const HALF_SCALE: f32 = 0.45;
-/// Clip-y center of each channel's half: L = +0.5 (top), R = −0.5 (bottom).
 const HALF_CENTER: [f32; 2] = [0.5, -0.5];
-/// Cap on columns built per frame (≈ one per pixel; the window is rarely wider).
-const MAX_COLUMNS: usize = 2048;
+/// Cap on display columns (≈ one per pixel; the window is rarely wider).
+const MAX_COLUMNS: usize = 4096;
 /// Gentle global desaturation: mix each column color this far toward white (ADR 0001 dev-tuning).
 const COLOR_WHITE_MIX: f32 = 0.18;
 /// MSAA sample count for the Waveform's own offscreen target (0007 — host pass stays single-sample).
 const MSAA_SAMPLES: u32 = 4;
-/// Each display column is this many physical px wide. ≥2 px band-limits the contour so a sharp 1px
-/// feature can't pulse in brightness as the sub-pixel scroll offset sweeps (a 1px feature at a
-/// half-pixel offset splits its energy across two pixels → dimmer; a 2px feature keeps a
-/// full-brightness leading pixel at any offset). The columns-wide offscreen is linearly upscaled
-/// to the viewport at composite.
-const PIXELS_PER_COLUMN: f32 = 2.0;
-/// Scroll-smoothing time constant (seconds). The per-frame EMA coefficient is derived from this and
-/// the measured frame dt, so the smoothing (which low-passes the ±20% per-frame sample-drain
-/// jitter into a constant visual velocity) is frame-rate-independent — same feel at 60 and 120 Hz.
-const SCROLL_TAU: f64 = 0.04;
+/// Re-lock the scroll clock when the measured fps drifts more than this fraction from the locked
+/// value (e.g. the startup 60→120 settle), so a stable refresh gives a stable px/frame.
+const FPS_RELOCK_FRAC: f64 = 0.08;
+
+/// Integer pixels the contour moves per display frame: round the ideal continuous rate
+/// (`columns / (window · fps)`) to the nearest whole pixel, at least 1.
+fn pixels_per_frame(columns: usize, window_seconds: f64, fps: f64) -> i64 {
+    if window_seconds <= 0.0 || fps <= 0.0 {
+        return 1;
+    }
+    ((columns as f64 / (window_seconds * fps)).round() as i64).max(1)
+}
+
+/// Samples each column spans so the audio column-rate equals the display rate (`px_per_frame · fps`)
+/// — i.e. `samples_per_col · px_per_frame · fps == sample_rate`, which is what makes the uniform
+/// integer scroll drift-free.
+fn samples_per_column(sample_rate: f64, px_per_frame: i64, fps: f64) -> f64 {
+    let denom = px_per_frame as f64 * fps;
+    if denom <= 0.0 {
+        return 1.0;
+    }
+    sample_rate / denom
+}
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 struct Vertex {
     pos: [f32; 2],
     color: [f32; 3],
-}
-
-/// Composite uniform: sub-pixel horizontal sampling offset (in UV) that slides the resolved
-/// contour smoothly between whole-column steps. `x_offset` is added to the sampled UV.x.
-#[repr(C)]
-#[derive(Copy, Clone, Pod, Zeroable)]
-struct CompositeUniform {
-    x_offset: f32,
-    _pad: [f32; 3],
 }
 
 /// Per-viewport-size offscreen render target: a 4× MSAA color texture the contour draws into, plus
@@ -84,36 +96,28 @@ pub struct WaveformModule {
     vertex_count_r: u32,
     verts: Vec<Vertex>,
 
-    // Composite pipeline (samples the resolved offscreen texture into the host's shared pass).
+    // Composite pipeline (samples the resolved offscreen texture 1:1 into the host's shared pass).
     composite_pipeline: wgpu::RenderPipeline,
     composite_layout: wgpu::BindGroupLayout,
-    composite_uniform: wgpu::Buffer,
     sampler: wgpu::Sampler,
     format: wgpu::TextureFormat,
     offscreen: Option<Offscreen>,
 
-    /// Smoothed scroll position in display-column units (low-passed target); its fraction is the
-    /// sub-pixel composite offset. `scroll_init` snaps it to the true position when uninitialized
-    /// or after a scale change (column count or sample rate), so there's no sweep across the
-    /// discontinuity. `last_*` detect those scale changes; `last_frame` clocks the dt-scaled EMA.
-    display_pos: f64,
+    // Scroll clock (the subway-sign uniform integer-pixel scroll).
+    fps_est: f64,
+    locked_fps: f64,
+    px_per_frame: i64,
+    samples_per_col: f64,
+    scroll_col: i64, // display anchor in whole columns (= pixels)
     scroll_init: bool,
     last_columns: usize,
     last_sample_rate: f32,
-    last_frame: Option<std::time::Instant>,
+    last_frame: Option<Instant>,
 }
 
 impl WaveformModule {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
-        Self::with_window(device, format, DEFAULT_WINDOW_SECONDS)
-    }
-
-    pub fn with_window(
-        device: &wgpu::Device,
-        format: wgpu::TextureFormat,
-        window_seconds: f32,
-    ) -> Self {
-        let window_bins = (window_seconds / store::BIN_SECONDS).round().max(1.0) as usize;
+        let window_bins = (STORE_WINDOW_SECONDS / store::BIN_SECONDS).round().max(1.0) as usize;
         let store = WaveStore::new(window_bins, BAND_LOW_HZ, BAND_HIGH_HZ);
 
         // ── Contour pipeline: colored triangle strips, rendered MSAA into the offscreen target ──
@@ -181,7 +185,7 @@ impl WaveformModule {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
 
-        // ── Composite pipeline: full-viewport quad sampling the resolved offscreen texture ──
+        // ── Composite pipeline: full-viewport triangle sampling the resolved offscreen 1:1 ──
         let composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("waveform-composite-shader"),
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(COMPOSITE_WGSL)),
@@ -203,16 +207,6 @@ impl WaveformModule {
                     binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
                     count: None,
                 },
             ],
@@ -237,8 +231,6 @@ impl WaveformModule {
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
-                    // Premultiplied-ish alpha so the transparent offscreen background lets the
-                    // host clear-color show through and only the contour composites.
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -255,11 +247,6 @@ impl WaveformModule {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
-        let composite_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("waveform-composite-uniform"),
-            contents: bytemuck::bytes_of(&CompositeUniform { x_offset: 0.0, _pad: [0.0; 3] }),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
 
         Self {
             store,
@@ -270,11 +257,14 @@ impl WaveformModule {
             verts: Vec::with_capacity(4 * MAX_COLUMNS),
             composite_pipeline,
             composite_layout,
-            composite_uniform,
             sampler,
             format,
             offscreen: None,
-            display_pos: 0.0,
+            fps_est: 60.0,
+            locked_fps: 0.0,
+            px_per_frame: 1,
+            samples_per_col: 1.0,
+            scroll_col: 0,
             scroll_init: false,
             last_columns: 0,
             last_sample_rate: 0.0,
@@ -282,8 +272,8 @@ impl WaveformModule {
         }
     }
 
-    /// (Re)allocate the offscreen MSAA + resolved textures when the viewport size changes (the
-    /// reviewer's caching note). Guards against zero/sub-1px sizes during a collapsed column.
+    /// (Re)allocate the offscreen MSAA + resolved textures when the viewport size changes; guards
+    /// against zero/sub-1px sizes during a collapsed column.
     fn ensure_offscreen(&mut self, device: &wgpu::Device, w: u32, h: u32) {
         let w = w.max(1);
         let h = h.max(1);
@@ -292,26 +282,24 @@ impl WaveformModule {
                 return;
             }
         }
-        let msaa = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("waveform-msaa"),
-            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: MSAA_SAMPLES,
-            dimension: wgpu::TextureDimension::D2,
-            format: self.format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-        let resolved = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("waveform-resolved"),
-            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: self.format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
+        let make = |label, samples, usage| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: samples,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.format,
+                usage,
+                view_formats: &[],
+            })
+        };
+        let msaa = make("waveform-msaa", MSAA_SAMPLES, wgpu::TextureUsages::RENDER_ATTACHMENT);
+        let resolved = make(
+            "waveform-resolved",
+            1,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        );
         let msaa_view = msaa.create_view(&wgpu::TextureViewDescriptor::default());
         let resolved_view = resolved.create_view(&wgpu::TextureViewDescriptor::default());
         let composite_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -326,10 +314,6 @@ impl WaveformModule {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&self.sampler),
                 },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: self.composite_uniform.as_entire_binding(),
-                },
             ],
         });
         self.offscreen = Some(Offscreen { width: w, height: h, msaa_view, resolved_view, composite_bind_group });
@@ -340,7 +324,7 @@ impl Module for WaveformModule {
     fn update(&mut self, ctx: &FrameContext, _queue: &wgpu::Queue) {
         if ctx.sample_rate != self.last_sample_rate {
             self.last_sample_rate = ctx.sample_rate;
-            self.scroll_init = false; // store clears its clocks on a rate change → re-anchor scroll
+            self.scroll_init = false; // store clears its clocks on a rate change → re-anchor
         }
         self.store.set_sample_rate(ctx.sample_rate);
         if !self.store.is_active() {
@@ -364,46 +348,48 @@ impl Module for WaveformModule {
             return;
         }
 
-        // Band-limit: ~2 px per column so the contour has no 1px features to pulse under sub-pixel
-        // scroll. The columns-wide offscreen is upscaled to the viewport at composite.
-        let columns =
-            ((viewport.w / PIXELS_PER_COLUMN).round() as usize).clamp(1, MAX_COLUMNS);
-        if columns != self.last_columns {
-            self.last_columns = columns;
-            self.scroll_init = false; // column scale (and thus the position unit) changed → re-anchor
-        }
-        let bpc = (self.store.window_bins() / columns).max(1);
-
-        // Smooth the scroll position toward the true (sample-derived) position with a dt-scaled EMA
-        // so it's frame-rate-independent. The integer part anchors which columns we render; the
-        // fraction is the sub-pixel composite offset. Snapping when uninitialized/after a scale
-        // change avoids a sweep across the discontinuity.
-        let now = std::time::Instant::now();
+        // Measure the refresh rate (EMA of 1/dt) to size the uniform pixel step.
+        let now = Instant::now();
         let dt = self
             .last_frame
             .map(|t| (now - t).as_secs_f64())
             .unwrap_or(1.0 / 60.0);
         self.last_frame = Some(now);
-        let target = self.store.scroll_position_cols(columns);
-        if self.scroll_init {
-            let alpha = 1.0 - (-dt / SCROLL_TAU).exp();
-            self.display_pos += (target - self.display_pos) * alpha;
-        } else {
-            self.display_pos = target;
+        let inst_fps = (1.0 / dt.max(1e-4)).clamp(20.0, 360.0);
+        self.fps_est = self.fps_est * 0.9 + inst_fps * 0.1;
+
+        let columns = (viewport.w.round() as usize).clamp(1, MAX_COLUMNS);
+        let sr = self.last_sample_rate as f64;
+
+        // (Re)lock the pixel step + column width when the scale changes (uninitialized, viewport
+        // resize, rate change) or the measured fps settles to a new value (e.g. 60→120 at startup).
+        let fps_drifted = self.locked_fps > 0.0
+            && (self.fps_est - self.locked_fps).abs() / self.locked_fps > FPS_RELOCK_FRAC;
+        if !self.scroll_init || columns != self.last_columns || fps_drifted {
+            self.last_columns = columns;
+            self.locked_fps = self.fps_est;
+            self.px_per_frame = pixels_per_frame(columns, DISPLAY_WINDOW_SECONDS, self.fps_est);
+            self.samples_per_col = samples_per_column(sr, self.px_per_frame, self.fps_est);
+            // Snap the display to the live audio edge so there's no sweep across the discontinuity.
+            self.scroll_col = (self.store.samples_folded() as f64 / self.samples_per_col).floor() as i64;
             self.scroll_init = true;
+        } else {
+            // The smooth case: advance by exactly px_per_frame whole pixels — every frame identical.
+            self.scroll_col += self.px_per_frame;
+            // Drift guard (display vs audio clock ppm, or a long stall): hard-snap only when far off.
+            let audio_col = (self.store.samples_folded() as f64 / self.samples_per_col).floor() as i64;
+            if (audio_col - self.scroll_col).abs() > self.px_per_frame * 3 {
+                self.scroll_col = audio_col;
+            }
         }
-        // Clamp the rightmost drawn column to the last fully-closed one so the live edge never shows
-        // a partial/empty column (esp. on the snap frame). frac stays the sub-pixel of display_pos.
-        let rightmost_col = (self.display_pos.floor() as i64).min(self.store.last_full_column(bpc));
-        let frac = (self.display_pos - self.display_pos.floor()) as f32; // [0, 1) columns
 
-        let cols = self.store.build_columns(columns, bpc, rightmost_col);
-        // Place column c at the CENTER of pixel c in the `columns`-wide offscreen: x = (2c+1)/N − 1,
-        // keeping columns exactly on the pixel grid. The sub-pixel scroll comes from the composite
-        // offset below, not from moving these vertices (which would re-introduce shimmer).
+        // Never draw past the last fully-closed column → the live edge is never a partial/empty one.
+        let last_full = (self.store.closed_samples() as f64 / self.samples_per_col).floor() as i64 - 1;
+        let rightmost_col = self.scroll_col.min(last_full);
+        let cols = self.store.build_columns(columns, self.samples_per_col, rightmost_col);
+
+        // Columns at exact pixel centers in the `columns`-wide offscreen: x = (2c+1)/N − 1.
         let inv_cols = 1.0 / columns as f32;
-
-        // One triangle strip per channel: L top half (center +0.5), R bottom half (−0.5) — spec §4.
         self.verts.clear();
         for ch in 0..2 {
             for (c, merged) in cols.iter().enumerate() {
@@ -424,17 +410,7 @@ impl Module for WaveformModule {
         self.vertex_count_l = (2 * columns) as u32;
         self.vertex_count_r = (2 * columns) as u32;
 
-        // Sub-pixel scroll: shift the composite sample left by `frac` of one column (= one pixel).
-        // Linear filtering interpolates → smooth motion between whole-column steps.
-        queue.write_buffer(
-            &self.composite_uniform,
-            0,
-            bytemuck::bytes_of(&CompositeUniform { x_offset: frac * inv_cols, _pad: [0.0; 3] }),
-        );
-
-        // Offscreen MSAA pass: draw both contour strips, resolved to a single-sample texture (0007).
-        // The offscreen is `columns` wide (1 texel/column); the composite upscales it to the
-        // viewport, so a column becomes PIXELS_PER_COLUMN px and there are no 1px features to pulse.
+        // Offscreen MSAA pass (columns-wide), resolved to a single-sample texture (0007).
         self.ensure_offscreen(device, columns as u32, viewport.h.round() as u32);
         let off = self.offscreen.as_ref().unwrap();
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -443,7 +419,6 @@ impl Module for WaveformModule {
                 view: &off.msaa_view,
                 resolve_target: Some(&off.resolved_view),
                 ops: wgpu::Operations {
-                    // Transparent clear so only the contour composites over the host background.
                     load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                     store: wgpu::StoreOp::Store,
                 },
@@ -465,8 +440,7 @@ impl Module for WaveformModule {
         if self.vertex_count_l == 0 {
             return;
         }
-        // Composite the resolved (antialiased) contour over the host's cleared background. A
-        // full-viewport quad is generated in the vertex shader from the vertex index.
+        // Composite the resolved (antialiased) contour 1:1 over the host's cleared background.
         rpass.set_pipeline(&self.composite_pipeline);
         rpass.set_bind_group(0, &off.composite_bind_group, &[]);
         rpass.draw(0..3, 0..1);
@@ -503,12 +477,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
-// Full-screen triangle that samples the resolved offscreen contour. Three verts cover the viewport.
-// The sub-pixel scroll offset shifts the sampled UV.x left (clamp sampler smears <1px at the edges).
+// Full-viewport triangle sampling the resolved offscreen contour 1:1 (no offset — the scroll is
+// whole-pixel, done by shifting the rendered columns, so no sub-pixel sampling is needed).
 const COMPOSITE_WGSL: &str = r#"
-struct Uniforms { x_offset: f32 };
-@group(0) @binding(2) var<uniform> u: Uniforms;
-
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
@@ -516,13 +487,10 @@ struct VsOut {
 
 @vertex
 fn vs_main(@builtin(vertex_index) idx: u32) -> VsOut {
-    // (0,0),(2,0),(0,2) in UV → a triangle covering the [0,1] viewport.
     var uv = vec2<f32>(f32((idx << 1u) & 2u), f32(idx & 2u));
     var o: VsOut;
     o.clip = vec4<f32>(uv * 2.0 - 1.0, 0.0, 1.0);
-    // Shift sampling right by x_offset (content appears to scroll left), and flip Y for the
-    // framebuffer's top-left origin.
-    o.uv = vec2<f32>(uv.x + u.x_offset, 1.0 - uv.y);
+    o.uv = vec2<f32>(uv.x, 1.0 - uv.y); // flip Y: framebuffer origin top-left
     return o;
 }
 
@@ -534,3 +502,29 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     return textureSample(tex, samp, in.uv);
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pixels_per_frame_rounds_to_whole_pixels() {
+        // 1224 px over 5 s at 120 Hz → 1224/600 = 2.04 → 2 px/frame.
+        assert_eq!(pixels_per_frame(1224, 5.0, 120.0), 2);
+        // Same window at 60 Hz → 1224/300 = 4.08 → 4 px/frame (twice as many, half the rate).
+        assert_eq!(pixels_per_frame(1224, 5.0, 60.0), 4);
+        // Never zero.
+        assert_eq!(pixels_per_frame(100, 100.0, 60.0), 1);
+    }
+
+    #[test]
+    fn samples_per_column_makes_rates_match() {
+        // The drift-free invariant: samples_per_col · (px_per_frame · fps) == sample_rate, so the
+        // audio produces columns at exactly the rate the display consumes them.
+        let sr = 48000.0;
+        let ppf = pixels_per_frame(1224, 5.0, 120.0); // 2
+        let spc = samples_per_column(sr, ppf, 120.0);
+        assert!((spc - 200.0).abs() < 1e-9, "48000/(2·120) = 200 samples/col");
+        assert!((spc * ppf as f64 * 120.0 - sr).abs() < 1e-6, "rates match → no drift");
+    }
+}
