@@ -6,3 +6,4 @@ Cargo.lock.bak
 .vscode/
 *.swp
 .claude/scheduled_tasks.lock
+.claude/worktrees/
