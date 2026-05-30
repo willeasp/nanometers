@@ -42,10 +42,10 @@ impl Column {
 /// The app-default layout for a fresh instance with no persisted state (ADR 0003): Waveform +
 /// Loudness side by side, each half width.
 pub fn default_layout() -> Vec<Column> {
-    // The Waveform earns the bulk of the width; Loudness is a compact readout strip.
+    // The Waveform earns the bulk of the width; Loudness is a compact bar cluster + readout.
     vec![
-        Column::new(0, module_type::WAVEFORM, 0.78),
-        Column::new(1, module_type::LOUDNESS, 0.22),
+        Column::new(0, module_type::WAVEFORM, 0.85),
+        Column::new(1, module_type::LOUDNESS, 0.15),
     ]
 }
 

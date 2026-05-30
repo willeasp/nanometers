@@ -17,7 +17,7 @@ use std::borrow::Cow;
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 use wgpu_text::glyph_brush::ab_glyph::FontRef;
-use wgpu_text::glyph_brush::{HorizontalAlign, Layout, Section, Text, VerticalAlign};
+use wgpu_text::glyph_brush::{HorizontalAlign, Layout, Section, Text};
 use wgpu_text::{BrushBuilder, TextBrush};
 
 use super::{EventStatus, FrameContext, Module, Rect};
@@ -33,14 +33,13 @@ const VALUE_COLOR: [f32; 4] = [0.90, 0.94, 1.0, 1.0];
 /// Bottom of the bar scale; loudness at or below this reads as an empty bar (dev-tuning).
 const BAR_FLOOR_LUFS: f64 = -40.0;
 const LABELS: [&str; 3] = ["M", "S", "I"];
-/// Compact-row layout (3 rows: label + value + a thin level bar). The display is a small readout
-/// strip, not big VU columns. All in clip space (host `set_viewport` maps it into the column).
-const ROW_Y: [f32; 3] = [0.46, 0.0, -0.46]; // clip-y centers of the three rows (M top, I bottom)
-/// Thin horizontal level bar under each value: a faint full-width track + a colored fill.
-const BAR_X0: f32 = -0.78;
-const BAR_X1: f32 = 0.78;
-const BAR_HALF_H: f32 = 0.014; // thin: full height ≈ BAR_HALF_H · viewport_h px (~12px at 840)
-const BAR_DROP: f32 = 0.16; // clip-y offset of the bar below its row's text center
+/// Compact meter: three thin VERTICAL bars side by side (M/S/I), value above, label below.
+/// Bars are a fixed pixel width regardless of column size; the rest is clip space (host
+/// `set_viewport` maps it into the column).
+const PX_BAR_W: f32 = 12.0; // bar width in px
+const PX_BAR_PITCH: f32 = 24.0; // center-to-center spacing in px (tight side-by-side cluster)
+const BAR_BASELINE_Y: f32 = 0.12; // clip-y bottom of bars (cluster sits in the upper area)
+const BAR_TOP_Y: f32 = 0.86; // clip-y at full scale (near top)
 const TRACK_COLOR: [f32; 3] = [0.16, 0.18, 0.22];
 /// Per-frame smoothing toward the measured value so the bars/numbers ease instead of stepping
 /// every 100 ms (visual ballistics; the DSP itself is exact).
@@ -195,14 +194,13 @@ fn fmt_value(v: f64) -> String {
     }
 }
 
-/// `"M  -12.3"` for a row — the eased value once the scale has a measurement, dashes until then.
-fn row_text(k: usize, smoothed: f64, target: f64) -> String {
-    let v = if target.is_finite() {
+/// The eased value once a scale has a measurement, dashes until then.
+fn value_text(smoothed: f64, target: f64) -> String {
+    if target.is_finite() {
         fmt_value(smoothed)
     } else {
         "--.-".to_string()
-    };
-    format!("{}  {}", LABELS[k], v)
+    }
 }
 
 impl Module for LoudnessModule {
@@ -268,40 +266,41 @@ impl Module for LoudnessModule {
             self.smoothed[k] += (t - self.smoothed[k]) * SMOOTH_ALPHA;
         }
 
-        // Three compact rows: a faint full-width track + a colored fill, sitting under each value.
+        // Three thin VERTICAL bars side by side, centered: a faint full-height track + a colored
+        // fill rising from the baseline by the level fraction.
+        let half_w = PX_BAR_W / viewport.w; // clip half-width for a PX_BAR_W-px bar
+        let center_px = |k: usize| viewport.w * 0.5 + (k as f32 - 1.0) * PX_BAR_PITCH;
         self.verts.clear();
         for k in 0..3 {
             let frac = bar_fraction(self.smoothed[k]);
-            let cy = ROW_Y[k] - BAR_DROP;
-            let (y0, y1) = (cy - BAR_HALF_H, cy + BAR_HALF_H);
-            self.push_quad(BAR_X0, BAR_X1, y0, y1, TRACK_COLOR);
-            let fx1 = BAR_X0 + frac * (BAR_X1 - BAR_X0);
-            if fx1 > BAR_X0 {
-                self.push_quad(BAR_X0, fx1, y0, y1, bar_rgb(frac));
+            let cx = center_px(k) / viewport.w * 2.0 - 1.0;
+            let (x0, x1) = (cx - half_w, cx + half_w);
+            self.push_quad(x0, x1, BAR_BASELINE_Y, BAR_TOP_Y, TRACK_COLOR);
+            let top = BAR_BASELINE_Y + frac * (BAR_TOP_Y - BAR_BASELINE_Y);
+            if top > BAR_BASELINE_Y {
+                self.push_quad(x0, x1, BAR_BASELINE_Y, top, bar_rgb(frac));
             }
         }
         queue.write_buffer(&self.bars_vbuf, 0, bytemuck::cast_slice(&self.verts));
         self.bars_vertex_count = self.verts.len() as u32;
 
-        // Text: "M  -12.3" per row, left-aligned, vertically centered on the row, above its bar.
-        let value_scale = (viewport.w * 0.09).clamp(12.0, 24.0);
+        // Readable "label  value" rows stacked below the bar cluster (bigger text — the bars are
+        // the compact part, the numbers should be legible). Centered, M/S/I top→bottom matching the
+        // bars left→right.
+        let value_scale = (viewport.w * 0.17).clamp(15.0, 30.0);
+        let rows_y = [0.55f32, 0.71, 0.87];
         let strs: [String; 3] = [
-            row_text(0, self.smoothed[0], targets[0]),
-            row_text(1, self.smoothed[1], targets[1]),
-            row_text(2, self.smoothed[2], targets[2]),
+            format!("{}  {}", LABELS[0], value_text(self.smoothed[0], targets[0])),
+            format!("{}  {}", LABELS[1], value_text(self.smoothed[1], targets[1])),
+            format!("{}  {}", LABELS[2], value_text(self.smoothed[2], targets[2])),
         ];
-        let x_px = viewport.w * 0.10;
+        let cx = viewport.w * 0.5;
         let mut sections: Vec<Section> = Vec::with_capacity(3);
         for k in 0..3 {
-            let row_py = (0.5 - ROW_Y[k] / 2.0) * viewport.h;
             sections.push(
                 Section::default()
-                    .with_screen_position((x_px, row_py))
-                    .with_layout(
-                        Layout::default_single_line()
-                            .h_align(HorizontalAlign::Left)
-                            .v_align(VerticalAlign::Center),
-                    )
+                    .with_screen_position((cx, viewport.h * rows_y[k]))
+                    .with_layout(Layout::default_single_line().h_align(HorizontalAlign::Center))
                     .add_text(Text::new(&strs[k]).with_scale(value_scale).with_color(VALUE_COLOR)),
             );
         }
