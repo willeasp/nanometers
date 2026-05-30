@@ -5,3 +5,4 @@ Cargo.lock.bak
 .idea/
 .vscode/
 *.swp
+.claude/scheduled_tasks.lock
