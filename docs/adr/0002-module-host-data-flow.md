@@ -32,15 +32,28 @@ measurements live — Modules derive their own from the ring. It remains as a do
 for any future measurement that genuinely cannot tolerate the ring's drop-on-starve behavior;
 **nothing currently qualifies** (see below), so it stays tiny.
 
-This yields the `Module` trait — two phases mirroring the existing `on_frame` and the
-write-buffer-before-render-pass ordering already documented in `editor.rs`:
+This yields the `Module` trait — mirroring the existing `on_frame` and the
+write-buffer-before-render-pass ordering already documented in `editor.rs`. The conceptual split is
+two phases (fold vs draw), but "draw" needs a third, optional sub-phase: a Module that anti-aliases
+into its **own offscreen target** ([0007]) must encode that pass *before* the host opens its shared
+single-sample pass, which requires `CommandEncoder` access the shared `RenderPass` can't hand out.
+So `render` is preceded by an optional `prepare`:
 
 ```rust
 trait Module {
-    fn update(&mut self, ctx: &FrameContext, queue: &Queue);       // fold new samples → own GPU buffers
-    fn render(&mut self, rpass: &mut RenderPass, viewport: Rect);  // draw into my rectangle
+    fn update(&mut self, ctx: &FrameContext, queue: &Queue);                  // fold new samples → own GPU buffers
+    fn prepare(&mut self, device: &Device, queue: &Queue,
+               encoder: &mut CommandEncoder, viewport: Rect) {}               // optional: own offscreen passes ([0007])
+    fn render(&mut self, rpass: &mut RenderPass, viewport: Rect);             // draw/composite into my rectangle
+    fn on_event(&mut self, event: &Event, viewport: Rect) -> EventStatus;     // input ([0004])
+    fn save_config(&self) -> Vec<u8>;  fn load_config(&mut self, &[u8]);      // opaque config ([0003])
 }
 ```
+
+`set_scissor_rect(viewport)` (host-applied before each `render`) only **clips**; it applies no
+coordinate transform, so each Module maps its own geometry into `viewport`. `prepare` defaults to a
+no-op — Modules that draw straight into the shared pass (Loudness, the Oscilloscope) don't override
+it. (This is the built shape in `nanometers/src/module.rs`; the code is the source of truth.)
 
 ## Why not the alternatives
 

@@ -4,14 +4,12 @@
 //! upload. The audio thread never touches anything in here.
 
 use baseview::{WindowHandle, WindowOpenOptions, WindowScalePolicy};
-use bytemuck::{Pod, Zeroable};
 use crossbeam::atomic::AtomicCell;
 use nih_plug::params::persist::PersistentField;
 use nih_plug::prelude::*;
 use raw_window_handle::{HasRawWindowHandle, RawWindowHandle};
 use serde::{Deserialize, Serialize};
 use std::{
-    borrow::Cow,
     num::{NonZeroIsize, NonZeroU32},
     ptr::NonNull,
     sync::{
@@ -19,21 +17,15 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
-use wgpu::{SurfaceTargetUnsafe, util::DeviceExt};
+use wgpu::SurfaceTargetUnsafe;
 
+use crate::module::oscilloscope::OscilloscopeModule;
+use crate::module::{FrameContext, Module, Rect};
 use crate::{NanometersParams, Shared, StereoFrame};
 
-/// How many recent stereo frames the GUI keeps for the waveform display.
-/// 4096 ≈ 85 ms at 48 kHz / 21 ms at 192 kHz. Enough to see musical features at any rate.
-const DISPLAY_BUFFER_LEN: usize = 4096;
-
-/// Number of stacked passes for additive-glow rendering of the waveform. Must be odd so
-/// there's a central (zero-offset) layer. 9 gives a comfortably soft halo without too many
-/// instances per draw.
-const GLOW_LAYERS: u32 = 9;
-
 /// Background — near-black with the faintest blue tint. Will become a deliberate palette
-/// choice once the visualization style stabilizes.
+/// choice once the visualization style stabilizes. The host owns the clear (it owns the shared
+/// pass); Modules draw over it.
 const CLEAR_COLOR: wgpu::Color = wgpu::Color {
     r: 0.014,
     g: 0.016,
@@ -175,17 +167,13 @@ struct RenderWindow {
     surface: wgpu::Surface<'static>,
     surface_config: wgpu::SurfaceConfiguration,
 
-    waveform: WaveformRenderer,
+    /// The hosted Modules, left→right. Phase A: a single Oscilloscope at full surface; the layout
+    /// strip (Phase B) turns this into the persisted column list.
+    modules: Vec<Box<dyn Module>>,
 
-    /// Most recent `DISPLAY_BUFFER_LEN` stereo frames, ordered oldest→newest after `to_linear`.
-    /// Ring with `write_head` lets us avoid shifting on every push.
-    display_buffer: Box<[StereoFrame; DISPLAY_BUFFER_LEN]>,
-    write_head: usize,
-
-    /// Scratch space copied into for the GPU upload each frame (rotated so the oldest sample
-    /// is at index 0). Reused to avoid per-frame allocation.
-    linear_scratch_l: Box<[f32; DISPLAY_BUFFER_LEN]>,
-    linear_scratch_r: Box<[f32; DISPLAY_BUFFER_LEN]>,
+    /// This frame's freshly drained samples, oldest→newest. GUI-thread-only and reused across
+    /// frames (cleared each frame), so its growth never touches the audio path.
+    new_samples: Vec<StereoFrame>,
 }
 
 impl RenderWindow {
@@ -244,7 +232,10 @@ impl RenderWindow {
         let surface_config = surface.get_default_config(&adapter, width, height).unwrap();
         surface.configure(&device, &surface_config);
 
-        let waveform = WaveformRenderer::new(&device, surface_config.format);
+        // Phase A: one Oscilloscope (the wrapped legacy renderer) at full surface. Phase B builds
+        // this Vec from the persisted layout.
+        let modules: Vec<Box<dyn Module>> =
+            vec![Box::new(OscilloscopeModule::new(&device, surface_config.format))];
 
         Self {
             gui_context,
@@ -254,11 +245,8 @@ impl RenderWindow {
             queue,
             surface,
             surface_config,
-            waveform,
-            display_buffer: Box::new([[0.0; 2]; DISPLAY_BUFFER_LEN]),
-            write_head: 0,
-            linear_scratch_l: Box::new([0.0; DISPLAY_BUFFER_LEN]),
-            linear_scratch_r: Box::new([0.0; DISPLAY_BUFFER_LEN]),
+            modules,
+            new_samples: Vec::with_capacity(4096),
         }
     }
 
@@ -266,37 +254,17 @@ impl RenderWindow {
         self.surface.configure(&self.device, &self.surface_config);
     }
 
-    /// Drain whatever the audio thread has produced since last frame into our ring.
-    /// Wait-free pops; we stop when the ring is empty.
+    /// Drain whatever the audio thread produced since last frame into `new_samples` (cleared
+    /// first), oldest→newest. Wait-free pops; stop when the ring is empty. The lock is
+    /// uncontended — only this thread ever touches `samples_rx`; the Mutex is there because
+    /// rtrb::Consumer is !Sync, not to coordinate threads.
     fn drain_audio(&mut self) {
-        // The lock is uncontended — only this thread ever touches `samples_rx`. The Mutex is
-        // there for type-system reasons (rtrb::Consumer is !Sync), not to coordinate threads.
+        self.new_samples.clear();
         let Ok(mut rx) = self.shared.samples_rx.try_lock() else {
             return;
         };
         while let Ok(frame) = rx.pop() {
-            self.display_buffer[self.write_head] = frame;
-            self.write_head = (self.write_head + 1) % DISPLAY_BUFFER_LEN;
-        }
-    }
-
-    /// Rotate the ring into the scratch arrays so index 0 is the oldest frame. The wgpu
-    /// vertex buffer wants contiguous samples in time order to render a single line strip
-    /// without an ugly seam.
-    fn linearize_for_render(&mut self) {
-        let split = self.write_head;
-        // First chunk: from write_head to end = oldest samples
-        let head_to_end = DISPLAY_BUFFER_LEN - split;
-
-        for i in 0..head_to_end {
-            let frame = self.display_buffer[split + i];
-            self.linear_scratch_l[i] = frame[0];
-            self.linear_scratch_r[i] = frame[1];
-        }
-        for i in 0..split {
-            let frame = self.display_buffer[i];
-            self.linear_scratch_l[head_to_end + i] = frame[0];
-            self.linear_scratch_r[head_to_end + i] = frame[1];
+            self.new_samples.push(frame);
         }
     }
 }
@@ -304,7 +272,19 @@ impl RenderWindow {
 impl baseview::WindowHandler for RenderWindow {
     fn on_frame(&mut self, window: &mut baseview::Window) {
         self.drain_audio();
-        self.linearize_for_render();
+
+        // Phase 1: fan this frame's samples out to every Module to fold + upload.
+        let sample_rate = self.shared.sample_rate.load(Ordering::Relaxed);
+        let mono = self.shared.mono.load(Ordering::Relaxed);
+        let ctx = FrameContext {
+            new: &self.new_samples,
+            meas: &self.shared.meas,
+            sample_rate,
+            mono,
+        };
+        for m in self.modules.iter_mut() {
+            m.update(&ctx, &self.queue);
+        }
 
         let mut recreate_surface = false;
         let frame = match self.surface.get_current_texture() {
@@ -344,19 +324,25 @@ impl baseview::WindowHandler for RenderWindow {
                 label: Some("nanometers-encoder"),
             });
 
-        // Upload current sample window. queue.write_buffer is scheduled before the submit,
-        // so it must happen before begin_render_pass for the encoded draws to see it.
-        self.queue.write_buffer(
-            &self.waveform.vertex_buffer_l,
-            0,
-            bytemuck::cast_slice(self.linear_scratch_l.as_slice()),
-        );
-        self.queue.write_buffer(
-            &self.waveform.vertex_buffer_r,
-            0,
-            bytemuck::cast_slice(self.linear_scratch_r.as_slice()),
-        );
+        // Per-column viewports. Phase A: one Module at full surface. Phase B computes integer
+        // column boundaries from the layout fractions so columns tile with no gaps/overlaps.
+        let surface_w = self.surface_config.width as f32;
+        let surface_h = self.surface_config.height as f32;
+        let full = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: surface_w,
+            h: surface_h,
+        };
+        let viewports: Vec<Rect> = vec![full; self.modules.len()];
 
+        // Phase 2a: each Module encodes its own offscreen passes before the shared pass opens.
+        for (m, vp) in self.modules.iter_mut().zip(viewports.iter()) {
+            m.prepare(&self.device, &self.queue, &mut encoder, *vp);
+        }
+
+        // Phase 2b: one shared single-sample pass, cleared once; each Module draws into its column.
+        // write_buffer uploads from `update` are ordered before this submit, so the draws see them.
         {
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("nanometers-frame"),
@@ -374,7 +360,10 @@ impl baseview::WindowHandler for RenderWindow {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            self.waveform.render(&mut rpass, &self.queue);
+            for (m, vp) in self.modules.iter_mut().zip(viewports.iter()) {
+                rpass.set_scissor_rect(vp.x as u32, vp.y as u32, vp.w as u32, vp.h as u32);
+                m.render(&mut rpass, *vp);
+            }
         }
 
         self.queue.submit(Some(encoder.finish()));
@@ -405,242 +394,6 @@ fn scaled_size((w, h): (u32, u32), scale: f32) -> (u32, u32) {
         (h as f64 * scale as f64).round() as u32,
     )
 }
-
-// ────────────────────────────────────────────────────────────────────────────────────────
-// Waveform renderer — line strip per channel, vertex shader maps (index, sample) → clip.
-// One pipeline, two draws, one uniform buffer rewritten between them for y_offset.
-// ────────────────────────────────────────────────────────────────────────────────────────
-
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable)]
-struct WaveformUniforms {
-    sample_count: u32,
-    _pad0: u32,
-    y_offset: f32,
-    y_scale: f32,
-}
-
-struct WaveformRenderer {
-    pipeline: wgpu::RenderPipeline,
-
-    // One uniform + bind group per channel. They're written once at construction with the
-    // channel's static y_offset/y_scale, never touched afterwards. A previous version reused
-    // one buffer and rewrote it between draws — but `queue.write_buffer` is ordered against
-    // the next submit, not against individual encoded draws, so both writes happened first
-    // and the second one won. Resulted in both lines drawing at the R position.
-    bind_group_l: wgpu::BindGroup,
-    bind_group_r: wgpu::BindGroup,
-
-    vertex_buffer_l: wgpu::Buffer,
-    vertex_buffer_r: wgpu::Buffer,
-    vertex_count: u32,
-}
-
-impl WaveformRenderer {
-    fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("waveform-shader"),
-            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(WAVEFORM_WGSL)),
-        });
-
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("waveform-bgl"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
-
-        // One uniform per channel, written once with bytemuck. We use `create_buffer_init`
-        // so the data lands at creation — no separate write_buffer that races with the submit.
-        let make_uniform = |label: &str, y_offset: f32| {
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(label),
-                contents: bytemuck::bytes_of(&WaveformUniforms {
-                    sample_count: DISPLAY_BUFFER_LEN as u32,
-                    _pad0: 0,
-                    y_offset,
-                    y_scale: 0.4,
-                }),
-                usage: wgpu::BufferUsages::UNIFORM,
-            })
-        };
-        let uniform_buffer_l = make_uniform("waveform-uniforms-L", 0.5);
-        let uniform_buffer_r = make_uniform("waveform-uniforms-R", -0.5);
-
-        let make_bg = |label: &str, buf: &wgpu::Buffer| {
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some(label),
-                layout: &bind_group_layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: buf.as_entire_binding(),
-                }],
-            })
-        };
-        let bind_group_l = make_bg("waveform-bg-L", &uniform_buffer_l);
-        let bind_group_r = make_bg("waveform-bg-R", &uniform_buffer_r);
-
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("waveform-pl"),
-            bind_group_layouts: &[Some(&bind_group_layout)],
-            immediate_size: 0,
-        });
-
-        let vertex_layout = wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<f32>() as u64,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &[wgpu::VertexAttribute {
-                shader_location: 0,
-                format: wgpu::VertexFormat::Float32,
-                offset: 0,
-            }],
-        };
-
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("waveform-pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[vertex_layout],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    // Additive blending so stacked glow layers sum brightness into a saturated
-                    // core. (src.rgb * src.a) + (dst.rgb * 1.0). Alpha channel is unused for
-                    // display but we still write it to keep the surface coherent.
-                    blend: Some(wgpu::BlendState {
-                        color: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::SrcAlpha,
-                            dst_factor: wgpu::BlendFactor::One,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                        alpha: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::One,
-                            dst_factor: wgpu::BlendFactor::One,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                    }),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::LineStrip,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
-
-        let vbuf_size = (DISPLAY_BUFFER_LEN * std::mem::size_of::<f32>()) as u64;
-        let make_vbuf = |label: &str| {
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(label),
-                contents: &vec![0u8; vbuf_size as usize],
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            })
-        };
-
-        Self {
-            pipeline,
-            bind_group_l,
-            bind_group_r,
-            vertex_buffer_l: make_vbuf("waveform-vbuf-L"),
-            vertex_buffer_r: make_vbuf("waveform-vbuf-R"),
-            vertex_count: DISPLAY_BUFFER_LEN as u32,
-        }
-    }
-
-    fn render(&self, rpass: &mut wgpu::RenderPass<'_>, _queue: &wgpu::Queue) {
-        rpass.set_pipeline(&self.pipeline);
-
-        // Each draw is instanced over GLOW_LAYERS — the vertex shader uses instance_index
-        // to offset y and modulate alpha per layer, producing a Gaussian-falloff stacked-line
-        // glow with additive blending into the swapchain.
-
-        // L: top half. Uniform was baked in at creation, no per-frame writes needed.
-        rpass.set_bind_group(0, &self.bind_group_l, &[]);
-        rpass.set_vertex_buffer(0, self.vertex_buffer_l.slice(..));
-        rpass.draw(0..self.vertex_count, 0..GLOW_LAYERS);
-
-        // R: bottom half.
-        rpass.set_bind_group(0, &self.bind_group_r, &[]);
-        rpass.set_vertex_buffer(0, self.vertex_buffer_r.slice(..));
-        rpass.draw(0..self.vertex_count, 0..GLOW_LAYERS);
-    }
-}
-
-const WAVEFORM_WGSL: &str = r#"
-struct Uniforms {
-    sample_count: u32,
-    _pad0: u32,
-    // Clip-space Y center for this channel: +0.5 for L (top half), -0.5 for R (bottom half).
-    y_offset: f32,
-    // Vertical amplitude scale. With y_offset 0.5 and y_scale 0.4, sample = +1 reaches y = 0.9
-    // (near the top edge) and sample = -1 reaches y = 0.1 (near the channel split line).
-    y_scale: f32,
-};
-
-@group(0) @binding(0) var<uniform> u: Uniforms;
-
-struct VertexOut {
-    @builtin(position) position: vec4<f32>,
-    // Per-layer alpha for the glow stack. The fragment shader uses this directly as alpha,
-    // and the pipeline's additive blending sums the layers into a saturated core with a soft
-    // outer halo.
-    @location(0) alpha: f32,
-};
-
-@vertex
-fn vs_main(
-    @location(0) sample: f32,
-    @builtin(vertex_index) idx: u32,
-    @builtin(instance_index) layer: u32,
-) -> VertexOut {
-    // 9 layers, centered: layer 0..8 → offset -4..+4.
-    let half_layers: i32 = 4;
-    let off: i32 = i32(layer) - half_layers;
-
-    // Per-layer vertical displacement in clip space. With clip y in [-1, 1] over the channel's
-    // half of the window, ~0.006 per pixel-ish unit gives a halo of a few pixels at 720x420
-    // logical with system 2x scaling. Tweak the constant for thinner/fatter glow.
-    let layer_spread: f32 = 0.006;
-    let y_layer_offset: f32 = f32(off) * layer_spread;
-
-    let denom = max(f32(u.sample_count) - 1.0, 1.0);
-    let x = (f32(idx) / denom) * 2.0 - 1.0;
-    let y = u.y_offset + clamp(sample, -1.0, 1.0) * u.y_scale + y_layer_offset;
-
-    // Gaussian-ish falloff. exp(-off^2 / 6) gives center ≈ 1.0, ±1 ≈ 0.85, ±2 ≈ 0.51, ±4 ≈ 0.07.
-    // Scale by 0.4 so 9-layer sum saturates white at the line core but stays gentle in the halo.
-    let weight = exp(-f32(off * off) / 6.0) * 0.4;
-
-    var out: VertexOut;
-    out.position = vec4<f32>(x, y, 0.0, 1.0);
-    out.alpha = weight;
-    return out;
-}
-
-@fragment
-fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
-    // Cyan core; alpha is per-layer, additive blending stacks them into a glow.
-    return vec4<f32>(0.55, 0.85, 1.0, in.alpha);
-}
-"#;
 
 // ────────────────────────────────────────────────────────────────────────────────────────
 // raw-window-handle 0.5 ↔ 0.6 plumbing. baseview is on rwh 0.5, wgpu 29 wants 0.6.

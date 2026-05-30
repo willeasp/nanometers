@@ -9,8 +9,13 @@ use crossbeam::atomic::AtomicCell;
 use nih_plug::prelude::*;
 use std::{
     num::NonZeroU32,
-    sync::{Arc, Mutex, atomic::Ordering},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
+
+use module::Measurements;
 
 mod editor;
 use editor::{EditorState, NanometersEditor};
@@ -20,6 +25,10 @@ mod dev;
 
 /// Loudness measurement DSP (ADR 0006). Pure, GUI-side; not yet wired into the Module host.
 pub mod loudness;
+
+/// The Module-host contract (ADRs 0002/0003/0004): the `Module` trait, `FrameContext`,
+/// `Measurements`, and `Rect`. See `module.rs`.
+pub mod module;
 
 /// Window default, in logical pixels.
 pub const INITIAL_WIDTH: u32 = 720;
@@ -40,9 +49,15 @@ pub type StereoFrame = [f32; 2];
 /// The audio thread MUST NOT touch `samples_rx`. The Mutex is only ever taken by the GUI thread,
 /// which makes it effectively uncontended — `lock()` never blocks for any meaningful duration.
 pub struct Shared {
-    pub peak_l: AtomicF32,
-    pub peak_r: AtomicF32,
+    /// Cheap audio-thread scalars fanned out to Modules via `FrameContext` (ADR 0002). Today: the
+    /// decaying peak per channel.
+    pub meas: Measurements,
     pub samples_rx: Mutex<rtrb::Consumer<StereoFrame>>,
+
+    /// Host stream metadata, set once in `initialize` (off the audio thread) and read each GUI
+    /// frame into `FrameContext`. `sample_rate == 0.0` means unknown — Modules idle until it's set.
+    pub sample_rate: AtomicF32,
+    pub mono: AtomicBool,
 }
 
 pub struct Nanometers {
@@ -71,9 +86,10 @@ impl Default for Nanometers {
         Self {
             params: Arc::new(NanometersParams::default()),
             shared: Arc::new(Shared {
-                peak_l: AtomicF32::new(0.0),
-                peak_r: AtomicF32::new(0.0),
+                meas: Measurements::new(),
                 samples_rx: Mutex::new(samples_rx),
+                sample_rate: AtomicF32::new(0.0),
+                mono: AtomicBool::new(false),
             }),
             samples_tx: Some(samples_tx),
             peak_decay_per_sample: 1.0,
@@ -136,13 +152,24 @@ impl Plugin for Nanometers {
 
     fn initialize(
         &mut self,
-        _audio_io_layout: &AudioIOLayout,
+        audio_io_layout: &AudioIOLayout,
         buffer_config: &BufferConfig,
         _context: &mut impl InitContext<Self>,
     ) -> bool {
         // Solve `decay^N = 0.25` for the per-sample factor where N = sr * decay_ms / 1000.
         let samples_for_12db_drop = buffer_config.sample_rate as f64 * PEAK_DECAY_MS / 1000.0;
         self.peak_decay_per_sample = 0.25_f64.powf(samples_for_12db_drop.recip()) as f32;
+
+        // Host stream metadata for the GUI-side Modules (ADR 0002). Set here, off the audio thread,
+        // before the first `process` — published via relaxed atomics the editor reads each frame.
+        self.shared
+            .sample_rate
+            .store(buffer_config.sample_rate, Ordering::Relaxed);
+        let mono = audio_io_layout
+            .main_input_channels
+            .map(|c| c.get() == 1)
+            .unwrap_or(false);
+        self.shared.mono.store(mono, Ordering::Relaxed);
 
         // Dev-only: if a song was requested, hand the ring producer to the file player thread. It
         // takes over feeding the waveform (and plays the file out loud), so `process` stops
@@ -171,8 +198,8 @@ impl Plugin for Nanometers {
         }
 
         let decay = self.peak_decay_per_sample;
-        let mut peak_l = self.shared.peak_l.load(Ordering::Relaxed);
-        let mut peak_r = self.shared.peak_r.load(Ordering::Relaxed);
+        let mut peak_l = self.shared.meas.peak_l.load(Ordering::Relaxed);
+        let mut peak_r = self.shared.meas.peak_r.load(Ordering::Relaxed);
 
         for channel_samples in buffer.iter_samples() {
             // Pull L and R; fall back to duplicating L for mono sources even though our
@@ -194,8 +221,8 @@ impl Plugin for Nanometers {
             }
         }
 
-        self.shared.peak_l.store(peak_l, Ordering::Relaxed);
-        self.shared.peak_r.store(peak_r, Ordering::Relaxed);
+        self.shared.meas.peak_l.store(peak_l, Ordering::Relaxed);
+        self.shared.meas.peak_r.store(peak_r, Ordering::Relaxed);
 
         ProcessStatus::Normal
     }
