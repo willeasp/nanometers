@@ -42,9 +42,10 @@ impl Column {
 /// The app-default layout for a fresh instance with no persisted state (ADR 0003): Waveform +
 /// Loudness side by side, each half width.
 pub fn default_layout() -> Vec<Column> {
+    // The Waveform earns the bulk of the width; Loudness (3 bars + readouts) needs far less.
     vec![
-        Column::new(0, module_type::WAVEFORM, 0.5),
-        Column::new(1, module_type::LOUDNESS, 0.5),
+        Column::new(0, module_type::WAVEFORM, 0.68),
+        Column::new(1, module_type::LOUDNESS, 0.32),
     ]
 }
 
@@ -141,6 +142,7 @@ mod tests {
         assert_eq!(l.len(), 2);
         assert_eq!(l[0].module_type, module_type::WAVEFORM);
         assert_eq!(l[1].module_type, module_type::LOUDNESS);
-        assert_eq!(l[0].width_fraction, 0.5);
+        assert!(l[0].width_fraction > l[1].width_fraction, "Waveform gets the bulk");
+        assert!((l[0].width_fraction + l[1].width_fraction - 1.0).abs() < 1e-6, "fractions sum to 1");
     }
 }
