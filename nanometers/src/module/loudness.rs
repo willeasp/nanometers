@@ -17,7 +17,7 @@ use std::borrow::Cow;
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 use wgpu_text::glyph_brush::ab_glyph::FontRef;
-use wgpu_text::glyph_brush::{HorizontalAlign, Layout, Section, Text};
+use wgpu_text::glyph_brush::{HorizontalAlign, Layout, Section, Text, VerticalAlign};
 use wgpu_text::{BrushBuilder, TextBrush};
 
 use super::{EventStatus, FrameContext, Module, Rect};
@@ -29,17 +29,22 @@ const FONT: &[u8] = include_bytes!("../../assets/fonts/JetBrainsMono-Regular.ttf
 type Brush = TextBrush<FontRef<'static>>;
 
 const VALUE_COLOR: [f32; 4] = [0.90, 0.94, 1.0, 1.0];
-const LABEL_COLOR: [f32; 4] = [0.55, 0.62, 0.72, 1.0];
 
 /// Bottom of the bar scale; loudness at or below this reads as an empty bar (dev-tuning).
 const BAR_FLOOR_LUFS: f64 = -40.0;
-/// Bar geometry in clip space (host `set_viewport` maps it into the column). Bars rise from
-/// `BAR_BASE_Y` up to `BAR_FULL_Y` at full scale; three slots centered at `BAR_CENTERS`.
-const BAR_BASE_Y: f32 = -0.5;
-const BAR_FULL_Y: f32 = 0.55;
-const BAR_HALF_W: f32 = 0.18;
-const BAR_CENTERS: [f32; 3] = [-0.62, 0.0, 0.62];
 const LABELS: [&str; 3] = ["M", "S", "I"];
+/// Compact-row layout (3 rows: label + value + a thin level bar). The display is a small readout
+/// strip, not big VU columns. All in clip space (host `set_viewport` maps it into the column).
+const ROW_Y: [f32; 3] = [0.46, 0.0, -0.46]; // clip-y centers of the three rows (M top, I bottom)
+/// Thin horizontal level bar under each value: a faint full-width track + a colored fill.
+const BAR_X0: f32 = -0.78;
+const BAR_X1: f32 = 0.78;
+const BAR_HALF_H: f32 = 0.014; // thin: full height ≈ BAR_HALF_H · viewport_h px (~12px at 840)
+const BAR_DROP: f32 = 0.16; // clip-y offset of the bar below its row's text center
+const TRACK_COLOR: [f32; 3] = [0.16, 0.18, 0.22];
+/// Per-frame smoothing toward the measured value so the bars/numbers ease instead of stepping
+/// every 100 ms (visual ballistics; the DSP itself is exact).
+const SMOOTH_ALPHA: f64 = 0.18;
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -61,6 +66,10 @@ pub struct LoudnessModule {
     bars_vbuf: wgpu::Buffer,
     bars_vertex_count: u32,
     verts: Vec<Vertex>,
+
+    /// Display values eased toward the measured M/S/I each frame (clamped to the bar floor when a
+    /// scale has no measurement yet), so the readout glides instead of stepping every 100 ms.
+    smoothed: [f64; 3],
 
     /// Frame counter for the optional `NANO_DEBUG_LOUDNESS` value log (dev aid, off by default).
     dbg_count: u32,
@@ -127,10 +136,10 @@ impl LoudnessModule {
             cache: None,
         });
 
-        // 3 bars × 6 vertices (two triangles each).
+        // 3 rows × (track + fill) × 6 vertices.
         let bars_vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("loudness-bars-vbuf"),
-            contents: &vec![0u8; 18 * std::mem::size_of::<Vertex>()],
+            contents: &vec![0u8; 36 * std::mem::size_of::<Vertex>()],
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
 
@@ -143,8 +152,16 @@ impl LoudnessModule {
             bars_pipeline,
             bars_vbuf,
             bars_vertex_count: 0,
-            verts: Vec::with_capacity(18),
+            verts: Vec::with_capacity(36),
+            smoothed: [BAR_FLOOR_LUFS; 3],
             dbg_count: 0,
+        }
+    }
+
+    /// Push a clip-space rectangle (two triangles) into the vertex scratch.
+    fn push_quad(&mut self, x0: f32, x1: f32, y0: f32, y1: f32, color: [f32; 3]) {
+        for pos in [[x0, y0], [x1, y0], [x1, y1], [x0, y0], [x1, y1], [x0, y1]] {
+            self.verts.push(Vertex { pos, color });
         }
     }
 }
@@ -176,6 +193,16 @@ fn fmt_value(v: f64) -> String {
     } else {
         "--.-".to_string()
     }
+}
+
+/// `"M  -12.3"` for a row — the eased value once the scale has a measurement, dashes until then.
+fn row_text(k: usize, smoothed: f64, target: f64) -> String {
+    let v = if target.is_finite() {
+        fmt_value(smoothed)
+    } else {
+        "--.-".to_string()
+    };
+    format!("{}  {}", LABELS[k], v)
 }
 
 impl Module for LoudnessModule {
@@ -229,61 +256,53 @@ impl Module for LoudnessModule {
             self.brush_size = size;
         }
 
-        let vals = self
+        // Measured targets; missing scales drive the smoother toward the floor so the bar eases
+        // empty rather than snapping. The DSP value itself stays exact.
+        let targets = self
             .dsp
             .as_ref()
             .map(|d| [d.momentary_lufs(), d.short_term_lufs(), d.integrated_lufs()])
             .unwrap_or([f64::NEG_INFINITY; 3]);
+        for k in 0..3 {
+            let t = if targets[k].is_finite() { targets[k] } else { BAR_FLOOR_LUFS };
+            self.smoothed[k] += (t - self.smoothed[k]) * SMOOTH_ALPHA;
+        }
 
-        // Bars (two triangles each).
+        // Three compact rows: a faint full-width track + a colored fill, sitting under each value.
         self.verts.clear();
         for k in 0..3 {
-            let frac = bar_fraction(vals[k]);
-            let color = bar_rgb(frac);
-            let cx = BAR_CENTERS[k];
-            let (x0, x1) = (cx - BAR_HALF_W, cx + BAR_HALF_W);
-            let (y0, y1) = (BAR_BASE_Y, BAR_BASE_Y + frac * (BAR_FULL_Y - BAR_BASE_Y));
-            let q = [
-                [x0, y0], [x1, y0], [x1, y1],
-                [x0, y0], [x1, y1], [x0, y1],
-            ];
-            for pos in q {
-                self.verts.push(Vertex { pos, color });
+            let frac = bar_fraction(self.smoothed[k]);
+            let cy = ROW_Y[k] - BAR_DROP;
+            let (y0, y1) = (cy - BAR_HALF_H, cy + BAR_HALF_H);
+            self.push_quad(BAR_X0, BAR_X1, y0, y1, TRACK_COLOR);
+            let fx1 = BAR_X0 + frac * (BAR_X1 - BAR_X0);
+            if fx1 > BAR_X0 {
+                self.push_quad(BAR_X0, fx1, y0, y1, bar_rgb(frac));
             }
         }
         queue.write_buffer(&self.bars_vbuf, 0, bytemuck::cast_slice(&self.verts));
         self.bars_vertex_count = self.verts.len() as u32;
 
-        // Text: value above each bar, label below — centered on the bar via the layout h-align.
-        let value_scale = (viewport.w * 0.05).clamp(11.0, 26.0);
-        let label_scale = value_scale * 0.85;
-        let value_strs: [String; 3] = [
-            fmt_value(vals[0]),
-            fmt_value(vals[1]),
-            fmt_value(vals[2]),
+        // Text: "M  -12.3" per row, left-aligned, vertically centered on the row, above its bar.
+        let value_scale = (viewport.w * 0.09).clamp(12.0, 24.0);
+        let strs: [String; 3] = [
+            row_text(0, self.smoothed[0], targets[0]),
+            row_text(1, self.smoothed[1], targets[1]),
+            row_text(2, self.smoothed[2], targets[2]),
         ];
-        let mut sections: Vec<Section> = Vec::with_capacity(6);
+        let x_px = viewport.w * 0.10;
+        let mut sections: Vec<Section> = Vec::with_capacity(3);
         for k in 0..3 {
-            let cx_px = (BAR_CENTERS[k] * 0.5 + 0.5) * viewport.w;
+            let row_py = (0.5 - ROW_Y[k] / 2.0) * viewport.h;
             sections.push(
                 Section::default()
-                    .with_screen_position((cx_px, viewport.h * 0.12))
-                    .with_layout(Layout::default_single_line().h_align(HorizontalAlign::Center))
-                    .add_text(
-                        Text::new(&value_strs[k])
-                            .with_scale(value_scale)
-                            .with_color(VALUE_COLOR),
-                    ),
-            );
-            sections.push(
-                Section::default()
-                    .with_screen_position((cx_px, viewport.h * 0.85))
-                    .with_layout(Layout::default_single_line().h_align(HorizontalAlign::Center))
-                    .add_text(
-                        Text::new(LABELS[k])
-                            .with_scale(label_scale)
-                            .with_color(LABEL_COLOR),
-                    ),
+                    .with_screen_position((x_px, row_py))
+                    .with_layout(
+                        Layout::default_single_line()
+                            .h_align(HorizontalAlign::Left)
+                            .v_align(VerticalAlign::Center),
+                    )
+                    .add_text(Text::new(&strs[k]).with_scale(value_scale).with_color(VALUE_COLOR)),
             );
         }
         let _ = self.brush.queue(device, queue, &sections);
