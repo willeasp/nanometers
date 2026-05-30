@@ -13,14 +13,15 @@ use std::{
     num::{NonZeroIsize, NonZeroU32},
     ptr::NonNull,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
 };
 use wgpu::SurfaceTargetUnsafe;
 
+use crate::layout::{Column, default_layout, viewports};
 use crate::module::oscilloscope::OscilloscopeModule;
-use crate::module::{FrameContext, Module, Rect};
+use crate::module::{FrameContext, Module};
 use crate::{NanometersParams, Shared, StereoFrame};
 
 /// Background — near-black with the faintest blue tint. Will become a deliberate palette
@@ -41,14 +42,32 @@ const CLEAR_COLOR: wgpu::Color = wgpu::Color {
 pub struct EditorState {
     #[serde(with = "nih_plug::params::persist::serialize_atomic_cell")]
     size: AtomicCell<(u32, u32)>,
+    /// The persisted Module strip (ADR 0003). GUI-mutated (reorder / resize / per-Module config);
+    /// the audio thread never touches it — `process` only reads the disjoint `open` atomic.
+    #[serde(with = "serialize_layout")]
+    layout: Mutex<Vec<Column>>,
     #[serde(skip)]
     open: AtomicBool,
 }
 
+/// serde glue for `Mutex<Vec<Column>>` (serde has no `Mutex` impl): (de)serialize the inner Vec.
+mod serialize_layout {
+    use super::{Column, Mutex};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(m: &Mutex<Vec<Column>>, s: S) -> Result<S::Ok, S::Error> {
+        m.lock().unwrap().serialize(s)
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Mutex<Vec<Column>>, D::Error> {
+        Ok(Mutex::new(Vec::<Column>::deserialize(d)?))
+    }
+}
+
 impl EditorState {
-    pub(crate) fn from_size(size: (u32, u32)) -> Arc<Self> {
+    pub(crate) fn from_defaults(size: (u32, u32)) -> Arc<Self> {
         Arc::new(Self {
             size: AtomicCell::new(size),
+            layout: Mutex::new(default_layout()),
             open: AtomicBool::new(false),
         })
     }
@@ -60,11 +79,25 @@ impl EditorState {
     pub fn is_open(&self) -> bool {
         self.open.load(Ordering::Acquire)
     }
+
+    /// A clone of the current layout — the host reads this at spawn to build its Modules.
+    pub fn layout_snapshot(&self) -> Vec<Column> {
+        self.layout.lock().unwrap().clone()
+    }
+
+    /// Replace the layout (GUI-side: after a reorder/resize commit, or on persist load).
+    pub fn set_layout(&self, cols: Vec<Column>) {
+        *self.layout.lock().unwrap() = cols;
+    }
 }
 
 impl<'a> PersistentField<'a, EditorState> for Arc<EditorState> {
     fn set(&self, new_value: EditorState) {
+        // Copy BOTH persisted fields. A previous version copied only `size`, silently dropping the
+        // deserialized layout — every reopen reverted to default and all Module config (which rides
+        // the Column.config bytes through this same path) never persisted.
         self.size.store(new_value.size.load());
+        *self.layout.lock().unwrap() = new_value.layout.into_inner().unwrap();
     }
     fn map<F, R>(&self, f: F) -> R
     where
@@ -167,13 +200,36 @@ struct RenderWindow {
     surface: wgpu::Surface<'static>,
     surface_config: wgpu::SurfaceConfiguration,
 
-    /// The hosted Modules, left→right. Phase A: a single Oscilloscope at full surface; the layout
-    /// strip (Phase B) turns this into the persisted column list.
+    /// The hosted Modules, left→right — one per `layout` column, built from the persisted strip.
     modules: Vec<Box<dyn Module>>,
+
+    /// The column geometry/metadata that `modules` mirrors (same length, same order). Drives the
+    /// per-column viewports each frame; reorder/resize (Phase E) mutates this and `EditorState`.
+    layout: Vec<Column>,
 
     /// This frame's freshly drained samples, oldest→newest. GUI-thread-only and reused across
     /// frames (cleared each frame), so its growth never touches the audio path.
     new_samples: Vec<StereoFrame>,
+}
+
+/// Resolve a layout `module_type` tag to a concrete Module (ADR 0003 build-time resolution).
+///
+/// Phase B: the real Waveform (Phase C) and Loudness (Phase D) Modules don't exist yet, so every
+/// type stands in with the Oscilloscope — enough to verify the strip renders column-local. Those
+/// arms get their real constructors in C/D; an unknown tag stays a placeholder (Phase F will make
+/// the placeholder preserve the original type + config bytes for lossless re-save).
+fn build_module(
+    module_type: &str,
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+) -> Box<dyn Module> {
+    use crate::layout::module_type as mt;
+    match module_type {
+        mt::OSCILLOSCOPE | mt::WAVEFORM | mt::LOUDNESS => {
+            Box::new(OscilloscopeModule::new(device, format))
+        }
+        _ => Box::new(OscilloscopeModule::new(device, format)),
+    }
 }
 
 impl RenderWindow {
@@ -232,10 +288,13 @@ impl RenderWindow {
         let surface_config = surface.get_default_config(&adapter, width, height).unwrap();
         surface.configure(&device, &surface_config);
 
-        // Phase A: one Oscilloscope (the wrapped legacy renderer) at full surface. Phase B builds
-        // this Vec from the persisted layout.
-        let modules: Vec<Box<dyn Module>> =
-            vec![Box::new(OscilloscopeModule::new(&device, surface_config.format))];
+        // Build the Module strip from the persisted layout (ADR 0003). Order and count mirror the
+        // layout, so `modules` and `layout` zip 1:1 with the per-column viewports.
+        let layout = params.editor_state.layout_snapshot();
+        let modules: Vec<Box<dyn Module>> = layout
+            .iter()
+            .map(|c| build_module(&c.module_type, &device, surface_config.format))
+            .collect();
 
         Self {
             gui_context,
@@ -246,6 +305,7 @@ impl RenderWindow {
             surface,
             surface_config,
             modules,
+            layout,
             new_samples: Vec::with_capacity(4096),
         }
     }
@@ -324,17 +384,11 @@ impl baseview::WindowHandler for RenderWindow {
                 label: Some("nanometers-encoder"),
             });
 
-        // Per-column viewports. Phase A: one Module at full surface. Phase B computes integer
-        // column boundaries from the layout fractions so columns tile with no gaps/overlaps.
+        // Per-column viewports: integer boundaries from the layout fractions, tiling the surface
+        // with no gaps/overlaps (ADR 0003). One Rect per Module, in order.
         let surface_w = self.surface_config.width as f32;
         let surface_h = self.surface_config.height as f32;
-        let full = Rect {
-            x: 0.0,
-            y: 0.0,
-            w: surface_w,
-            h: surface_h,
-        };
-        let viewports: Vec<Rect> = vec![full; self.modules.len()];
+        let viewports = viewports(&self.layout, surface_w, surface_h);
 
         // Phase 2a: each Module encodes its own offscreen passes before the shared pass opens.
         for (m, vp) in self.modules.iter_mut().zip(viewports.iter()) {
@@ -342,7 +396,9 @@ impl baseview::WindowHandler for RenderWindow {
         }
 
         // Phase 2b: one shared single-sample pass, cleared once; each Module draws into its column.
-        // write_buffer uploads from `update` are ordered before this submit, so the draws see them.
+        // Per Module the host sets the viewport (affine-maps [-1,1] → the column) AND the scissor
+        // (hard-clips), so a Module emits plain [-1,1] geometry and lands column-local. write_buffer
+        // uploads from `update` are ordered before this submit, so the draws see them.
         {
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("nanometers-frame"),
@@ -361,6 +417,7 @@ impl baseview::WindowHandler for RenderWindow {
                 multiview_mask: None,
             });
             for (m, vp) in self.modules.iter_mut().zip(viewports.iter()) {
+                rpass.set_viewport(vp.x, vp.y, vp.w, vp.h, 0.0, 1.0);
                 rpass.set_scissor_rect(vp.x as u32, vp.y as u32, vp.w as u32, vp.h as u32);
                 m.render(&mut rpass, *vp);
             }
@@ -489,5 +546,43 @@ fn baseview_window_to_surface_target(window: &baseview::Window<'_>) -> wgpu::Sur
             }
             _ => todo!(),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layout::module_type;
+
+    fn column_with_config(id: u64, ty: &str, frac: f32, config: Vec<u8>) -> Column {
+        let mut c = Column::new(id, ty, frac);
+        c.config = config;
+        c
+    }
+
+    #[test]
+    fn persist_round_trip_preserves_layout_contents() {
+        // The real persist path: serialize EditorState to JSON (nih-plug uses serde_json), then on
+        // load deserialize and `PersistentField::set` into the live state. The layout's ids,
+        // fractions, AND opaque config bytes must survive — not just the window size.
+        let original = EditorState::from_defaults((720, 420));
+        original.set_layout(vec![
+            column_with_config(7, module_type::WAVEFORM, 0.6, vec![9, 8, 7]),
+            column_with_config(9, module_type::LOUDNESS, 0.4, vec![]),
+        ]);
+
+        let json = serde_json::to_string(&*original).unwrap();
+        let deserialized: EditorState = serde_json::from_str(&json).unwrap();
+
+        let live = EditorState::from_defaults((0, 0));
+        PersistentField::set(&live, deserialized);
+
+        assert_eq!(live.size(), (720, 420));
+        let l = live.layout_snapshot();
+        assert_eq!(l.len(), 2);
+        assert_eq!(l[0].instance_id, 7);
+        assert_eq!(l[0].width_fraction, 0.6);
+        assert_eq!(l[0].config, vec![9, 8, 7]);
+        assert_eq!(l[1].module_type, module_type::LOUDNESS);
     }
 }

@@ -24,9 +24,13 @@ pub mod oscilloscope;
 /// boundaries (see `RenderWindow`) so `x`/`y`/`w`/`h` are whole f32s and convert exactly to wgpu's
 /// u32 `set_scissor_rect` via `as u32`. One per column is handed to a Module each frame.
 ///
-/// IMPORTANT — `set_scissor_rect(viewport)` only CLIPS; it applies no coordinate transform. Each
-/// Module maps its own clip-space / pixel geometry into `viewport`. Use [`Rect::clip_transform`]
-/// for the common case of full-surface `[-1, 1]` geometry → this sub-rect.
+/// Before each Module's `render`, the host sets BOTH the GPU **viewport** and the **scissor** to
+/// this rect: `set_viewport` affine-maps full-viewport clip space `[-1, 1]` into the column for
+/// free, and `set_scissor_rect` hard-clips (viewport mapping alone doesn't discard out-of-rect
+/// points/lines). So a Module emits geometry in plain `[-1, 1]` and lands column-local with no
+/// per-Module transform. Pixel-space draws (e.g. `wgpu_text`) must still account for the viewport
+/// origin/size in their own projection — they don't get the affine map. [`Rect::clip_transform`]
+/// is available for that case.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rect {
     pub x: f32,
@@ -39,7 +43,8 @@ impl Rect {
     /// Map full-surface clip space `[-1, 1]` into this sub-rect, given the surface size in physical
     /// px. Returns `(scale_x, offset_x, scale_y, offset_y)` for `ndc' = scale * ndc + offset`. Y
     /// flips (pixel-y grows down, NDC-y grows up). A full-surface rect → identity `(1, 0, 1, 0)`.
-    /// Modules upload this in a uniform; the vertex shader applies it.
+    /// Most Modules don't need this — the host's `set_viewport` already maps `[-1, 1]` into the
+    /// column. It's here for Modules that bypass that (pixel-space text projections, hit-testing).
     pub fn clip_transform(&self, surface_w: f32, surface_h: f32) -> [f32; 4] {
         let sx = self.w / surface_w;
         let ox = (2.0 * self.x + self.w) / surface_w - 1.0;
@@ -111,11 +116,11 @@ pub trait Module {
     }
 
     /// Phase 2b — draw (or composite the resolved offscreen result) into `viewport` within the
-    /// host's shared pass. The host has already called `set_scissor_rect(viewport)` (clip only —
-    /// see [`Rect`]). `render` MUST set every pipeline-state it depends on (pipeline, all bind
-    /// groups, vertex/index buffers) and must NOT rely on state left by a prior Module: the host
-    /// guarantees only the scissor rect and the cleared/loaded attachment, and render order is
-    /// otherwise arbitrary.
+    /// host's shared pass. The host has already set BOTH the GPU viewport and the scissor to
+    /// `viewport` (see [`Rect`]), so geometry in `[-1, 1]` lands column-local and clipped. `render`
+    /// MUST set every pipeline-state it depends on (pipeline, all bind groups, vertex/index
+    /// buffers) and must NOT rely on state left by a prior Module: the host guarantees only the
+    /// viewport+scissor and the cleared/loaded attachment, and render order is otherwise arbitrary.
     fn render(&mut self, rpass: &mut wgpu::RenderPass, viewport: Rect);
 
     /// Pointer/keyboard inside this Module's viewport, in COLUMN-LOCAL coords (ADR 0004).

@@ -30,6 +30,9 @@ pub mod loudness;
 /// `Measurements`, and `Rect`. See `module.rs`.
 pub mod module;
 
+/// The horizontal-strip layout (ADR 0003): persisted `Column`s and the viewport geometry.
+pub mod layout;
+
 /// Window default, in logical pixels.
 pub const INITIAL_WIDTH: u32 = 720;
 pub const INITIAL_HEIGHT: u32 = 420;
@@ -100,7 +103,7 @@ impl Default for Nanometers {
 impl Default for NanometersParams {
     fn default() -> Self {
         Self {
-            editor_state: EditorState::from_size((INITIAL_WIDTH, INITIAL_HEIGHT)),
+            editor_state: EditorState::from_defaults((INITIAL_WIDTH, INITIAL_HEIGHT)),
         }
     }
 }
