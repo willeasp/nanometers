@@ -16,6 +16,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
+    time::Instant,
 };
 use wgpu::SurfaceTargetUnsafe;
 
@@ -212,6 +213,41 @@ struct RenderWindow {
     /// This frame's freshly drained samples, oldest→newest. GUI-thread-only and reused across
     /// frames (cleared each frame), so its growth never touches the audio path.
     new_samples: Vec<StereoFrame>,
+
+    /// Frame-cadence diagnostics (gated on `NANO_DEBUG_FRAMES`). The scroll can only be as smooth as
+    /// the frame delivery, so this measures the real `on_frame` interval — mean/min/max + implied
+    /// fps over a window — to tell a vsync-locked clock from baseview's ~66.7 Hz CFRunLoopTimer.
+    frame_dbg: FrameDebug,
+}
+
+#[derive(Default)]
+struct FrameDebug {
+    enabled: bool,
+    last: Option<Instant>,
+    intervals_ms: Vec<f64>,
+}
+
+impl FrameDebug {
+    fn tick(&mut self, now: Instant) {
+        if !self.enabled {
+            return;
+        }
+        if let Some(prev) = self.last {
+            self.intervals_ms.push((now - prev).as_secs_f64() * 1e3);
+        }
+        self.last = Some(now);
+        if self.intervals_ms.len() >= 240 {
+            let n = self.intervals_ms.len() as f64;
+            let mean = self.intervals_ms.iter().sum::<f64>() / n;
+            let min = self.intervals_ms.iter().cloned().fold(f64::INFINITY, f64::min);
+            let max = self.intervals_ms.iter().cloned().fold(0.0, f64::max);
+            eprintln!(
+                "[nano-frames] {n:.0} frames: mean {mean:.2} ms ({:.1} fps), min {min:.2}, max {max:.2}",
+                1e3 / mean
+            );
+            self.intervals_ms.clear();
+        }
+    }
 }
 
 /// Resolve a layout `module_type` tag to a concrete Module (ADR 0003 build-time resolution).
@@ -313,6 +349,10 @@ impl RenderWindow {
             modules,
             layout,
             new_samples: Vec::with_capacity(4096),
+            frame_dbg: FrameDebug {
+                enabled: std::env::var_os("NANO_DEBUG_FRAMES").is_some(),
+                ..Default::default()
+            },
         }
     }
 
@@ -337,6 +377,7 @@ impl RenderWindow {
 
 impl baseview::WindowHandler for RenderWindow {
     fn on_frame(&mut self, window: &mut baseview::Window) {
+        self.frame_dbg.tick(Instant::now());
         self.drain_audio();
 
         // Phase 1: fan this frame's samples out to every Module to fold + upload.
