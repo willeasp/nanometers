@@ -18,6 +18,7 @@ use crate::StereoFrame;
 use atomic_float::AtomicF32;
 
 /// Concrete Modules live under this namespace alongside the contract they implement.
+pub mod loudness;
 pub mod oscilloscope;
 pub mod waveform;
 

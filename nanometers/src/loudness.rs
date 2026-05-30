@@ -377,4 +377,24 @@ mod tests {
         let di = delta("gated I", ours.integrated_lufs(), i);
         assert!(di < TOL);
     }
+
+    #[test]
+    fn mono_measures_single_channel_not_plus_3_lu() {
+        // The +3 LU trap (loudness spec): the plugin duplicates a mono input to L = R, so summing
+        // both channels reads +10·log10(2) ≈ 3.01 LU hot. A mono stream must be measured as a
+        // SINGLE channel — the Loudness Module derives `Channels::Mono` from `FrameContext::mono`
+        // exactly to avoid this. Guards that Mono vs Stereo on identical L = R differ by ~3.01 LU.
+        let sig = sine_stereo(1000.0, 0.5, 5.0); // sine_stereo emits L == R
+        let mut mono = LoudnessDsp::new(FS, Channels::Mono);
+        let mut stereo = LoudnessDsp::new(FS, Channels::Stereo);
+        for f in sig.chunks_exact(2) {
+            mono.push_frame(f[0], f[1]);
+            stereo.push_frame(f[0], f[1]);
+        }
+        let d = stereo.short_term_lufs() - mono.short_term_lufs();
+        assert!(
+            (d - 3.0103).abs() < 0.01,
+            "stereo-summing L=R must read +3.01 LU vs mono, got Δ={d}"
+        );
+    }
 }

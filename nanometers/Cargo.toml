@@ -56,6 +56,11 @@ rtrb.workspace = true
 triple_buffer.workspace = true
 bytemuck.workspace = true
 
+# Text rendering (ADR 0005): glyph atlas + sections, versioned in lockstep with wgpu (29.0.3).
+# The first runtime dependency against the hand-roll ethos, localized to text. An OFL font
+# (JetBrains Mono) is embedded via include_bytes! so the plugin stays self-contained.
+wgpu_text = "29.0.3"
+
 [dev-dependencies]
 # Reference BS.1770 implementation, used only as a conformance oracle in tests (ADR 0006).
 # Never linked into the shipped plugin.

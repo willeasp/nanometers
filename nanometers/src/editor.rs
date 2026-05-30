@@ -20,6 +20,7 @@ use std::{
 use wgpu::SurfaceTargetUnsafe;
 
 use crate::layout::{Column, default_layout, viewports};
+use crate::module::loudness::LoudnessModule;
 use crate::module::oscilloscope::OscilloscopeModule;
 use crate::module::waveform::WaveformModule;
 use crate::module::{FrameContext, Module};
@@ -226,7 +227,8 @@ fn build_module(
     use crate::layout::module_type as mt;
     match module_type {
         mt::WAVEFORM => Box::new(WaveformModule::new(device, format)),
-        mt::OSCILLOSCOPE | mt::LOUDNESS => Box::new(OscilloscopeModule::new(device, format)),
+        mt::LOUDNESS => Box::new(LoudnessModule::new(device, format)),
+        mt::OSCILLOSCOPE => Box::new(OscilloscopeModule::new(device, format)),
         _ => Box::new(OscilloscopeModule::new(device, format)),
     }
 }
