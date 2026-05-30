@@ -50,18 +50,27 @@ const COLOR_WHITE_MIX: f32 = 0.18;
 /// MSAA sample count for the Waveform's own offscreen target (0007 — host pass stays single-sample).
 const MSAA_SAMPLES: u32 = 4;
 /// Re-lock the scroll clock when the measured fps drifts more than this fraction from the locked
-/// value (e.g. the startup 60→120 settle), so a stable refresh gives a stable px/frame.
+/// value, so a stable refresh gives a stable px/frame.
 const FPS_RELOCK_FRAC: f64 = 0.08;
+/// Seed the refresh estimate only once two consecutive clean frames agree within this fraction, so a
+/// single outlier (init lag, an occlusion-recovery frame) can't lock in a wrong fps.
+const FPS_AGREE_FRAC: f64 = 0.15;
+/// Slow tracking weight on each new clean frame once seeded (the estimate is already close).
+const FPS_EMA_ALPHA: f64 = 0.05;
+
 /// The display runs a small BUFFER of closed columns behind the live edge, so it can advance by a
 /// fixed whole `px_per_frame` every frame (driven by the frame clock) while the buffer absorbs the
 /// audio's bursty per-frame arrival. This decoupling is what makes the scroll uniform — without it
-/// the display tracks the jittery closed-bin edge directly. Init mid-band; a clock that's drifted
-/// out of band is nudged back by a single pixel (ease off 1px below MIN so it refills, catch up 1px
-/// above MAX), so corrections are rare and 1px — not the per-frame jitter of the live edge. Units
-/// are columns; at ~200 samples/col, 12 cols ≈ 50 ms of display latency (imperceptible for a meter).
-const BUFFER_INIT_COLUMNS: i64 = 12;
-const BUFFER_MIN_COLUMNS: i64 = 4;
-const BUFFER_MAX_COLUMNS: i64 = 64;
+/// the display tracks the jittery closed-bin edge directly. Units are columns; at ~200 samples/col,
+/// 12 cols ≈ 50 ms of display latency (imperceptible for a meter). The clock is held at TARGET by a
+/// hysteretic ±1px nudge: a Schmitt trigger latches a single-pixel correction when avail leaves
+/// [LOW, HIGH] and releases it only back at TARGET, so a value hovering at a band edge can't flip
+/// the step every frame. A gross desync (> RESYNC, or anchor ahead of the edge) is a discontinuity
+/// — a rate-change refill, first fill, long-stall recovery — and snaps rather than crawling.
+const BUFFER_TARGET_COLUMNS: i64 = 12;
+const BUFFER_LOW_COLUMNS: i64 = 6;
+const BUFFER_HIGH_COLUMNS: i64 = 24;
+const BUFFER_RESYNC_COLUMNS: i64 = 40;
 
 /// Integer pixels the contour moves per display frame: round the ideal continuous rate
 /// (`columns / (window · fps)`) to the nearest whole pixel, at least 1.
@@ -81,6 +90,60 @@ fn samples_per_column(sample_rate: f64, px_per_frame: i64, fps: f64) -> f64 {
         return 1.0;
     }
     sample_rate / denom
+}
+
+/// One frame's update to the refresh-rate estimator. `inst` is the clamped instantaneous fps, or
+/// `None` for a gap frame (occlusion/stall) which is ignored. Returns the new
+/// `(fps_est, seeded, prev_clean)`. Seeds (to the mean) only when two consecutive clean frames agree
+/// within `FPS_AGREE_FRAC` — so the lock is established from a representative pair, never a lone
+/// outlier — then tracks slowly. Pure, so the policy is unit-testable without a frame clock.
+fn fps_estimate(
+    inst: Option<f64>,
+    fps_est: f64,
+    seeded: bool,
+    prev_clean: Option<f64>,
+) -> (f64, bool, Option<f64>) {
+    let Some(inst) = inst else {
+        return (fps_est, seeded, prev_clean); // gap frame: leave everything as-is
+    };
+    if seeded {
+        return (fps_est * (1.0 - FPS_EMA_ALPHA) + inst * FPS_EMA_ALPHA, true, prev_clean);
+    }
+    match prev_clean {
+        Some(prev) if (inst - prev).abs() / prev <= FPS_AGREE_FRAC => {
+            (0.5 * (inst + prev), true, prev_clean) // two agree → seed
+        }
+        _ => (fps_est, false, Some(inst)), // first clean frame, or a disagreement → retry next pair
+    }
+}
+
+/// Advance the buffered scroll anchor one frame. Pure controller (no GPU), so the smoothness logic
+/// is unit-testable. Given the current anchor, the newest fully-closed column `last_full`, the
+/// per-frame pixel step, and the hysteresis latch `correcting` (−1/0/+1), returns the new
+/// `(scroll_col, correcting)`. Invariant on return: `scroll_col <= last_full` (never renders an
+/// unclosed/partial column). See `BUFFER_TARGET_COLUMNS` for the band semantics.
+fn advance_scroll(scroll_col: i64, last_full: i64, px_per_frame: i64, correcting: i8) -> (i64, i8) {
+    let avail = last_full - scroll_col;
+    // Gross desync (discontinuity) → snap behind the edge instead of crawling back over many frames.
+    if avail < 0 || avail > BUFFER_RESYNC_COLUMNS {
+        return (last_full - BUFFER_TARGET_COLUMNS, 0);
+    }
+    // Schmitt trigger: latch a ±1 correction at a band edge, release only back at TARGET.
+    let mut c = correcting;
+    if c == 0 {
+        if avail > BUFFER_HIGH_COLUMNS {
+            c = 1;
+        } else if avail < BUFFER_LOW_COLUMNS {
+            c = -1;
+        }
+    } else if (c > 0 && avail <= BUFFER_TARGET_COLUMNS) || (c < 0 && avail >= BUFFER_TARGET_COLUMNS) {
+        c = 0;
+    }
+    let mut step = px_per_frame + c as i64;
+    if step > avail {
+        step = avail.max(0); // never cross the live edge (pause/severe stall → freeze on it)
+    }
+    (scroll_col + step.max(0), c)
 }
 
 #[repr(C)]
@@ -120,10 +183,12 @@ pub struct WaveformModule {
     // Scroll clock (the subway-sign uniform integer-pixel scroll).
     fps_est: f64,
     fps_seeded: bool,
+    prev_clean_fps: Option<f64>, // last clean inst-fps awaiting a second agreeing frame to seed
     locked_fps: f64,
     px_per_frame: i64,
     samples_per_col: f64,
     scroll_col: i64, // display anchor in whole columns (= pixels), buffered behind the live edge
+    correcting: i8,  // hysteresis latch for the ±1px buffer-depth nudge (−1/0/+1)
     scroll_init: bool,
     last_columns: usize,
     last_sample_rate: f32,
@@ -277,10 +342,12 @@ impl WaveformModule {
             offscreen: None,
             fps_est: 60.0,
             fps_seeded: false,
+            prev_clean_fps: None,
             locked_fps: 0.0,
             px_per_frame: 1,
             samples_per_col: 1.0,
             scroll_col: 0,
+            correcting: 0,
             scroll_init: false,
             last_columns: 0,
             last_sample_rate: 0.0,
@@ -364,30 +431,33 @@ impl Module for WaveformModule {
             return;
         }
 
-        // Measure the refresh rate to size the uniform pixel step. Seed from the FIRST real frame
-        // (no 60→120 startup relock cascade) and ignore gaps (occlusion/stalls), whose huge dt
-        // would otherwise poison the estimate and force a spurious relock+snap.
+        // Measure the refresh rate to size the uniform pixel step. A gap frame (occlusion/stall,
+        // dt > GAP_SECONDS) is passed as None so its huge dt can't poison the estimate; seeding then
+        // waits for two clean frames to agree (no lock to a startup outlier — see `fps_estimate`).
         let now = Instant::now();
         let dt = self.last_frame.map(|t| (now - t).as_secs_f64());
         self.last_frame = Some(now);
-        if let Some(dt) = dt {
-            if dt < GAP_SECONDS {
-                let inst_fps = (1.0 / dt.max(1e-4)).clamp(20.0, 360.0);
-                if !self.fps_seeded {
-                    self.fps_est = inst_fps;
-                    self.fps_seeded = true;
-                } else {
-                    self.fps_est = self.fps_est * 0.95 + inst_fps * 0.05;
-                }
-            }
+        let inst = dt
+            .filter(|&d| d < GAP_SECONDS)
+            .map(|d| (1.0 / d.max(1e-4)).clamp(20.0, 360.0));
+        let (fps, seeded, prev) = fps_estimate(inst, self.fps_est, self.fps_seeded, self.prev_clean_fps);
+        self.fps_est = fps;
+        self.fps_seeded = seeded;
+        self.prev_clean_fps = prev;
+        if !self.fps_seeded {
+            // No trustworthy refresh measurement yet — don't lock the scroll clock to a guess. One
+            // or two blank frames at startup are invisible.
+            self.vertex_count_l = 0;
+            self.vertex_count_r = 0;
+            return;
         }
 
         let columns = (viewport.w.round() as usize).clamp(1, MAX_COLUMNS);
         let sr = self.last_sample_rate as f64;
 
         // (Re)lock the pixel step + column width on a real scale change (uninitialized, viewport
-        // resize, rate change, or the fps finally settling). With the seed + gap handling these are
-        // rare, so snapping the buffered position here is fine.
+        // resize, rate change, or a settled refresh that drifted past FPS_RELOCK_FRAC). Rare now, so
+        // re-anchoring the buffer here is fine.
         let fps_drifted = self.locked_fps > 0.0
             && (self.fps_est - self.locked_fps).abs() / self.locked_fps > FPS_RELOCK_FRAC;
         let relock = !self.scroll_init || columns != self.last_columns || fps_drifted;
@@ -400,27 +470,19 @@ impl Module for WaveformModule {
         // The newest fully-closed column (rightmost columns must be fully populated).
         let last_full = (self.store.closed_samples() as f64 / self.samples_per_col).floor() as i64 - 1;
         if relock {
-            // Re-establish the buffer behind the live edge; the subway clock takes over next frame.
-            self.scroll_col = last_full - BUFFER_INIT_COLUMNS;
+            // Re-anchor the buffer behind the live edge; the subway clock takes over next frame.
+            self.scroll_col = last_full - BUFFER_TARGET_COLUMNS;
+            self.correcting = 0;
             self.scroll_init = true;
         } else {
-            // Subway scroll: advance by EXACTLY px_per_frame, driven by the frame clock. A gentle
-            // ±1px correction keeps the display buffered behind the live edge — the buffer absorbs
-            // the audio's bursty per-frame arrival, so the rendered step is the rigid pixel clock,
-            // not the jittery closed-bin edge. Never advance onto an unclosed column (stall/pause).
-            let avail = last_full - self.scroll_col;
-            let mut step = self.px_per_frame;
-            if avail > BUFFER_MAX_COLUMNS {
-                step += 1; // latency creeping up (display slower than audio) → catch up 1px
-            } else if avail < BUFFER_MIN_COLUMNS {
-                step -= 1; // buffer running low (display faster) → ease off 1px so it refills
-            }
-            if step > avail {
-                step = avail.max(0); // never cross the live edge (pause/severe stall → freeze)
-            }
-            self.scroll_col += step;
+            // Subway scroll: advance by EXACTLY px_per_frame off the frame clock, with a hysteretic
+            // ±1px nudge that keeps the display buffered behind the live edge (see `advance_scroll`).
+            let (sc, c) = advance_scroll(self.scroll_col, last_full, self.px_per_frame, self.correcting);
+            self.scroll_col = sc;
+            self.correcting = c;
         }
-        let rightmost_col = self.scroll_col; // ≤ last_full by construction
+        let rightmost_col = self.scroll_col;
+        debug_assert!(rightmost_col <= last_full, "scroll anchor must stay behind the live edge");
         let cols = self.store.build_columns(columns, self.samples_per_col, rightmost_col);
 
         // Columns at exact pixel centers in the `columns`-wide offscreen: x = (2c+1)/N − 1.
@@ -561,5 +623,86 @@ mod tests {
         let spc = samples_per_column(sr, ppf, 120.0);
         assert!((spc - 200.0).abs() < 1e-9, "48000/(2·120) = 200 samples/col");
         assert!((spc * ppf as f64 * 120.0 - sr).abs() < 1e-6, "rates match → no drift");
+    }
+
+    // ── fps_estimate: seed only when two clean frames agree; then track slowly ──
+
+    #[test]
+    fn fps_gap_frame_leaves_estimate_unchanged() {
+        // A gap (occlusion/stall) is passed as None and must not move the estimate or the latch.
+        assert_eq!(fps_estimate(None, 60.0, false, Some(58.0)), (60.0, false, Some(58.0)));
+        assert_eq!(fps_estimate(None, 120.0, true, None), (120.0, true, None));
+    }
+
+    #[test]
+    fn fps_first_clean_frame_records_but_does_not_seed() {
+        // One clean frame is not enough — record it, leave fps_est untouched until a second agrees.
+        assert_eq!(fps_estimate(Some(120.0), 60.0, false, None), (60.0, false, Some(120.0)));
+    }
+
+    #[test]
+    fn fps_two_agreeing_frames_seed_to_their_mean() {
+        // Two consecutive clean frames within AGREE_FRAC → seed (mean), so a lone outlier can't.
+        let (fps, seeded, _) = fps_estimate(Some(120.0), 60.0, false, Some(118.0));
+        assert!((fps - 119.0).abs() < 1e-9);
+        assert!(seeded);
+    }
+
+    #[test]
+    fn fps_disagreeing_frame_is_rejected_as_outlier() {
+        // A 60→120 jump (e.g. an occlusion-recovery frame): don't seed, retry against the latest.
+        assert_eq!(fps_estimate(Some(120.0), 60.0, false, Some(60.0)), (60.0, false, Some(120.0)));
+    }
+
+    #[test]
+    fn fps_seeded_frame_tracks_with_slow_ema() {
+        let (fps, seeded, _) = fps_estimate(Some(119.0), 120.0, true, None);
+        assert!((fps - 119.95).abs() < 1e-9, "120·0.95 + 119·0.05");
+        assert!(seeded);
+    }
+
+    // ── advance_scroll: uniform px/frame with a hysteretic ±1 nudge toward the buffer target ──
+
+    #[test]
+    fn scroll_advances_by_exact_px_per_frame_when_buffered() {
+        // avail == TARGET (12), inside the band → no correction, exactly px_per_frame.
+        assert_eq!(advance_scroll(100, 112, 2, 0), (102, 0));
+    }
+
+    #[test]
+    fn scroll_catches_up_one_pixel_when_latency_runs_high() {
+        // avail (30) > HIGH (24) → latch +1, step px_per_frame + 1.
+        assert_eq!(advance_scroll(0, 30, 2, 0), (3, 1));
+    }
+
+    #[test]
+    fn scroll_correction_latches_through_the_band_then_releases_at_target() {
+        // Latched +1 persists while avail is between TARGET and HIGH (no per-frame flap)…
+        assert_eq!(advance_scroll(0, 20, 2, 1), (3, 1));
+        // …and releases (back to plain px_per_frame) once avail returns to TARGET.
+        assert_eq!(advance_scroll(0, 12, 2, 1), (2, 0));
+    }
+
+    #[test]
+    fn scroll_eases_off_one_pixel_when_buffer_runs_low() {
+        // avail (4) < LOW (6) → latch −1 so the buffer refills.
+        assert_eq!(advance_scroll(0, 4, 2, 0), (1, -1));
+    }
+
+    #[test]
+    fn scroll_snaps_on_gross_desync_instead_of_crawling() {
+        // avail (200) ≫ RESYNC (40): a discontinuity (rate-change refill) → snap behind the edge,
+        // don't crawl hundreds of +1 frames. Latch clears.
+        assert_eq!(advance_scroll(0, 200, 2, 1), (188, 0));
+        // Anchor somehow ahead of the live edge (avail < 0) also snaps.
+        assert_eq!(advance_scroll(100, 50, 2, 0), (38, 0));
+    }
+
+    #[test]
+    fn scroll_never_crosses_the_live_edge_on_stall() {
+        // Buffer drained to the edge (avail 0, e.g. paused): step clamps to 0, anchor frozen at edge.
+        assert_eq!(advance_scroll(11, 11, 2, 0), (11, -1));
+        // avail 1 with px_per_frame 2: would overshoot, clamps to land exactly on the edge.
+        assert_eq!(advance_scroll(10, 11, 2, 0), (11, -1));
     }
 }

@@ -286,7 +286,12 @@ impl RenderWindow {
             .await
             .expect("Failed to create wgpu device");
 
-        let surface_config = surface.get_default_config(&adapter, width, height).unwrap();
+        let mut surface_config = surface.get_default_config(&adapter, width, height).unwrap();
+        // Pin vsync: `get_default_config` just takes `present_modes.first()`, which on Metal isn't
+        // guaranteed to be Fifo — Immediate/Mailbox would tear and waste GPU. Fifo is the vsync-
+        // locked mode every backend supports. (Frame *cadence* is still baseview's ~66.7 Hz
+        // CFRunLoopTimer, not vsync — that's the separate scroll-smoothness limit.)
+        surface_config.present_mode = wgpu::PresentMode::Fifo;
         surface.configure(&device, &surface_config);
 
         // Build the Module strip from the persisted layout (ADR 0003). Order and count mirror the
