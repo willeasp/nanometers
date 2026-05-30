@@ -46,3 +46,8 @@ log.workspace = true
 rtrb.workspace = true
 triple_buffer.workspace = true
 bytemuck.workspace = true
+
+[dev-dependencies]
+# Reference BS.1770 implementation, used only as a conformance oracle in tests (ADR 0006).
+# Never linked into the shipped plugin.
+ebur128 = "0.1.10"

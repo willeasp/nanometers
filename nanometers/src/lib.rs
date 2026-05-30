@@ -18,6 +18,9 @@ use editor::{EditorState, NanometersEditor};
 #[cfg(feature = "dev-player")]
 mod dev;
 
+/// Loudness measurement DSP (ADR 0006). Pure, GUI-side; not yet wired into the Module host.
+pub mod loudness;
+
 /// Window default, in logical pixels.
 pub const INITIAL_WIDTH: u32 = 720;
 pub const INITIAL_HEIGHT: u32 = 420;
