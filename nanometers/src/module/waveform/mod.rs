@@ -33,6 +33,9 @@ const HALF_SCALE: f32 = 0.45;
 const HALF_CENTER: [f32; 2] = [0.5, -0.5];
 /// Cap on columns built per frame (≈ one per pixel; the window is rarely wider).
 const MAX_COLUMNS: usize = 2048;
+/// Gentle global desaturation: mix each column color this far toward white (ADR 0001 dev-tuning).
+/// 0 = full saturation, 1 = white. Softens the palette without changing hues.
+const COLOR_WHITE_MIX: f32 = 0.18;
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -52,10 +55,12 @@ pub struct WaveformModule {
     // 3-band filterbank on the mono sum (ADR 0001), rebuilt when the sample rate changes.
     filterbank: Option<Filterbank>,
 
-    // Fixed-length ring of base bins (length = window_seconds / 0.5 ms, sample-rate-independent),
-    // newest at `write_head - 1`. Pre-filled with silence so an unfilled window reads as flat.
+    // Fixed-length ring of base bins (length = window_seconds / 0.5 ms, sample-rate-independent).
+    // `bins_closed` is the monotonic total ever closed; the ring slot for absolute bin `a` is
+    // `a % bins.len()`. Display columns are anchored to ABSOLUTE bin boundaries (see `prepare`) so
+    // a column's value is frozen once computed — that's what kills the scroll jitter.
     bins: Vec<BaseBin>,
-    write_head: usize,
+    bins_closed: u64,
 
     // In-progress base bin accumulator (per channel: min/max/Σsquares + a sample counter).
     acc_min: [f32; 2],
@@ -157,7 +162,7 @@ impl WaveformModule {
             samples_per_bin: 0,
             filterbank: None,
             bins: vec![BaseBin::SILENCE; window_bins],
-            write_head: 0,
+            bins_closed: 0,
             acc_min: [f32::INFINITY; 2],
             acc_max: [f32::NEG_INFINITY; 2],
             acc_sumsq: [0.0; 2],
@@ -199,8 +204,9 @@ impl WaveformModule {
             self.acc_band_sumsq[1] / n,
             self.acc_band_sumsq[2] / n,
         ];
-        self.bins[self.write_head] = BaseBin { env, band_ms };
-        self.write_head = (self.write_head + 1) % self.bins.len();
+        let pos = (self.bins_closed % self.bins.len() as u64) as usize;
+        self.bins[pos] = BaseBin { env, band_ms };
+        self.bins_closed = self.bins_closed.wrapping_add(1);
         self.reset_accumulator();
     }
 }
@@ -256,9 +262,10 @@ impl Module for WaveformModule {
             return;
         }
 
-        // Linearize the ring oldest→newest so column ranges are contiguous.
+        // Linearize the ring oldest→newest: `linear[i]` holds absolute bin `(total - n + i)`.
         let n = self.bins.len();
-        let head = self.write_head;
+        let total = self.bins_closed;
+        let head = (total % n as u64) as usize;
         for i in 0..n {
             self.linear[i] = self.bins[(head + i) % n];
         }
@@ -267,18 +274,40 @@ impl Module for WaveformModule {
         let denom = (columns.max(2) - 1) as f32;
         self.verts.clear();
 
-        // One triangle strip per channel: L in the top half (center +0.5), R in the bottom half
-        // (center −0.5) — within-Module layout only (spec §4). Build L's strip then R's; render
-        // issues a separate draw per range so the two silhouettes don't connect.
+        // Anchor columns to ABSOLUTE bin boundaries (multiples of `bpc`) instead of re-dividing the
+        // sliding window each frame. A column covers a fixed absolute bin range, so its merged
+        // value is identical frame-to-frame until it scrolls off — no per-frame re-merge jitter.
+        // The whole grid shifts left by whole columns as new boundaries complete (smooth scroll).
+        let bpc = (n / columns).max(1) as i128; // base bins per display column
+        let win_start = total as i128 - n as i128; // oldest absolute bin still in the ring
+        let last_boundary = ((total as i128) / bpc) * bpc; // right edge, bpc-aligned
+
+        // Pre-merge one column per screen position (shared by both channels — same bins).
+        let mut col_bins: Vec<BaseBin> = Vec::with_capacity(columns);
+        for c in 0..columns {
+            let end_abs = last_boundary - ((columns - 1 - c) as i128) * bpc;
+            let start_abs = end_abs - bpc;
+            let lo = start_abs.max(win_start);
+            let hi = end_abs.min(total as i128);
+            col_bins.push(if lo < hi {
+                merge(&self.linear[(lo - win_start) as usize..(hi - win_start) as usize])
+            } else {
+                BaseBin::SILENCE
+            });
+        }
+
+        // One triangle strip per channel: L top half (center +0.5), R bottom half (−0.5) — spec §4.
         for ch in 0..2 {
-            for c in 0..columns {
-                let lo = c * n / columns;
-                let hi = (((c + 1) * n / columns).max(lo + 1)).min(n);
-                let merged = merge(&self.linear[lo..hi]);
+            for (c, merged) in col_bins.iter().enumerate() {
                 let env = merged.env[ch];
-                // One color per column from the shared (mono) band energies (ADR 0001); both L and
-                // R in this column carry it, interpolated along time by the rasterizer.
-                let color = band_color(merged.band_ms);
+                // One color per column from the shared (mono) band energies (ADR 0001), softened
+                // toward white; interpolated along time by the rasterizer.
+                let hue = band_color(merged.band_ms);
+                let color = [
+                    hue[0] + (1.0 - hue[0]) * COLOR_WHITE_MIX,
+                    hue[1] + (1.0 - hue[1]) * COLOR_WHITE_MIX,
+                    hue[2] + (1.0 - hue[2]) * COLOR_WHITE_MIX,
+                ];
                 let x = -1.0 + 2.0 * (c as f32) / denom;
                 let center = HALF_CENTER[ch];
                 self.verts.push(Vertex { pos: [x, center + env.max * HALF_SCALE], color });
