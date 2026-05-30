@@ -21,6 +21,7 @@ use wgpu::SurfaceTargetUnsafe;
 
 use crate::layout::{Column, default_layout, viewports};
 use crate::module::oscilloscope::OscilloscopeModule;
+use crate::module::waveform::WaveformModule;
 use crate::module::{FrameContext, Module};
 use crate::{NanometersParams, Shared, StereoFrame};
 
@@ -214,10 +215,9 @@ struct RenderWindow {
 
 /// Resolve a layout `module_type` tag to a concrete Module (ADR 0003 build-time resolution).
 ///
-/// Phase B: the real Waveform (Phase C) and Loudness (Phase D) Modules don't exist yet, so every
-/// type stands in with the Oscilloscope — enough to verify the strip renders column-local. Those
-/// arms get their real constructors in C/D; an unknown tag stays a placeholder (Phase F will make
-/// the placeholder preserve the original type + config bytes for lossless re-save).
+/// Loudness (Phase D) doesn't exist yet, so it (and any unknown tag) stands in with the
+/// Oscilloscope. Phase F will make the unknown-tag placeholder preserve the original type + config
+/// bytes for lossless re-save.
 fn build_module(
     module_type: &str,
     device: &wgpu::Device,
@@ -225,9 +225,8 @@ fn build_module(
 ) -> Box<dyn Module> {
     use crate::layout::module_type as mt;
     match module_type {
-        mt::OSCILLOSCOPE | mt::WAVEFORM | mt::LOUDNESS => {
-            Box::new(OscilloscopeModule::new(device, format))
-        }
+        mt::WAVEFORM => Box::new(WaveformModule::new(device, format)),
+        mt::OSCILLOSCOPE | mt::LOUDNESS => Box::new(OscilloscopeModule::new(device, format)),
         _ => Box::new(OscilloscopeModule::new(device, format)),
     }
 }

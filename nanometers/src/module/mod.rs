@@ -19,6 +19,7 @@ use atomic_float::AtomicF32;
 
 /// Concrete Modules live under this namespace alongside the contract they implement.
 pub mod oscilloscope;
+pub mod waveform;
 
 /// An INTEGER-aligned physical-pixel rectangle on the surface. The host computes integer column
 /// boundaries (see `RenderWindow`) so `x`/`y`/`w`/`h` are whole f32s and convert exactly to wgpu's
