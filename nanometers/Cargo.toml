@@ -29,7 +29,16 @@ rt-assert = ["nih_plug/assert_process_allocs"]
 nih_plug.workspace = true
 
 # Dev-player only. cpal pinned to nih-plug's version to avoid a duplicate native dependency.
-symphonia = { version = "0.5", optional = true, default-features = false, features = ["mp3"] }
+# Formats match what CLAUDE.md documents the dev-player accepts (mp3/flac/wav/aac); `pcm` is the
+# WAV sample codec, `isomp4` the AAC container. Dev-only, so binary size here doesn't matter.
+symphonia = { version = "0.5", optional = true, default-features = false, features = [
+    "mp3",
+    "flac",
+    "wav",
+    "pcm",
+    "aac",
+    "isomp4",
+] }
 cpal = { version = "0.17", optional = true }
 
 baseview.workspace = true
@@ -51,3 +60,5 @@ bytemuck.workspace = true
 # Reference BS.1770 implementation, used only as a conformance oracle in tests (ADR 0006).
 # Never linked into the shipped plugin.
 ebur128 = "0.1.10"
+# Test-only: exercise the EditorState persist round-trip (the same serde path nih-plug uses).
+serde_json = "1.0"
