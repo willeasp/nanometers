@@ -10,6 +10,7 @@ Early. Currently shipping:
 - Stereo waveform view (1px line strips per channel, 4096-sample window ≈ 85 ms @ 48 kHz)
 - Audio→GUI streaming via a lock-free SPSC ring
 - Stereo peak metering with sample-rate-independent decay (computed but not yet visualized)
+- LUFS loudness — BS.1770 / EBU R128 Momentary / Short-term / gated Integrated, hand-rolled and verified against [`ebur128`](https://crates.io/crates/ebur128) to ~1×10⁻¹¹ LU (computed but not yet visualized)
 
 Working in Logic and as a standalone binary. Not yet useful as a metering tool — visualization polish lives in the roadmap below.
 
