@@ -33,8 +33,12 @@ const BAND_HIGH_HZ: f32 = 4000.0;
 /// Viewable window the display targets (spec §6 — Module config later). The actual window is
 /// refresh-snapped a hair off this so the scroll is an exact integer px/frame.
 const DISPLAY_WINDOW_SECONDS: f64 = 5.0;
-/// The base-bin store holds a bit more than the display window so the left edge never clips.
-const STORE_WINDOW_SECONDS: f32 = 6.0;
+/// The base-bin store holds more than the display window so the left edge never clips. The display
+/// span peaks at ~7.5s when px_per_frame rounds to 1 on a narrow window; 8s covers it.
+const STORE_WINDOW_SECONDS: f32 = 8.0;
+/// A frame longer than this is a gap (occlusion, stall) — its dt is ignored for the fps estimate so
+/// it doesn't poison the lock and force a spurious relock.
+const GAP_SECONDS: f64 = 0.1;
 /// Per-half amplitude scale: L top half (clip-y center +0.5), R bottom half (−0.5); sample ±1
 /// reaches ±0.45 within its half.
 const HALF_SCALE: f32 = 0.45;
@@ -48,6 +52,16 @@ const MSAA_SAMPLES: u32 = 4;
 /// Re-lock the scroll clock when the measured fps drifts more than this fraction from the locked
 /// value (e.g. the startup 60→120 settle), so a stable refresh gives a stable px/frame.
 const FPS_RELOCK_FRAC: f64 = 0.08;
+/// The display runs a small BUFFER of closed columns behind the live edge, so it can advance by a
+/// fixed whole `px_per_frame` every frame (driven by the frame clock) while the buffer absorbs the
+/// audio's bursty per-frame arrival. This decoupling is what makes the scroll uniform — without it
+/// the display tracks the jittery closed-bin edge directly. Init mid-band; a clock that's drifted
+/// out of band is nudged back by a single pixel (ease off 1px below MIN so it refills, catch up 1px
+/// above MAX), so corrections are rare and 1px — not the per-frame jitter of the live edge. Units
+/// are columns; at ~200 samples/col, 12 cols ≈ 50 ms of display latency (imperceptible for a meter).
+const BUFFER_INIT_COLUMNS: i64 = 12;
+const BUFFER_MIN_COLUMNS: i64 = 4;
+const BUFFER_MAX_COLUMNS: i64 = 64;
 
 /// Integer pixels the contour moves per display frame: round the ideal continuous rate
 /// (`columns / (window · fps)`) to the nearest whole pixel, at least 1.
@@ -105,10 +119,11 @@ pub struct WaveformModule {
 
     // Scroll clock (the subway-sign uniform integer-pixel scroll).
     fps_est: f64,
+    fps_seeded: bool,
     locked_fps: f64,
     px_per_frame: i64,
     samples_per_col: f64,
-    scroll_col: i64, // display anchor in whole columns (= pixels)
+    scroll_col: i64, // display anchor in whole columns (= pixels), buffered behind the live edge
     scroll_init: bool,
     last_columns: usize,
     last_sample_rate: f32,
@@ -261,6 +276,7 @@ impl WaveformModule {
             format,
             offscreen: None,
             fps_est: 60.0,
+            fps_seeded: false,
             locked_fps: 0.0,
             px_per_frame: 1,
             samples_per_col: 1.0,
@@ -348,44 +364,63 @@ impl Module for WaveformModule {
             return;
         }
 
-        // Measure the refresh rate (EMA of 1/dt) to size the uniform pixel step.
+        // Measure the refresh rate to size the uniform pixel step. Seed from the FIRST real frame
+        // (no 60→120 startup relock cascade) and ignore gaps (occlusion/stalls), whose huge dt
+        // would otherwise poison the estimate and force a spurious relock+snap.
         let now = Instant::now();
-        let dt = self
-            .last_frame
-            .map(|t| (now - t).as_secs_f64())
-            .unwrap_or(1.0 / 60.0);
+        let dt = self.last_frame.map(|t| (now - t).as_secs_f64());
         self.last_frame = Some(now);
-        let inst_fps = (1.0 / dt.max(1e-4)).clamp(20.0, 360.0);
-        self.fps_est = self.fps_est * 0.9 + inst_fps * 0.1;
+        if let Some(dt) = dt {
+            if dt < GAP_SECONDS {
+                let inst_fps = (1.0 / dt.max(1e-4)).clamp(20.0, 360.0);
+                if !self.fps_seeded {
+                    self.fps_est = inst_fps;
+                    self.fps_seeded = true;
+                } else {
+                    self.fps_est = self.fps_est * 0.95 + inst_fps * 0.05;
+                }
+            }
+        }
 
         let columns = (viewport.w.round() as usize).clamp(1, MAX_COLUMNS);
         let sr = self.last_sample_rate as f64;
 
-        // (Re)lock the pixel step + column width when the scale changes (uninitialized, viewport
-        // resize, rate change) or the measured fps settles to a new value (e.g. 60→120 at startup).
+        // (Re)lock the pixel step + column width on a real scale change (uninitialized, viewport
+        // resize, rate change, or the fps finally settling). With the seed + gap handling these are
+        // rare, so snapping the buffered position here is fine.
         let fps_drifted = self.locked_fps > 0.0
             && (self.fps_est - self.locked_fps).abs() / self.locked_fps > FPS_RELOCK_FRAC;
-        if !self.scroll_init || columns != self.last_columns || fps_drifted {
+        let relock = !self.scroll_init || columns != self.last_columns || fps_drifted;
+        if relock {
             self.last_columns = columns;
             self.locked_fps = self.fps_est;
             self.px_per_frame = pixels_per_frame(columns, DISPLAY_WINDOW_SECONDS, self.fps_est);
             self.samples_per_col = samples_per_column(sr, self.px_per_frame, self.fps_est);
-            // Snap the display to the live audio edge so there's no sweep across the discontinuity.
-            self.scroll_col = (self.store.samples_folded() as f64 / self.samples_per_col).floor() as i64;
+        }
+        // The newest fully-closed column (rightmost columns must be fully populated).
+        let last_full = (self.store.closed_samples() as f64 / self.samples_per_col).floor() as i64 - 1;
+        if relock {
+            // Re-establish the buffer behind the live edge; the subway clock takes over next frame.
+            self.scroll_col = last_full - BUFFER_INIT_COLUMNS;
             self.scroll_init = true;
         } else {
-            // The smooth case: advance by exactly px_per_frame whole pixels — every frame identical.
-            self.scroll_col += self.px_per_frame;
-            // Drift guard (display vs audio clock ppm, or a long stall): hard-snap only when far off.
-            let audio_col = (self.store.samples_folded() as f64 / self.samples_per_col).floor() as i64;
-            if (audio_col - self.scroll_col).abs() > self.px_per_frame * 3 {
-                self.scroll_col = audio_col;
+            // Subway scroll: advance by EXACTLY px_per_frame, driven by the frame clock. A gentle
+            // ±1px correction keeps the display buffered behind the live edge — the buffer absorbs
+            // the audio's bursty per-frame arrival, so the rendered step is the rigid pixel clock,
+            // not the jittery closed-bin edge. Never advance onto an unclosed column (stall/pause).
+            let avail = last_full - self.scroll_col;
+            let mut step = self.px_per_frame;
+            if avail > BUFFER_MAX_COLUMNS {
+                step += 1; // latency creeping up (display slower than audio) → catch up 1px
+            } else if avail < BUFFER_MIN_COLUMNS {
+                step -= 1; // buffer running low (display faster) → ease off 1px so it refills
             }
+            if step > avail {
+                step = avail.max(0); // never cross the live edge (pause/severe stall → freeze)
+            }
+            self.scroll_col += step;
         }
-
-        // Never draw past the last fully-closed column → the live edge is never a partial/empty one.
-        let last_full = (self.store.closed_samples() as f64 / self.samples_per_col).floor() as i64 - 1;
-        let rightmost_col = self.scroll_col.min(last_full);
+        let rightmost_col = self.scroll_col; // ≤ last_full by construction
         let cols = self.store.build_columns(columns, self.samples_per_col, rightmost_col);
 
         // Columns at exact pixel centers in the `columns`-wide offscreen: x = (2c+1)/N − 1.

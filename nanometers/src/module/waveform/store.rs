@@ -194,13 +194,6 @@ impl WaveStore {
         }
     }
 
-    /// The newest fully-closed column index for a given `bpc` (column `k` is full once
-    /// `(k+1)·bpc` bins have closed). `-1` while no column is complete yet. The renderer clamps the
-    /// rightmost drawn column to this so the live edge never shows a partial/empty column.
-    pub fn last_full_column(&self, bpc: usize) -> i64 {
-        (self.bins_closed / bpc.max(1) as u64) as i64 - 1
-    }
-
     fn close_bin(&mut self) {
         let n = self.acc_count.max(1) as f32;
         let env = [
@@ -216,10 +209,6 @@ impl WaveStore {
         self.bins[pos] = BaseBin { env, band_ms };
         self.bins_closed = self.bins_closed.wrapping_add(1);
         self.reset_accumulator();
-    }
-
-    pub fn window_bins(&self) -> usize {
-        self.bins.len()
     }
 
     pub fn samples_per_bin(&self) -> usize {
@@ -376,6 +365,61 @@ mod tests {
             (kick1.env[0].max - kick2.env[0].max).abs() < 1e-6
                 && (kick1.env[0].min - kick2.env[0].min).abs() < 1e-6,
             "kick height must be stable as it scrolls: was max={} min={}, now max={} min={}",
+            kick1.env[0].max,
+            kick1.env[0].min,
+            kick2.env[0].max,
+            kick2.env[0].min
+        );
+    }
+
+    /// Same constant-height guarantee, but with a FRACTIONAL samples-per-column (the real case:
+    /// `sample_rate / (px_per_frame · fps)` is almost never a whole multiple of samples-per-bin).
+    /// The peak's ABSOLUTE column is independent of the scroll anchor, so its merged range — and
+    /// thus its height — is identical at both positions despite the ≤1-bin floor/ceil edge slop.
+    #[test]
+    fn feature_keeps_constant_height_with_fractional_spc() {
+        const SR: f32 = 48000.0;
+        const COLUMNS: usize = 300;
+        const SPC: f64 = 183.75; // fractional: not a whole number of 24-sample bins
+        let spb = (SR * BIN_SECONDS).round() as usize;
+        let mut s = WaveStore::new(4000, 250.0, 4000.0);
+        s.set_sample_rate(SR);
+
+        let silence = |s: &mut WaveStore, bins: usize| {
+            for _ in 0..bins * spb {
+                s.push(0.0, 0.0);
+            }
+        };
+
+        silence(&mut s, 120);
+        for _ in 0..6 * spb {
+            s.push(0.9, -0.9);
+        }
+        silence(&mut s, 30);
+
+        let rightmost1 = (s.samples_folded() as f64 / SPC).floor() as i64;
+        let cols1 = s.build_columns(COLUMNS, SPC, rightmost1);
+        let (idx1, kick1) = cols1
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.env[0].max.partial_cmp(&b.1.env[0].max).unwrap())
+            .unwrap();
+        assert!(kick1.env[0].max > 0.5, "kick should be a tall column");
+
+        silence(&mut s, 400);
+        let rightmost2 = (s.samples_folded() as f64 / SPC).floor() as i64;
+        let cols2 = s.build_columns(COLUMNS, SPC, rightmost2);
+        let (idx2, kick2) = cols2
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.env[0].max.partial_cmp(&b.1.env[0].max).unwrap())
+            .unwrap();
+
+        assert!(idx2 < idx1, "kick must have scrolled left: {idx1} -> {idx2}");
+        assert!(
+            (kick1.env[0].max - kick2.env[0].max).abs() < 1e-6
+                && (kick1.env[0].min - kick2.env[0].min).abs() < 1e-6,
+            "fractional-spc kick height must be stable: was max={} min={}, now max={} min={}",
             kick1.env[0].max,
             kick1.env[0].min,
             kick2.env[0].max,
