@@ -218,8 +218,6 @@ dependencies = [
 [[package]]
 name = "baseview"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93b440b756c574636e135d4936908fc74681196ca3ea7471fa16de9c104ad3f4"
 dependencies = [
  "cocoa",
  "core-foundation 0.9.4",

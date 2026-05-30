@@ -44,3 +44,11 @@ bytemuck = { version = "1.18", features = ["derive"] }
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# Vendored baseview fork: baseview's macOS backend paces on_frame with a hardcoded 66.7 Hz
+# CFRunLoopTimer (src/macos/window.rs), which beats against a 120 Hz ProMotion display and makes the
+# waveform scroll judder no matter how clean the column math is. The fork drives on_frame from an
+# AppKit display link (vsync-locked, refresh-adaptive) instead. One baseview in the tree (this crate
+# + nih_plug both take crates.io 0.1.0), so this single patch covers everything.
+[patch.crates-io]
+baseview = { path = "vendor/baseview" }
