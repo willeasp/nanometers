@@ -88,11 +88,22 @@ impl Plugin for Nanometers {
     const EMAIL: &'static str = "wille.asp@live.se";
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
-    const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[AudioIOLayout {
-        main_input_channels: NonZeroU32::new(2),
-        main_output_channels: NonZeroU32::new(2),
-        ..AudioIOLayout::const_default()
-    }];
+    const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[
+        AudioIOLayout {
+            main_input_channels: NonZeroU32::new(2),
+            main_output_channels: NonZeroU32::new(2),
+            ..AudioIOLayout::const_default()
+        },
+        // Mono-input layout so the meter accepts mono sources, and so the standalone can bind a
+        // mono input device (e.g. a laptop mic) via `--audio-layout 2`. Output stays stereo
+        // because macOS speakers don't expose a 1-channel output config — the meter duplicates
+        // the mono input to both channels anyway.
+        AudioIOLayout {
+            main_input_channels: NonZeroU32::new(1),
+            main_output_channels: NonZeroU32::new(2),
+            ..AudioIOLayout::const_default()
+        },
+    ];
 
     const SAMPLE_ACCURATE_AUTOMATION: bool = false;
 
