@@ -547,18 +547,20 @@ impl Module for WaveformModule {
                 if self.dt_ema <= 0.0 {
                     self.dt_ema = dt;
                 } else {
+                    // MAD against the PREVIOUS mean (the prediction error), then update the mean —
+                    // measuring deviation against the post-update mean shrinks it by (1−β) and biases
+                    // cov low (under-detecting a lumpy host).
+                    let prev_mean = self.dt_ema;
                     self.dt_ema = self.dt_ema * (1.0 - CADENCE_BETA) + dt * CADENCE_BETA;
                     self.mad_ema =
-                        self.mad_ema * (1.0 - CADENCE_BETA) + (dt - self.dt_ema).abs() * CADENCE_BETA;
+                        self.mad_ema * (1.0 - CADENCE_BETA) + (dt - prev_mean).abs() * CADENCE_BETA;
                 }
             }
         }
         let cov = if self.dt_ema > 0.0 { self.mad_ema / self.dt_ema } else { 0.0 };
         let was_regular = self.cadence_regular;
         self.cadence_regular = cadence_regular(cov, was_regular);
-        if was_regular && !self.cadence_regular {
-            self.time_cursor = self.next_sample; // entering irregular mode: seed the time cursor
-        }
+        let mode_flipped = was_regular != self.cadence_regular;
 
         // Adaptive reservoir target: a couple of audio blocks behind the edge — the minimal slack that
         // absorbs bursty arrival.
@@ -575,8 +577,10 @@ impl Module for WaveformModule {
         // Regular-mode pixel step, hysteresis so a refresh at a rounding boundary can't flip it.
         let fps = (sr / self.avg_arrival).max(1.0);
         let continuous = columns as f64 / (DISPLAY_WINDOW_SECONDS * fps);
+        // Recompute the pixel step on a regular-mode px change OR a flip back into VSYNC (px was
+        // frozen during the TIME stint, so it may be stale).
         let px_changed = self.cadence_regular
-            && (!self.ring_init || (continuous - self.px_per_frame as f64).abs() > 0.6);
+            && (!self.ring_init || mode_flipped || (continuous - self.px_per_frame as f64).abs() > 0.6);
         if px_changed {
             self.px_per_frame = choose_px_per_frame(columns, DISPLAY_WINDOW_SECONDS, fps);
         }
@@ -588,8 +592,9 @@ impl Module for WaveformModule {
         };
 
         let mut built = 0i64;
-        if !self.ring_init || columns != self.last_columns || px_changed {
-            // First run / resize / regular-mode px change → one-time rebuild behind the live edge.
+        if !self.ring_init || columns != self.last_columns || px_changed || mode_flipped {
+            // First run / resize / px change / a mode flip → one-time rebuild of the whole ring at the
+            // now-correct column width, behind the live edge (also re-seeds both cursors there).
             self.refill_ring(columns, closed as f64 - reservoir_target, s_nominal);
         } else if audio_live && self.cadence_regular {
             // Regular (vsync): build EXACTLY px columns; drift lands in the per-column sample count
