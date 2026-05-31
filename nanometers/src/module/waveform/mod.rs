@@ -104,13 +104,22 @@ const CURSOR_DRIFT_GAIN: f64 = 0.01;
 /// Re-anchor the time cursor if it's this many reservoirs off the edge (a seek / long-stall recovery)
 /// rather than grinding out columns to catch up.
 const RESYNC_RESERVOIRS: f64 = 6.0;
-/// EMA weight for the frame-interval cadence stats (mean + mean-abs-deviation).
+/// EMA weight for the cadence stats (sub-vsync fraction, mean interval, mean-abs-deviation).
 const CADENCE_BETA: f64 = 0.05;
-/// Cadence hysteresis on the coefficient of variation (MAD / mean of dt): leave the (default)
-/// fixed-px path only above HI (clearly lumpy = FL), return to it only below LO (clearly steady =
-/// vsync). The gap prevents flip-flopping; the bias keeps vsync hosts on the proven path.
-const CADENCE_COV_HI: f64 = 0.45;
-const CADENCE_COV_LO: f64 = 0.30;
+/// A frame arriving faster than this is "sub-vsync": the host pumped our render faster than ANY
+/// display refreshes (~2 ms = 500 Hz). A vsync-driven host (display link) physically can't — it fires
+/// once per vblank (≥ ~3 ms even with jitter). So a steady stream of sub-vsync frames = a non-vsync,
+/// pumping host (FL). This is the primary, principled discriminator; cov is a noisy backup.
+const SUB_VSYNC_SECONDS: f64 = 0.002;
+/// Cadence hysteresis. Switch to TIME when sub-vsync frames are common (primary) OR cov is extreme
+/// (backup); return to the default fixed-px path only when BOTH are clearly low. Biased to stay
+/// fixed-px (the proven path) so vsync hosts never leave it. The wide gap prevents flip-flopping.
+// Biased HARD toward VSYNC: occasional run-loop coalescing under load also produces sub-vsync bursts
+// on a real vsync host, so only a heavy, systematic lumpy signature (FL pumping) should flip us.
+const SUB_VSYNC_HI: f64 = 0.10; // >10% sub-vsync frames → lumpy host (FL); load-coalescing stays under
+const SUB_VSYNC_LO: f64 = 0.03;
+const CADENCE_COV_HI: f64 = 0.70; // cov this high is FL-only (standalone callback jitter peaks ~0.5)
+const CADENCE_COV_LO: f64 = 0.45;
 
 /// Advance the continuous time cursor one render (the irregular-cadence path). `dt`·`sample_rate` is
 /// the audio that should have gone by; a gentle pull toward `target` (live edge − reservoir) cancels
@@ -120,14 +129,15 @@ fn advance_cursor(cursor: f64, dt: f64, sample_rate: f64, target: f64, gain: f64
     cursor + dt.min(MAX_DT_SECONDS) * sample_rate + gain * (target - cursor)
 }
 
-/// Classify the frame cadence with hysteresis. `cov` is MAD/mean of the frame interval. Returns
-/// whether to treat the cadence as REGULAR (vsync → fixed-px). Biased to stay regular (the proven
-/// path) unless the cadence is clearly lumpy, and to return to regular only when clearly steady.
-fn cadence_regular(cov: f64, currently_regular: bool) -> bool {
+/// Classify the frame cadence with hysteresis. `sub` is the fraction of sub-vsync frames (primary
+/// signal); `cov` is MAD/mean of the interval (noisy backup). Returns whether to treat the cadence as
+/// REGULAR (vsync → fixed-px). Strongly biased to stay regular: leave only on a clear lumpy signal,
+/// return only when both signals are clearly low — so vsync hosts (sub≈0) never flip-flop.
+fn cadence_regular(sub: f64, cov: f64, currently_regular: bool) -> bool {
     if currently_regular {
-        cov <= CADENCE_COV_HI // leave regular only when clearly irregular
+        sub <= SUB_VSYNC_HI && cov <= CADENCE_COV_HI // leave regular only on a clear lumpy signal
     } else {
-        cov < CADENCE_COV_LO // return to regular only when clearly steady
+        sub < SUB_VSYNC_LO && cov < CADENCE_COV_LO // return only when both are clearly steady
     }
 }
 
@@ -143,13 +153,15 @@ struct ScrollDbg {
     spp_min: f64,
     spp_max: f64,
     cov_acc: f64,
+    sub_acc: f64,
 }
 
 impl ScrollDbg {
     /// `built` = columns built this render; `spp` = column width; `regular` = cadence mode; `cov` =
-    /// frame-interval coefficient of variation. Over a window: the per-render column count (min..max —
-    /// equal = dead-uniform), the zoom span, the mode, and the measured cadence cov.
-    fn tick(&mut self, built: i64, spp: f64, regular: bool, cov: f64) {
+    /// frame-interval coefficient of variation; `sub` = sub-vsync frame fraction (primary signal).
+    /// Over a window: per-render column count (min..max — equal = dead-uniform), zoom span, mode,
+    /// and the two cadence signals.
+    fn tick(&mut self, built: i64, spp: f64, regular: bool, cov: f64, sub: f64) {
         if !self.on {
             return;
         }
@@ -159,17 +171,20 @@ impl ScrollDbg {
             self.spp_min = f64::MAX;
             self.spp_max = f64::MIN;
             self.cov_acc = 0.0;
+            self.sub_acc = 0.0;
         }
         self.built_min = self.built_min.min(built);
         self.built_max = self.built_max.max(built);
         self.spp_min = self.spp_min.min(spp);
         self.spp_max = self.spp_max.max(spp);
         self.cov_acc += cov;
+        self.sub_acc += sub;
         self.n += 1;
         if self.n >= 240 {
             crate::diag_log(&format!(
-                "[nano-scroll] mode={} cov~{:.2} | built/render {}..{} | spp {:.2}..{:.2} (zoom span {:.3}%)",
+                "[nano-scroll] mode={} sub~{:.1}% cov~{:.2} | built/render {}..{} | spp {:.2}..{:.2} (zoom {:.2}%)",
                 if regular { "VSYNC" } else { "TIME" },
+                100.0 * self.sub_acc / self.n as f64,
                 self.cov_acc / self.n as f64,
                 self.built_min,
                 self.built_max,
@@ -234,8 +249,9 @@ pub struct WaveformModule {
     // Host-adaptive cadence: stay on the fixed-px path (above) for vsync hosts; switch to the
     // time-based clock when the frame cadence is clearly irregular (see `cadence_regular`).
     last_frame: Option<Instant>, // for the frame interval dt
-    dt_ema: f64,                 // smoothed frame interval + its mean-abs-deviation
+    dt_ema: f64,                 // smoothed frame interval + its mean-abs-deviation + sub-vsync rate
     mad_ema: f64,
+    sub_ema: f64,          // fraction of sub-vsync frames (primary lumpy-host signal)
     cadence_regular: bool, // current mode (true = fixed-px / vsync; default)
     time_cursor: f64,      // smooth time-driven target (irregular mode only)
 
@@ -401,6 +417,7 @@ impl WaveformModule {
             last_frame: None,
             dt_ema: 0.0,
             mad_ema: 0.0,
+            sub_ema: 0.0,
             cadence_regular: true, // default to the proven fixed-px path
             time_cursor: 0.0,
             scroll_dbg: ScrollDbg {
@@ -544,22 +561,25 @@ impl Module for WaveformModule {
         self.last_frame = Some(now);
         if let Some(dt) = dt {
             if dt > 0.0 && dt < MAX_DT_SECONDS {
+                // Primary signal: was this frame sub-vsync (the host pumped us faster than any display)?
+                let sub = if dt < SUB_VSYNC_SECONDS { 1.0 } else { 0.0 };
                 if self.dt_ema <= 0.0 {
                     self.dt_ema = dt;
+                    self.sub_ema = sub;
                 } else {
                     // MAD against the PREVIOUS mean (the prediction error), then update the mean —
-                    // measuring deviation against the post-update mean shrinks it by (1−β) and biases
-                    // cov low (under-detecting a lumpy host).
+                    // measuring deviation against the post-update mean shrinks it by (1−β).
                     let prev_mean = self.dt_ema;
                     self.dt_ema = self.dt_ema * (1.0 - CADENCE_BETA) + dt * CADENCE_BETA;
                     self.mad_ema =
                         self.mad_ema * (1.0 - CADENCE_BETA) + (dt - prev_mean).abs() * CADENCE_BETA;
+                    self.sub_ema = self.sub_ema * (1.0 - CADENCE_BETA) + sub * CADENCE_BETA;
                 }
             }
         }
         let cov = if self.dt_ema > 0.0 { self.mad_ema / self.dt_ema } else { 0.0 };
         let was_regular = self.cadence_regular;
-        self.cadence_regular = cadence_regular(cov, was_regular);
+        self.cadence_regular = cadence_regular(self.sub_ema, cov, was_regular);
         let mode_flipped = was_regular != self.cadence_regular;
 
         // Adaptive reservoir target: a couple of audio blocks behind the edge — the minimal slack that
@@ -641,7 +661,7 @@ impl Module for WaveformModule {
         }
         // (paused → ring is left frozen)
 
-        self.scroll_dbg.tick(built, s_nominal, self.cadence_regular, cov);
+        self.scroll_dbg.tick(built, s_nominal, self.cadence_regular, cov, self.sub_ema);
         let cols = self.display_cols.make_contiguous();
 
         // Columns at exact pixel centers in the `columns`-wide offscreen: x = (2c+1)/N − 1.
@@ -831,16 +851,27 @@ mod tests {
     // ── cadence_regular: vsync vs lumpy-host hysteresis ──
 
     #[test]
-    fn cadence_stays_regular_until_clearly_lumpy() {
-        assert!(cadence_regular(0.20, true), "steady → stay vsync"); // Logic ~0.2
-        assert!(cadence_regular(0.40, true), "within the band → stay (no flip-flop)");
-        assert!(!cadence_regular(0.60, true), "clearly lumpy → switch to time-based"); // FL ~0.6
+    fn cadence_stays_vsync_on_callback_jitter_without_sub_vsync_frames() {
+        // Standalone/Logic: no sub-vsync frames (sub≈0), and callback-jitter cov up to ~0.5 — must
+        // stay VSYNC (this is the flip-flop the sub-vsync signal fixes).
+        assert!(cadence_regular(0.0, 0.20, true), "steady → stay vsync");
+        assert!(cadence_regular(0.0, 0.50, true), "high callback-jitter cov but no bursts → stay vsync");
     }
 
     #[test]
-    fn cadence_returns_to_regular_only_when_clearly_steady() {
-        assert!(!cadence_regular(0.40, false), "still lumpy → stay time-based");
-        assert!(!cadence_regular(0.35, false), "in the band → stay (no flip-flop)");
-        assert!(cadence_regular(0.20, false), "clearly steady again → back to vsync");
+    fn cadence_switches_to_time_on_sub_vsync_bursts() {
+        // FL pumps render faster than vsync → many sub-vsync frames → switch to TIME.
+        assert!(!cadence_regular(0.20, 0.30, true), "heavy sub-vsync bursts → TIME");
+        // Backup trigger: an extreme cov (FL-only) also switches, even if sub is marginal.
+        assert!(!cadence_regular(0.0, 0.80, true), "extreme cov → TIME");
+        // …and a load-coalescing host that only occasionally bursts (sub ~5%) must NOT flip.
+        assert!(cadence_regular(0.05, 0.50, true), "occasional load bursts → stay vsync");
+    }
+
+    #[test]
+    fn cadence_returns_to_vsync_only_when_both_signals_clearly_low() {
+        assert!(!cadence_regular(0.10, 0.20, false), "still bursting → stay TIME");
+        assert!(!cadence_regular(0.0, 0.50, false), "cov still high → stay TIME");
+        assert!(cadence_regular(0.0, 0.20, false), "both clearly low → back to vsync");
     }
 }
