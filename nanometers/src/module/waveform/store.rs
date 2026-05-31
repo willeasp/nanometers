@@ -266,6 +266,47 @@ impl WaveStore {
         }
         out
     }
+
+    /// Merge the base bins overlapping the absolute sample range `[lo_sample, hi_sample)` into one
+    /// column. This is the primitive for the incremental scroll: each render builds its new columns
+    /// from explicit sample ranges (sizes flexing to track the clock drift), so a built column is
+    /// immutable — it never re-maps as it scrolls. Ranges off the ring (or before recording started)
+    /// read as silence; partial overlap clamps to what's available.
+    pub fn merge_sample_range(&self, lo_sample: i64, hi_sample: i64) -> BaseBin {
+        let spb = self.samples_per_bin.max(1) as f64;
+        let n = self.bins.len() as i64;
+        let total = self.bins_closed as i64;
+        let win_start = total - n; // oldest absolute bin still in the ring
+        let lo = ((lo_sample as f64 / spb).floor() as i64).max(win_start);
+        let hi = ((hi_sample as f64 / spb).ceil() as i64).min(total);
+        if lo >= hi {
+            return BaseBin::SILENCE;
+        }
+        let mut env = [
+            ChannelEnvelope { min: f32::INFINITY, max: f32::NEG_INFINITY, mean_square: 0.0 },
+            ChannelEnvelope { min: f32::INFINITY, max: f32::NEG_INFINITY, mean_square: 0.0 },
+        ];
+        let mut band_ms = [0.0f32; 3];
+        for abs in lo..hi {
+            let b = &self.bins[abs.rem_euclid(n) as usize];
+            for ch in 0..2 {
+                env[ch].min = env[ch].min.min(b.env[ch].min);
+                env[ch].max = env[ch].max.max(b.env[ch].max);
+                env[ch].mean_square += b.env[ch].mean_square;
+            }
+            for k in 0..3 {
+                band_ms[k] += b.band_ms[k];
+            }
+        }
+        let inv = 1.0 / (hi - lo) as f32;
+        for ch in 0..2 {
+            env[ch].mean_square *= inv;
+        }
+        for k in 0..3 {
+            band_ms[k] *= inv;
+        }
+        BaseBin { env, band_ms }
+    }
 }
 
 #[cfg(test)]
@@ -424,6 +465,37 @@ mod tests {
             kick1.env[0].min,
             kick2.env[0].max,
             kick2.env[0].min
+        );
+    }
+
+    #[test]
+    fn merge_sample_range_picks_out_the_right_samples() {
+        const SR: f32 = 48000.0;
+        let mut s = WaveStore::new(4000, 250.0, 4000.0);
+        s.set_sample_rate(SR);
+        let spb = s.samples_per_bin(); // 24
+        // 100 silent bins, one loud bin, then more silence.
+        for _ in 0..100 * spb {
+            s.push(0.0, 0.0);
+        }
+        for _ in 0..spb {
+            s.push(0.9, -0.9);
+        }
+        for _ in 0..50 * spb {
+            s.push(0.0, 0.0);
+        }
+
+        // The loud bin's exact sample range comes back loud…
+        let loud = s.merge_sample_range((100 * spb) as i64, (101 * spb) as i64);
+        assert!((loud.env[0].max - 0.9).abs() < 1e-6, "L max {}", loud.env[0].max);
+        assert!((loud.env[1].min + 0.9).abs() < 1e-6, "R min {}", loud.env[1].min);
+        // …a silent range comes back silent…
+        let quiet = s.merge_sample_range((10 * spb) as i64, (11 * spb) as i64);
+        assert_eq!(quiet.env[0].max, 0.0);
+        // …and a range past the live edge (future / unclosed) reads as silence.
+        assert_eq!(
+            s.merge_sample_range((10_000 * spb) as i64, (10_001 * spb) as i64),
+            BaseBin::SILENCE
         );
     }
 

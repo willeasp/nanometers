@@ -20,6 +20,7 @@ pub mod store;
 
 use bytemuck::{Pod, Zeroable};
 use std::borrow::Cow;
+use std::collections::VecDeque;
 use std::time::Instant;
 use wgpu::util::DeviceExt;
 
@@ -45,31 +46,30 @@ const COLOR_WHITE_MIX: f32 = 0.18;
 /// MSAA sample count for the Waveform's own offscreen target (0007 — host pass stays single-sample).
 const MSAA_SAMPLES: u32 = 4;
 
-/// The newest drawn column is held this far (in samples) behind the live audio edge. The integer
-/// pixel step never depends on the bursty audio arrival; this slack is what lets it run uniformly
-/// without the edge ever overtaking it. ~50 ms — imperceptible, comfortably > per-frame arrival jitter.
-const BUFFER_SECONDS: f64 = 0.05;
 /// No new closed audio for longer than this → paused; freeze the scroll. Loose enough that ordinary
-/// bursty arrival isn't mistaken for a pause.
-const PAUSE_SECONDS: f64 = 0.1;
+/// bursty arrival (a couple of audio blocks) isn't mistaken for a pause.
+const PAUSE_SECONDS: f64 = 0.07;
 /// Floor on samples-per-column (a column must hold at least one base bin's worth).
 const MIN_SAMPLES_PER_COL: f64 = 1.0;
-/// Samples-per-column is only trimmed when it's more than this fraction off the buffer-holding
-/// target — so steady state is a FROZEN zoom plus a pure integer scroll (no per-frame motion in the
-/// float at all), and the trim only cancels slow drift. Wider than per-frame arrival jitter.
-const SPP_DEADBAND_FRAC: f64 = 0.02;
-/// When it does trim, low-pass the zoom toward the target by this much per frame (slow → the rare
-/// correction is a sub-pixel zoom nudge spread over many frames, never a visible jump).
-const SPP_TRIM_ALPHA: f64 = 0.02;
-/// Tracking weight for the rough refresh estimate (used only to pick the integer pixel step).
-const FPS_EMA_ALPHA: f64 = 0.1;
-/// Only change the integer pixel step once the ideal (continuous) step is this far past the current
-/// one — hysteresis so a refresh hovering at a rounding boundary can't flap the step.
-const PX_HYSTERESIS: f64 = 0.35;
+/// EMA weight for the measured per-frame arrival (samples closed per render). Drives the nominal
+/// consume rate + the integer pixel step. Slow → a smooth, near-constant per-pixel sample count.
+const ARRIVAL_BETA: f64 = 0.01;
+/// Proportional gain of the reservoir control loop: how hard we slew the per-frame consume toward
+/// holding the reservoir at target. Gentle, so the loop ignores the bursty sawtooth (the reservoir
+/// margin absorbs that) and only corrects the slow drift — ≈ ±1 sample per pixel. "Slew, never step".
+const RESERVOIR_GAIN: f64 = 0.005;
+/// Reservoir target = this × the observed audio block size — the minimal slack that still absorbs the
+/// bursty arrival (one block can land between two renders). Adaptive → smallest latency that works.
+const RESERVOIR_BLOCKS: f64 = 2.0;
+/// Decay for the tracked block size (recent max arrival), so the target shrinks back after a big
+/// block and adapts to the host's buffer setting.
+const BLOCK_DECAY: f64 = 0.999;
+/// Floor on the reservoir target (samples-as-seconds), so it's never absurdly small at tiny blocks.
+const RESERVOIR_MIN_SECONDS: f64 = 0.008;
 
 /// Integer pixels the contour moves per render: round the ideal continuous rate
-/// (`columns / (window · fps)`) to a whole pixel, at least 1. The rounding is robust — a fps estimate
-/// off by several percent still picks the same integer — and `samples_per_col` absorbs the residual.
+/// (`columns / (window · fps)`) to a whole pixel, at least 1. Robust — a fps estimate off by a few
+/// percent picks the same integer — and the per-pixel sample count carries the exact rate.
 fn choose_px_per_frame(columns: usize, window_seconds: f64, fps: f64) -> i64 {
     if window_seconds <= 0.0 || fps <= 0.0 {
         return 1;
@@ -77,35 +77,14 @@ fn choose_px_per_frame(columns: usize, window_seconds: f64, fps: f64) -> i64 {
     ((columns as f64 / (window_seconds * fps)).round() as i64).max(1)
 }
 
-/// One frame of the scroll. Pure controller (no GPU), so it's unit-testable. The column anchor
-/// advances by EXACTLY `px_per_frame` whole pixels — integer arithmetic, no rounding, the one thing
-/// that moves the picture, so motion is dead-uniform. The display/audio clock mismatch is absorbed
-/// by trimming `spp` (samples-per-column = zoom) toward the value that holds the newest column
-/// `buffer_samples` behind the live edge — but only outside a deadband, so steady state is a frozen
-/// zoom + pure integer scroll. Returns the new `(scroll_col, spp)`; the drawn column is `scroll_col`.
-fn advance_scroll(
-    scroll_col: i64,
-    spp: f64,
-    px_per_frame: i64,
-    closed: u64,
-    buffer_samples: f64,
-    alpha: f64,
-    audio_live: bool,
-) -> (i64, f64) {
-    if !audio_live {
-        return (scroll_col, spp); // paused → freeze both anchor and zoom
-    }
-    let col = scroll_col + px_per_frame; // pure integer step — no float, no rounding
-    let target = (closed as f64 - buffer_samples) / (col as f64 + 1.0);
-    let spp = if (target - spp).abs() > spp * SPP_DEADBAND_FRAC {
-        spp + alpha * (target - spp) // outside the deadband → trim the zoom toward target
-    } else {
-        spp // inside the deadband → frozen; nothing but the integer anchor moves
-    };
-    let spp = spp.max(MIN_SAMPLES_PER_COL);
-    // Never draw past the newest fully-closed column (startup/underrun) → clamp the anchor back.
-    let max_col = (closed as f64 / spp).floor() as i64 - 1;
-    (col.min(max_col), spp)
+/// Samples to consume into this frame's new columns. Pure (no GPU), so the control law is testable.
+/// It's the smoothed arrival rate (`avg_arrival`) nudged by a gentle proportional term toward holding
+/// the reservoir (`closed − drawn edge`) at `target` — the loop that absorbs clock drift into the
+/// per-pixel sample count instead of the motion (slew, never step). Clamped ≥ 0 and ≤ what's actually
+/// closed (`available`), so we never build a column from audio that hasn't arrived.
+fn consume_samples(avg_arrival: f64, reservoir: f64, target: f64, gain: f64, available: f64) -> f64 {
+    let want = avg_arrival + gain * (reservoir - target);
+    want.clamp(0.0, available.max(0.0))
 }
 
 /// Per-frame scroll diagnostics (gated on `NANO_DEBUG_SCROLL`). Confirms the smoothness claim with
@@ -189,18 +168,20 @@ pub struct WaveformModule {
     format: wgpu::TextureFormat,
     offscreen: Option<Offscreen>,
 
-    // Scroll clock: fixed integer pixels/render, samples-per-col trims to hold the buffer (see
-    // `advance_scroll`). The pixel motion is pure integer — no float, no rounding.
-    fps_est: f64,    // rough refresh estimate, only to pick the integer pixel step
-    fps_seeded: bool,
+    // Incremental scroll: a ring of immutable built columns. Each render builds `px_per_frame` new
+    // columns from the freshest audio (sizes flexing to track clock drift), pushes them on the right,
+    // drops as many from the left. Old columns never re-map → no stretch; px/render → uniform motion.
+    display_cols: VecDeque<store::BaseBin>, // the visible columns, oldest→newest (length = columns)
+    next_sample: f64,                       // cursor: absolute sample where the next new column starts
+    avg_arrival: f64,                       // EMA of samples closed per render (≈ sample_rate / fps)
+    avg_seeded: bool,
+    block_size: f64,  // tracked audio block size (recent max arrival) → adaptive reservoir target
     px_per_frame: i64,
-    samples_per_col: f64, // zoom = samples per column; the slowly-trimmed control variable
-    scroll_col: i64,      // integer column anchor (= rightmost pixel), advanced by px_per_frame
-    scroll_init: bool,
-    last_closed: u64,                    // closed_samples last frame, to detect audio progress
+    ring_init: bool,  // display ring filled (rebuilt on first run / resize / rate change)
+    last_columns: usize,
+    prev_closed: u64,                    // closed_samples last render (for the per-render delta)
     last_audio_advance: Option<Instant>, // when audio last advanced — drives pause detection
     last_sample_rate: f32,
-    last_frame: Option<Instant>,
     scroll_dbg: ScrollDbg,
 }
 
@@ -349,16 +330,17 @@ impl WaveformModule {
             sampler,
             format,
             offscreen: None,
-            fps_est: 60.0,
-            fps_seeded: false,
+            display_cols: VecDeque::new(),
+            next_sample: 0.0,
+            avg_arrival: 0.0,
+            avg_seeded: false,
+            block_size: 0.0,
             px_per_frame: 1,
-            samples_per_col: 1.0,
-            scroll_col: 0,
-            scroll_init: false,
-            last_closed: 0,
+            ring_init: false,
+            last_columns: 0,
+            prev_closed: 0,
             last_audio_advance: None,
             last_sample_rate: 0.0,
-            last_frame: None,
             scroll_dbg: ScrollDbg {
                 on: std::env::var_os("NANO_DEBUG_SCROLL").is_some(),
                 ..Default::default()
@@ -418,9 +400,10 @@ impl Module for WaveformModule {
     fn update(&mut self, ctx: &FrameContext, _queue: &wgpu::Queue) {
         if ctx.sample_rate != self.last_sample_rate {
             self.last_sample_rate = ctx.sample_rate;
-            // Store clears its sample clock on a rate change → re-anchor the scroll from scratch.
-            self.last_closed = 0;
-            self.scroll_init = false;
+            // Store clears its sample clock on a rate change → re-measure the arrival rate + refill.
+            self.prev_closed = 0;
+            self.avg_seeded = false;
+            self.ring_init = false;
         }
         self.store.set_sample_rate(ctx.sample_rate);
         if !self.store.is_active() {
@@ -447,70 +430,94 @@ impl Module for WaveformModule {
         let columns = (viewport.w.round() as usize).clamp(1, MAX_COLUMNS);
         let sr = self.last_sample_rate as f64;
         let now = Instant::now();
-        let dt = self.last_frame.map(|t| (now - t).as_secs_f64());
-        self.last_frame = Some(now);
-
-        // Rough refresh estimate — used ONLY to pick the integer pixel step. A few % error is fine
-        // (it's just rounding); the samples-per-col control loop absorbs the residual. Gap frames
-        // (occlusion/stall) are skipped so they can't drag it.
-        if let Some(dt) = dt {
-            if dt > 0.0 && dt < PAUSE_SECONDS {
-                let inst = (1.0 / dt).clamp(20.0, 360.0);
-                self.fps_est = if self.fps_seeded {
-                    self.fps_est * (1.0 - FPS_EMA_ALPHA) + inst * FPS_EMA_ALPHA
-                } else {
-                    self.fps_seeded = true;
-                    inst
-                };
-            }
-        }
-        // Pick the fixed pixel step, with hysteresis so a refresh at a rounding boundary can't flap it.
-        let continuous = columns as f64 / (DISPLAY_WINDOW_SECONDS * self.fps_est.max(1.0));
-        if !self.scroll_init || (continuous - self.px_per_frame as f64).abs() > PX_HYSTERESIS {
-            self.px_per_frame = choose_px_per_frame(columns, DISPLAY_WINDOW_SECONDS, self.fps_est);
-        }
-
-        // Pause detection: bursty per-frame arrival is fine; only a sustained stall freezes the scroll.
         let closed = self.store.closed_samples();
-        if closed > self.last_closed {
-            self.last_closed = closed;
+
+        // Measure the audio that arrived this render. avg_arrival ≈ sample_rate / refresh; block_size
+        // tracks the host's buffer (recent peak) to size the reservoir. Pause = a sustained stall.
+        let dclosed = closed.saturating_sub(self.prev_closed) as f64;
+        let first = self.prev_closed == 0; // first frame after (re)start: dclosed is the pre-roll backlog
+        self.prev_closed = closed;
+        if dclosed > 0.0 {
             self.last_audio_advance = Some(now);
         }
         let audio_live = self
             .last_audio_advance
             .map(|t| (now - t).as_secs_f64() < PAUSE_SECONDS)
             .unwrap_or(false);
-
-        let buffer_samples = BUFFER_SECONDS * sr;
-        // Anchor the integer column + zoom once, behind the live edge, when audio and a refresh
-        // estimate are both available. A few blank startup frames are invisible.
-        if !self.scroll_init {
-            if !self.fps_seeded || (closed as f64) <= buffer_samples {
-                self.vertex_count_l = 0;
-                self.vertex_count_r = 0;
-                return;
-            }
-            self.samples_per_col = (sr / (self.px_per_frame as f64 * self.fps_est)).max(MIN_SAMPLES_PER_COL);
-            self.scroll_col = ((closed as f64 - buffer_samples) / self.samples_per_col).floor().max(0.0) as i64;
-            self.scroll_init = true;
+        if audio_live && !first {
+            // Clamp outliers (the backlog frame is skipped via `first`; this guards a post-stall
+            // catch-up too) so the per-frame rate estimate stays clean.
+            let d = dclosed.min(sr * 0.05);
+            self.avg_arrival = if self.avg_seeded {
+                self.avg_arrival * (1.0 - ARRIVAL_BETA) + d * ARRIVAL_BETA
+            } else if d > 0.0 {
+                self.avg_seeded = true;
+                d
+            } else {
+                self.avg_arrival
+            };
+            self.block_size = (self.block_size * BLOCK_DECAY).max(d);
         }
 
-        // Advance: exactly px_per_frame whole pixels (the only thing that moves the picture); the
-        // zoom trims sub-pixel, deadbanded, to hold the buffer against clock drift (see `advance_scroll`).
-        let (col, spp) = advance_scroll(
-            self.scroll_col,
-            self.samples_per_col,
-            self.px_per_frame,
-            closed,
-            buffer_samples,
-            SPP_TRIM_ALPHA,
-            audio_live,
-        );
-        self.scroll_col = col;
-        self.samples_per_col = spp;
-        self.scroll_dbg.tick(col, spp, self.px_per_frame);
-        let rightmost_col = self.scroll_col;
-        let cols = self.store.build_columns(columns, self.samples_per_col, rightmost_col);
+        // Adaptive reservoir target: a couple of audio blocks behind the edge — the minimal slack that
+        // absorbs bursty arrival. The nominal column width S = arrival / px.
+        let reservoir_target = (RESERVOIR_BLOCKS * self.block_size).max(RESERVOIR_MIN_SECONDS * sr);
+        // Need a measured rate and enough audio buffered before we can build columns.
+        if !self.avg_seeded || (closed as f64) <= reservoir_target + self.avg_arrival {
+            self.vertex_count_l = 0;
+            self.vertex_count_r = 0;
+            return;
+        }
+        // Pick the integer pixel step with hysteresis: only change it when the ideal (continuous) step
+        // moves clearly past the current one — so a refresh hovering at a rounding boundary can't flip
+        // px every frame and trigger repeated ring rebuilds.
+        let fps = (sr / self.avg_arrival).max(1.0);
+        let continuous = columns as f64 / (DISPLAY_WINDOW_SECONDS * fps);
+        let px_changed = !self.ring_init || (continuous - self.px_per_frame as f64).abs() > 0.6;
+        if px_changed {
+            self.px_per_frame = choose_px_per_frame(columns, DISPLAY_WINDOW_SECONDS, fps);
+        }
+        let px = self.px_per_frame;
+        let s_nominal = (self.avg_arrival / px as f64).max(MIN_SAMPLES_PER_COL);
+
+        // (Re)fill the ring on first run / resize / a pixel-step change (rate switch). One-time rebuild
+        // from the store at the nominal width, ending a reservoir behind the live edge.
+        if !self.ring_init || columns != self.last_columns || px_changed {
+            self.last_columns = columns;
+            self.next_sample = closed as f64 - reservoir_target;
+            self.display_cols.clear();
+            for j in 0..columns {
+                // column j (0 = oldest) covers the s_nominal samples ending at next_sample - (off).
+                let hi = self.next_sample - (columns - 1 - j) as f64 * s_nominal;
+                let lo = hi - s_nominal;
+                self.display_cols.push_back(
+                    self.store.merge_sample_range(lo.round() as i64, hi.round() as i64),
+                );
+            }
+            self.ring_init = true;
+        } else if audio_live {
+            // Steady incremental scroll: build EXACTLY px new columns from the freshest audio. The
+            // total samples they cover is the reservoir control loop's output — the smoothed arrival
+            // nudged to hold the reservoir at target — so clock drift lands in these new columns'
+            // sample counts (±a little), never in the movement (always px) or the old columns.
+            let reservoir = closed as f64 - self.next_sample;
+            let available = (closed as f64 - self.next_sample).max(0.0);
+            let consume =
+                consume_samples(self.avg_arrival, reservoir, reservoir_target, RESERVOIR_GAIN, available);
+            let chunk = consume / px as f64;
+            for _ in 0..px {
+                let lo = self.next_sample.round() as i64;
+                self.next_sample += chunk;
+                let hi = self.next_sample.round() as i64;
+                let col = self.store.merge_sample_range(lo, hi);
+                self.display_cols.pop_front();
+                self.display_cols.push_back(col);
+            }
+        }
+        // (paused → ring is left frozen)
+
+        self.scroll_dbg.tick(self.next_sample.round() as i64, s_nominal, px);
+        let cols = self.display_cols.make_contiguous();
 
         // Columns at exact pixel centers in the `columns`-wide offscreen: x = (2c+1)/N − 1.
         let inv_cols = 1.0 / columns as f32;
@@ -641,55 +648,35 @@ mod tests {
         assert_eq!(choose_px_per_frame(50, 5.0, 120.0), 1);
     }
 
-    // ── advance_scroll: fixed integer pixels/frame, samples-per-col trims to hold the buffer ──
-    // Steady-state reference: 1200 px / 5 s @ 120 Hz, sr 48 kHz → px_per_frame 2, spp 200, the
-    // newest drawn column sits buffer = 0.05·48000 = 2400 samples behind the live edge.
+    // ── consume_samples: the reservoir control loop (samples → this render's new columns) ──
+    // Reference: avg_arrival 366 samples/render, target reservoir 1000 samples, gain 0.02.
 
     #[test]
-    fn scroll_steps_a_fixed_whole_pixel_amount() {
-        // At the control loop's fixed point (target == spp), the anchor advances by exactly
-        // px_per_frame and spp doesn't move — dead-uniform motion, no zoom breathing.
-        // closed chosen so (closed − buffer)/(col+1) == spp: col=602, spp=200 → closed = 200·603+2400.
-        let closed = (200.0 * 603.0 + 2400.0) as u64;
-        let (col, spp) = advance_scroll(600, 200.0, 2, closed, 2400.0, 0.02, true);
-        assert_eq!(col, 602, "anchor advanced by exactly px_per_frame");
-        assert!((spp - 200.0).abs() < 1e-6, "spp steady at the fixed point, got {spp}");
+    fn consume_equals_arrival_at_the_target() {
+        // Reservoir exactly at target → consume exactly the arrival rate (steady state, no drift).
+        assert!((consume_samples(366.0, 1000.0, 1000.0, 0.02, 5000.0) - 366.0).abs() < 1e-9);
     }
 
     #[test]
-    fn scroll_absorbs_clock_mismatch_into_spp_not_the_step() {
-        // Audio edge ahead of the steady point: the STEP stays px_per_frame (uniform), while spp
-        // trims toward the higher target — the mismatch goes into the (invisible) zoom, not the pixel.
-        let (col, spp) = advance_scroll(600, 200.0, 2, 130_000, 2400.0, 0.02, true);
-        assert_eq!(col, 602, "pixel step is unchanged by the mismatch");
-        let target = (130_000.0 - 2400.0) / 603.0; // ≈ 211.6
-        let expected = 200.0 + 0.02 * (target - 200.0);
-        assert!((spp - expected).abs() < 1e-6, "spp low-passes toward target, got {spp}");
-        assert!(spp > 200.0 && spp < 201.0, "trim is a tiny fraction of a sample, got {spp}");
+    fn consume_speeds_up_when_audio_runs_ahead() {
+        // Reservoir above target (audio crept ahead) → consume a touch more to catch up.
+        let c = consume_samples(366.0, 1500.0, 1000.0, 0.02, 5000.0);
+        assert!((c - (366.0 + 0.02 * 500.0)).abs() < 1e-9, "got {c}"); // 376
+        assert!(c > 366.0 && c < 366.0 + 50.0, "gentle: a fraction of a sample per pixel");
     }
 
     #[test]
-    fn scroll_freezes_when_audio_is_not_live() {
-        // Paused (audio edge stale): neither the anchor nor the zoom moves.
-        assert_eq!(advance_scroll(600, 200.0, 2, 130_000, 2400.0, 0.02, false), (600, 200.0));
+    fn consume_eases_off_when_reservoir_is_low() {
+        // Reservoir below target → consume a touch less so it refills.
+        let c = consume_samples(366.0, 600.0, 1000.0, 0.02, 5000.0);
+        assert!((c - (366.0 + 0.02 * -400.0)).abs() < 1e-9, "got {c}"); // 358
     }
 
     #[test]
-    fn scroll_never_draws_past_the_closed_edge() {
-        // If the anchor would land past the newest closed column (startup/underrun), clamp it back so
-        // the newest drawn column is always fully closed: (col+1)·spp ≤ closed (with the trimmed spp).
-        let (col, spp) = advance_scroll(600, 200.0, 2, 100_000, 2400.0, 0.02, true);
-        assert!(col < 600 + 2, "anchor was clamped back from the would-be step");
-        assert!(
-            (col as f64 + 1.0) * spp <= 100_000.0,
-            "newest column must be fully closed: ({col}+1)·{spp} > 100000"
-        );
-    }
-
-    #[test]
-    fn scroll_clamps_spp_to_a_sane_floor() {
-        // A pathological target can't drive samples-per-col below the floor (columns must hold ≥1 bin).
-        let (_, spp) = advance_scroll(600, super::MIN_SAMPLES_PER_COL, 2, 0, 2400.0, 1.0, true);
-        assert!(spp >= super::MIN_SAMPLES_PER_COL);
+    fn consume_never_exceeds_available_or_goes_negative() {
+        // Can't build from audio that hasn't closed yet…
+        assert_eq!(consume_samples(366.0, 1000.0, 1000.0, 0.02, 100.0), 100.0);
+        // …and never runs the cursor backwards.
+        assert_eq!(consume_samples(10.0, 0.0, 5000.0, 0.02, 5000.0), 0.0);
     }
 }
