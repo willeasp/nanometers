@@ -121,14 +121,14 @@ impl ScrollDbg {
         self.last_col = col;
         self.n += 1;
         if self.n >= 240 {
-            eprintln!(
+            crate::diag_log(&format!(
                 "[nano-scroll] px/frame={px_per_frame} step Δ {}..{} | spp {:.3}..{:.3} (zoom span {:.4}%)",
                 self.d_min,
                 self.d_max,
                 self.spp_min,
                 self.spp_max,
                 (self.spp_max - self.spp_min) / self.spp_min * 100.0
-            );
+            ));
             self.n = 0;
         }
     }
@@ -342,7 +342,7 @@ impl WaveformModule {
             last_audio_advance: None,
             last_sample_rate: 0.0,
             scroll_dbg: ScrollDbg {
-                on: std::env::var_os("NANO_DEBUG_SCROLL").is_some(),
+                on: crate::diag_enabled("NANO_DEBUG_SCROLL"),
                 ..Default::default()
             },
         }

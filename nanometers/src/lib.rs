@@ -37,6 +37,30 @@ pub mod layout;
 pub const INITIAL_WIDTH: u32 = 720;
 pub const INITIAL_HEIGHT: u32 = 420;
 
+/// Diagnostics gate: on when `NANO_DEBUG_FRAMES`/`NANO_DEBUG_SCROLL` is set (standalone), OR a
+/// `~/.nano-debug` marker file exists — the latter lets us capture frame/scroll timing from inside a
+/// DAW (FL, Logic) where env vars don't reach the plugin. `touch ~/.nano-debug`, reproduce, then read
+/// the log. Cheap to check (env first; the file stat only runs once per module construction).
+pub(crate) fn diag_enabled(env_key: &str) -> bool {
+    std::env::var_os(env_key).is_some()
+        || std::env::var_os("HOME")
+            .map(|h| std::path::Path::new(&h).join(".nano-debug").exists())
+            .unwrap_or(false)
+}
+
+/// Emit a diagnostic line to stderr AND `~/Library/Logs/nanometers.log` (the sandbox-allowed path —
+/// stderr is invisible inside most DAWs). Best-effort; never panics.
+pub(crate) fn diag_log(line: &str) {
+    eprintln!("{line}");
+    if let Some(home) = std::env::var_os("HOME") {
+        use std::io::Write;
+        let path = std::path::Path::new(&home).join("Library/Logs/nanometers.log");
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(f, "{line}");
+        }
+    }
+}
+
 /// Time for the peak meter to drop 12 dB after silence.
 const PEAK_DECAY_MS: f64 = 250.0;
 

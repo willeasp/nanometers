@@ -241,10 +241,10 @@ impl FrameDebug {
             let mean = self.intervals_ms.iter().sum::<f64>() / n;
             let min = self.intervals_ms.iter().cloned().fold(f64::INFINITY, f64::min);
             let max = self.intervals_ms.iter().cloned().fold(0.0, f64::max);
-            eprintln!(
+            crate::diag_log(&format!(
                 "[nano-frames] {n:.0} frames: mean {mean:.2} ms ({:.1} fps), min {min:.2}, max {max:.2}",
                 1e3 / mean
-            );
+            ));
             self.intervals_ms.clear();
         }
     }
@@ -350,7 +350,7 @@ impl RenderWindow {
             layout,
             new_samples: Vec::with_capacity(4096),
             frame_dbg: FrameDebug {
-                enabled: std::env::var_os("NANO_DEBUG_FRAMES").is_some(),
+                enabled: crate::diag_enabled("NANO_DEBUG_FRAMES"),
                 ..Default::default()
             },
         }
