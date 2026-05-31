@@ -28,6 +28,11 @@ rt-assert = ["nih_plug/assert_process_allocs"]
 [dependencies]
 nih_plug.workspace = true
 
+# The platform-free domain core (ADR 0008): envelope store, BS.1770 loudness, spectral color, the
+# scroll law, and the audio→GUI value types (StereoFrame, FrameContext, Measurements, Rect). The
+# plugin is now a host over this shared crate; the TUI and iOS app link the same one.
+nano-dsp = { path = "../crates/nano-dsp" }
+
 # Dev-player only. cpal pinned to nih-plug's version to avoid a duplicate native dependency.
 # Formats match what CLAUDE.md documents the dev-player accepts (mp3/flac/wav/aac); `pcm` is the
 # WAV sample codec, `isomp4` the AAC container. Dev-only, so binary size here doesn't matter.

@@ -15,9 +15,6 @@
 //! building (unit-tested). The contour renders into an own 4× MSAA offscreen (0007) for edge AA,
 //! resolved and composited 1:1 into the column.
 
-pub mod color;
-pub mod store;
-
 use bytemuck::{Pod, Zeroable};
 use std::borrow::Cow;
 use std::collections::VecDeque;
@@ -25,8 +22,11 @@ use std::time::Instant;
 use wgpu::util::DeviceExt;
 
 use super::{EventStatus, FrameContext, Module, Rect};
-use color::band_color;
-use store::WaveStore;
+// The Waveform's GPU-free core now lives in `nano-dsp` (ADR 0008): the base-bin store, the spectral
+// color mapping, and the scroll control law. This module is the thin wgpu wrapper over them.
+use nano_dsp::waveform::color::band_color;
+use nano_dsp::waveform::store::{self, WaveStore};
+use nano_dsp::waveform::{choose_px_per_frame, consume_samples};
 
 /// 3-band filterbank crossovers (ADR 0001; dev-player tuning later, spec §6/§10).
 const BAND_LOW_HZ: f32 = 250.0;
@@ -66,26 +66,6 @@ const RESERVOIR_BLOCKS: f64 = 2.0;
 const BLOCK_DECAY: f64 = 0.999;
 /// Floor on the reservoir target (samples-as-seconds), so it's never absurdly small at tiny blocks.
 const RESERVOIR_MIN_SECONDS: f64 = 0.008;
-
-/// Integer pixels the contour moves per render: round the ideal continuous rate
-/// (`columns / (window · fps)`) to a whole pixel, at least 1. Robust — a fps estimate off by a few
-/// percent picks the same integer — and the per-pixel sample count carries the exact rate.
-fn choose_px_per_frame(columns: usize, window_seconds: f64, fps: f64) -> i64 {
-    if window_seconds <= 0.0 || fps <= 0.0 {
-        return 1;
-    }
-    ((columns as f64 / (window_seconds * fps)).round() as i64).max(1)
-}
-
-/// Samples to consume into this frame's new columns. Pure (no GPU), so the control law is testable.
-/// It's the smoothed arrival rate (`avg_arrival`) nudged by a gentle proportional term toward holding
-/// the reservoir (`closed − drawn edge`) at `target` — the loop that absorbs clock drift into the
-/// per-pixel sample count instead of the motion (slew, never step). Clamped ≥ 0 and ≤ what's actually
-/// closed (`available`), so we never build a column from audio that hasn't arrived.
-fn consume_samples(avg_arrival: f64, reservoir: f64, target: f64, gain: f64, available: f64) -> f64 {
-    let want = avg_arrival + gain * (reservoir - target);
-    want.clamp(0.0, available.max(0.0))
-}
 
 /// Per-frame scroll diagnostics (gated on `NANO_DEBUG_SCROLL`). Confirms the smoothness claim with
 /// data: over a window it reports the per-frame pixel step (min/max — equal means dead-uniform, no
@@ -633,50 +613,3 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     return textureSample(tex, samp, in.uv);
 }
 "#;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn px_per_frame_rounds_to_a_whole_step() {
-        // 1200 px over 5 s at 120 Hz → 1200/600 = 2.0 → 2 px/frame.
-        assert_eq!(choose_px_per_frame(1200, 5.0, 120.0), 2);
-        // Same window at 60 Hz → 1200/300 = 4.0 → 4 px/frame (half the rate, twice as many).
-        assert_eq!(choose_px_per_frame(1200, 5.0, 60.0), 4);
-        // Never zero, even on a tiny/odd window.
-        assert_eq!(choose_px_per_frame(50, 5.0, 120.0), 1);
-    }
-
-    // ── consume_samples: the reservoir control loop (samples → this render's new columns) ──
-    // Reference: avg_arrival 366 samples/render, target reservoir 1000 samples, gain 0.02.
-
-    #[test]
-    fn consume_equals_arrival_at_the_target() {
-        // Reservoir exactly at target → consume exactly the arrival rate (steady state, no drift).
-        assert!((consume_samples(366.0, 1000.0, 1000.0, 0.02, 5000.0) - 366.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn consume_speeds_up_when_audio_runs_ahead() {
-        // Reservoir above target (audio crept ahead) → consume a touch more to catch up.
-        let c = consume_samples(366.0, 1500.0, 1000.0, 0.02, 5000.0);
-        assert!((c - (366.0 + 0.02 * 500.0)).abs() < 1e-9, "got {c}"); // 376
-        assert!(c > 366.0 && c < 366.0 + 50.0, "gentle: a fraction of a sample per pixel");
-    }
-
-    #[test]
-    fn consume_eases_off_when_reservoir_is_low() {
-        // Reservoir below target → consume a touch less so it refills.
-        let c = consume_samples(366.0, 600.0, 1000.0, 0.02, 5000.0);
-        assert!((c - (366.0 + 0.02 * -400.0)).abs() < 1e-9, "got {c}"); // 358
-    }
-
-    #[test]
-    fn consume_never_exceeds_available_or_goes_negative() {
-        // Can't build from audio that hasn't closed yet…
-        assert_eq!(consume_samples(366.0, 1000.0, 1000.0, 0.02, 100.0), 100.0);
-        // …and never runs the cursor backwards.
-        assert_eq!(consume_samples(10.0, 0.0, 5000.0, 0.02, 5000.0), 0.0);
-    }
-}

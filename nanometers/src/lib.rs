@@ -15,19 +15,20 @@ use std::{
     },
 };
 
-use module::Measurements;
-
 mod editor;
 use editor::{EditorState, NanometersEditor};
 
 #[cfg(feature = "dev-player")]
 mod dev;
 
-/// Loudness measurement DSP (ADR 0006). Pure, GUI-side; not yet wired into the Module host.
-pub mod loudness;
+/// The platform-free domain core (ADR 0008): loudness, the Waveform's store/color/scroll-law, and
+/// the audio→GUI value types. Re-exported under the crate's old paths so the rest of the plugin
+/// (and `dev.rs`) keeps using `crate::StereoFrame`, `crate::loudness::…` unchanged.
+pub use nano_dsp::loudness;
+pub use nano_dsp::{FrameContext, Measurements, Rect, StereoFrame};
 
-/// The Module-host contract (ADRs 0002/0003/0004): the `Module` trait, `FrameContext`,
-/// `Measurements`, and `Rect`. See `module.rs`.
+/// The Module-host contract (ADRs 0002/0003/0004): the `Module` trait and `EventStatus`. The data
+/// types it carries (`FrameContext`, `Measurements`, `Rect`) now live in `nano-dsp`.
 pub mod module;
 
 /// The horizontal-strip layout (ADR 0003): persisted `Column`s and the viewport geometry.
@@ -43,9 +44,6 @@ const PEAK_DECAY_MS: f64 = 250.0;
 /// Capacity of the audio→GUI sample ring (stereo pairs). 32k pairs at 48 kHz is ~680 ms —
 /// plenty of headroom even if the GUI hiccups for several frames.
 pub const SAMPLE_RING_CAPACITY: usize = 32768;
-
-/// One interleaved L/R audio frame. Wire format for the audio→GUI ring buffer.
-pub type StereoFrame = [f32; 2];
 
 /// Shared state between the audio thread (writer) and the GUI thread (reader).
 ///
