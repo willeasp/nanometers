@@ -87,6 +87,50 @@ fn consume_samples(avg_arrival: f64, reservoir: f64, target: f64, gain: f64, ava
     want.clamp(0.0, available.max(0.0))
 }
 
+// ── Host-adaptive cadence (vsync vs irregular) ──────────────────────────────────────────────────
+// The fixed-px path above is ideal on a vsync host (Logic/standalone): it builds exactly px columns
+// per render, locked to the steady refresh, ignoring callback-timing jitter. But some hosts (FL
+// Studio) drive the plugin's render on a lumpy, rate-wobbling schedule — there fixed-px flips px and
+// wiggles. So each instance watches its own frame cadence and, only when it's clearly irregular,
+// switches to the TIME-based clock below, which advances by real elapsed time (correct when there's
+// no steady vsync to lock onto). Vsync hosts never leave the fixed-px path.
+
+/// Clamp a render's dt before advancing the time cursor — an occlusion/stall gap mustn't leap the
+/// scroll by seconds (the drift trim re-aligns afterwards).
+const MAX_DT_SECONDS: f64 = 0.1;
+/// Gentle pull of the time cursor toward the live edge (closed − reservoir), cancelling slow
+/// wall-vs-audio clock drift without chasing the bursty edge (the reservoir absorbs that).
+const CURSOR_DRIFT_GAIN: f64 = 0.01;
+/// Re-anchor the time cursor if it's this many reservoirs off the edge (a seek / long-stall recovery)
+/// rather than grinding out columns to catch up.
+const RESYNC_RESERVOIRS: f64 = 6.0;
+/// EMA weight for the frame-interval cadence stats (mean + mean-abs-deviation).
+const CADENCE_BETA: f64 = 0.05;
+/// Cadence hysteresis on the coefficient of variation (MAD / mean of dt): leave the (default)
+/// fixed-px path only above HI (clearly lumpy = FL), return to it only below LO (clearly steady =
+/// vsync). The gap prevents flip-flopping; the bias keeps vsync hosts on the proven path.
+const CADENCE_COV_HI: f64 = 0.45;
+const CADENCE_COV_LO: f64 = 0.30;
+
+/// Advance the continuous time cursor one render (the irregular-cadence path). `dt`·`sample_rate` is
+/// the audio that should have gone by; a gentle pull toward `target` (live edge − reservoir) cancels
+/// the slow clock drift without chasing the bursty edge. Pure → unit-testable. The caller builds whole
+/// `samples_per_col` columns up to the returned cursor (never past the closed edge).
+fn advance_cursor(cursor: f64, dt: f64, sample_rate: f64, target: f64, gain: f64) -> f64 {
+    cursor + dt.min(MAX_DT_SECONDS) * sample_rate + gain * (target - cursor)
+}
+
+/// Classify the frame cadence with hysteresis. `cov` is MAD/mean of the frame interval. Returns
+/// whether to treat the cadence as REGULAR (vsync → fixed-px). Biased to stay regular (the proven
+/// path) unless the cadence is clearly lumpy, and to return to regular only when clearly steady.
+fn cadence_regular(cov: f64, currently_regular: bool) -> bool {
+    if currently_regular {
+        cov <= CADENCE_COV_HI // leave regular only when clearly irregular
+    } else {
+        cov < CADENCE_COV_LO // return to regular only when clearly steady
+    }
+}
+
 /// Per-frame scroll diagnostics (gated on `NANO_DEBUG_SCROLL`). Confirms the smoothness claim with
 /// data: over a window it reports the per-frame pixel step (min/max — equal means dead-uniform, no
 /// rounding wobble) and the samples-per-col span (the zoom "breathing", which should be tiny).
@@ -94,37 +138,41 @@ fn consume_samples(avg_arrival: f64, reservoir: f64, target: f64, gain: f64, ava
 struct ScrollDbg {
     on: bool,
     n: u32,
-    last_col: i64,
-    d_min: i64,
-    d_max: i64,
+    built_min: i64,
+    built_max: i64,
     spp_min: f64,
     spp_max: f64,
+    cov_acc: f64,
 }
 
 impl ScrollDbg {
-    fn tick(&mut self, col: i64, spp: f64, px_per_frame: i64) {
+    /// `built` = columns built this render; `spp` = column width; `regular` = cadence mode; `cov` =
+    /// frame-interval coefficient of variation. Over a window: the per-render column count (min..max —
+    /// equal = dead-uniform), the zoom span, the mode, and the measured cadence cov.
+    fn tick(&mut self, built: i64, spp: f64, regular: bool, cov: f64) {
         if !self.on {
             return;
         }
         if self.n == 0 {
-            self.d_min = i64::MAX;
-            self.d_max = i64::MIN;
+            self.built_min = i64::MAX;
+            self.built_max = i64::MIN;
             self.spp_min = f64::MAX;
             self.spp_max = f64::MIN;
-        } else {
-            let d = col - self.last_col;
-            self.d_min = self.d_min.min(d);
-            self.d_max = self.d_max.max(d);
+            self.cov_acc = 0.0;
         }
+        self.built_min = self.built_min.min(built);
+        self.built_max = self.built_max.max(built);
         self.spp_min = self.spp_min.min(spp);
         self.spp_max = self.spp_max.max(spp);
-        self.last_col = col;
+        self.cov_acc += cov;
         self.n += 1;
         if self.n >= 240 {
             crate::diag_log(&format!(
-                "[nano-scroll] px/frame={px_per_frame} step Δ {}..{} | spp {:.3}..{:.3} (zoom span {:.4}%)",
-                self.d_min,
-                self.d_max,
+                "[nano-scroll] mode={} cov~{:.2} | built/render {}..{} | spp {:.2}..{:.2} (zoom span {:.3}%)",
+                if regular { "VSYNC" } else { "TIME" },
+                self.cov_acc / self.n as f64,
+                self.built_min,
+                self.built_max,
                 self.spp_min,
                 self.spp_max,
                 (self.spp_max - self.spp_min) / self.spp_min * 100.0
@@ -182,6 +230,15 @@ pub struct WaveformModule {
     prev_closed: u64,                    // closed_samples last render (for the per-render delta)
     last_audio_advance: Option<Instant>, // when audio last advanced — drives pause detection
     last_sample_rate: f32,
+
+    // Host-adaptive cadence: stay on the fixed-px path (above) for vsync hosts; switch to the
+    // time-based clock when the frame cadence is clearly irregular (see `cadence_regular`).
+    last_frame: Option<Instant>, // for the frame interval dt
+    dt_ema: f64,                 // smoothed frame interval + its mean-abs-deviation
+    mad_ema: f64,
+    cadence_regular: bool, // current mode (true = fixed-px / vsync; default)
+    time_cursor: f64,      // smooth time-driven target (irregular mode only)
+
     scroll_dbg: ScrollDbg,
 }
 
@@ -341,6 +398,11 @@ impl WaveformModule {
             prev_closed: 0,
             last_audio_advance: None,
             last_sample_rate: 0.0,
+            last_frame: None,
+            dt_ema: 0.0,
+            mad_ema: 0.0,
+            cadence_regular: true, // default to the proven fixed-px path
+            time_cursor: 0.0,
             scroll_dbg: ScrollDbg {
                 on: crate::diag_enabled("NANO_DEBUG_SCROLL"),
                 ..Default::default()
@@ -393,6 +455,23 @@ impl WaveformModule {
             ],
         });
         self.offscreen = Some(Offscreen { width: w, height: h, msaa_view, resolved_view, composite_bind_group });
+    }
+
+    /// Rebuild the whole display ring from the store: `columns` immutable columns of `width` samples
+    /// each, ending at `end_sample`, and reset both cursors there. One-time event (first run, resize,
+    /// a regular-mode pixel-step change, or an irregular-mode seek), so a rebuild here is fine.
+    fn refill_ring(&mut self, columns: usize, end_sample: f64, width: f64) {
+        self.next_sample = end_sample;
+        self.time_cursor = end_sample;
+        self.display_cols.clear();
+        for j in 0..columns {
+            let hi = end_sample - (columns - 1 - j) as f64 * width;
+            let lo = hi - width;
+            self.display_cols
+                .push_back(self.store.merge_sample_range(lo.round() as i64, hi.round() as i64));
+        }
+        self.ring_init = true;
+        self.last_columns = columns;
     }
 }
 
@@ -459,8 +538,30 @@ impl Module for WaveformModule {
             self.block_size = (self.block_size * BLOCK_DECAY).max(d);
         }
 
+        // Classify the frame cadence: smooth the interval + its mean-abs-deviation; a high coefficient
+        // of variation = a lumpy host (FL) → use the time-based clock; a steady one (vsync) → fixed-px.
+        let dt = self.last_frame.map(|t| (now - t).as_secs_f64());
+        self.last_frame = Some(now);
+        if let Some(dt) = dt {
+            if dt > 0.0 && dt < MAX_DT_SECONDS {
+                if self.dt_ema <= 0.0 {
+                    self.dt_ema = dt;
+                } else {
+                    self.dt_ema = self.dt_ema * (1.0 - CADENCE_BETA) + dt * CADENCE_BETA;
+                    self.mad_ema =
+                        self.mad_ema * (1.0 - CADENCE_BETA) + (dt - self.dt_ema).abs() * CADENCE_BETA;
+                }
+            }
+        }
+        let cov = if self.dt_ema > 0.0 { self.mad_ema / self.dt_ema } else { 0.0 };
+        let was_regular = self.cadence_regular;
+        self.cadence_regular = cadence_regular(cov, was_regular);
+        if was_regular && !self.cadence_regular {
+            self.time_cursor = self.next_sample; // entering irregular mode: seed the time cursor
+        }
+
         // Adaptive reservoir target: a couple of audio blocks behind the edge — the minimal slack that
-        // absorbs bursty arrival. The nominal column width S = arrival / px.
+        // absorbs bursty arrival.
         let reservoir_target = (RESERVOIR_BLOCKS * self.block_size).max(RESERVOIR_MIN_SECONDS * sr);
         // Need a measured rate and enough audio buffered before we can build columns.
         if !self.avg_seeded || (closed as f64) <= reservoir_target + self.avg_arrival {
@@ -468,42 +569,39 @@ impl Module for WaveformModule {
             self.vertex_count_r = 0;
             return;
         }
-        // Pick the integer pixel step with hysteresis: only change it when the ideal (continuous) step
-        // moves clearly past the current one — so a refresh hovering at a rounding boundary can't flip
-        // px every frame and trigger repeated ring rebuilds.
+        // The constant column width (window·sr/columns) is the fps-independent zoom used by the
+        // time-based path; the regular path's per-column width (≈ arrival/px) equals it in steady state.
+        let spp = (DISPLAY_WINDOW_SECONDS * sr / columns as f64).max(MIN_SAMPLES_PER_COL);
+        // Regular-mode pixel step, hysteresis so a refresh at a rounding boundary can't flip it.
         let fps = (sr / self.avg_arrival).max(1.0);
         let continuous = columns as f64 / (DISPLAY_WINDOW_SECONDS * fps);
-        let px_changed = !self.ring_init || (continuous - self.px_per_frame as f64).abs() > 0.6;
+        let px_changed = self.cadence_regular
+            && (!self.ring_init || (continuous - self.px_per_frame as f64).abs() > 0.6);
         if px_changed {
             self.px_per_frame = choose_px_per_frame(columns, DISPLAY_WINDOW_SECONDS, fps);
         }
-        let px = self.px_per_frame;
-        let s_nominal = (self.avg_arrival / px as f64).max(MIN_SAMPLES_PER_COL);
+        let px = self.px_per_frame.max(1);
+        let s_nominal = if self.cadence_regular {
+            (self.avg_arrival / px as f64).max(MIN_SAMPLES_PER_COL)
+        } else {
+            spp
+        };
 
-        // (Re)fill the ring on first run / resize / a pixel-step change (rate switch). One-time rebuild
-        // from the store at the nominal width, ending a reservoir behind the live edge.
+        let mut built = 0i64;
         if !self.ring_init || columns != self.last_columns || px_changed {
-            self.last_columns = columns;
-            self.next_sample = closed as f64 - reservoir_target;
-            self.display_cols.clear();
-            for j in 0..columns {
-                // column j (0 = oldest) covers the s_nominal samples ending at next_sample - (off).
-                let hi = self.next_sample - (columns - 1 - j) as f64 * s_nominal;
-                let lo = hi - s_nominal;
-                self.display_cols.push_back(
-                    self.store.merge_sample_range(lo.round() as i64, hi.round() as i64),
-                );
-            }
-            self.ring_init = true;
-        } else if audio_live {
-            // Steady incremental scroll: build EXACTLY px new columns from the freshest audio. The
-            // total samples they cover is the reservoir control loop's output — the smoothed arrival
-            // nudged to hold the reservoir at target — so clock drift lands in these new columns'
-            // sample counts (±a little), never in the movement (always px) or the old columns.
+            // First run / resize / regular-mode px change → one-time rebuild behind the live edge.
+            self.refill_ring(columns, closed as f64 - reservoir_target, s_nominal);
+        } else if audio_live && self.cadence_regular {
+            // Regular (vsync): build EXACTLY px columns; drift lands in the per-column sample count
+            // (the reservoir control loop), never in the movement (always px) or the old columns.
             let reservoir = closed as f64 - self.next_sample;
-            let available = (closed as f64 - self.next_sample).max(0.0);
-            let consume =
-                consume_samples(self.avg_arrival, reservoir, reservoir_target, RESERVOIR_GAIN, available);
+            let consume = consume_samples(
+                self.avg_arrival,
+                reservoir,
+                reservoir_target,
+                RESERVOIR_GAIN,
+                reservoir.max(0.0),
+            );
             let chunk = consume / px as f64;
             for _ in 0..px {
                 let lo = self.next_sample.round() as i64;
@@ -512,11 +610,33 @@ impl Module for WaveformModule {
                 let col = self.store.merge_sample_range(lo, hi);
                 self.display_cols.pop_front();
                 self.display_cols.push_back(col);
+                built += 1;
+            }
+        } else if audio_live {
+            // Irregular (lumpy host): time-based. Advance the cursor by REAL elapsed time (drift-
+            // trimmed toward the edge), then build whole constant-width columns up to it — never past
+            // the closed edge. Movement ∝ elapsed time, so it stays correct on any cadence.
+            let target = closed as f64 - reservoir_target;
+            if (self.time_cursor - target).abs() > RESYNC_RESERVOIRS * reservoir_target {
+                self.refill_ring(columns, target, spp); // seek / long-stall recovery → re-anchor
+            } else {
+                self.time_cursor =
+                    advance_cursor(self.time_cursor, dt.unwrap_or(0.0), sr, target, CURSOR_DRIFT_GAIN);
+                let limit = self.time_cursor.min(closed as f64);
+                while self.next_sample + spp <= limit && built < columns as i64 {
+                    let lo = self.next_sample.round() as i64;
+                    self.next_sample += spp;
+                    let hi = self.next_sample.round() as i64;
+                    let col = self.store.merge_sample_range(lo, hi);
+                    self.display_cols.pop_front();
+                    self.display_cols.push_back(col);
+                    built += 1;
+                }
             }
         }
         // (paused → ring is left frozen)
 
-        self.scroll_dbg.tick(self.next_sample.round() as i64, s_nominal, px);
+        self.scroll_dbg.tick(built, s_nominal, self.cadence_regular, cov);
         let cols = self.display_cols.make_contiguous();
 
         // Columns at exact pixel centers in the `columns`-wide offscreen: x = (2c+1)/N − 1.
@@ -678,5 +798,44 @@ mod tests {
         assert_eq!(consume_samples(366.0, 1000.0, 1000.0, 0.02, 100.0), 100.0);
         // …and never runs the cursor backwards.
         assert_eq!(consume_samples(10.0, 0.0, 5000.0, 0.02, 5000.0), 0.0);
+    }
+
+    // ── advance_cursor: the time-based (irregular-cadence) clock ──
+
+    #[test]
+    fn cursor_advances_by_elapsed_time() {
+        // One 120 Hz frame at 48 kHz = 400 samples; gain 0 → no drift pull.
+        assert!((advance_cursor(1000.0, 1.0 / 120.0, 48000.0, 1000.0, 0.0) - 1400.0).abs() < 1e-6);
+        // A double-length frame advances twice as far — movement ∝ real elapsed time.
+        assert!((advance_cursor(1000.0, 2.0 / 120.0, 48000.0, 1000.0, 0.0) - 1800.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cursor_clamps_a_huge_gap() {
+        // A 0.5 s occlusion gap is clamped to MAX_DT_SECONDS so the scroll doesn't leap by seconds.
+        let c = advance_cursor(0.0, 0.5, 48000.0, 0.0, 0.0);
+        assert!((c - MAX_DT_SECONDS * 48000.0).abs() < 1e-6, "got {c}");
+    }
+
+    #[test]
+    fn cursor_drift_trim_pulls_toward_target() {
+        // With dt 0, only the gentle drift pull acts: cursor 900, target 1000, gain 0.1 → +10.
+        assert!((advance_cursor(900.0, 0.0, 48000.0, 1000.0, 0.1) - 910.0).abs() < 1e-6);
+    }
+
+    // ── cadence_regular: vsync vs lumpy-host hysteresis ──
+
+    #[test]
+    fn cadence_stays_regular_until_clearly_lumpy() {
+        assert!(cadence_regular(0.20, true), "steady → stay vsync"); // Logic ~0.2
+        assert!(cadence_regular(0.40, true), "within the band → stay (no flip-flop)");
+        assert!(!cadence_regular(0.60, true), "clearly lumpy → switch to time-based"); // FL ~0.6
+    }
+
+    #[test]
+    fn cadence_returns_to_regular_only_when_clearly_steady() {
+        assert!(!cadence_regular(0.40, false), "still lumpy → stay time-based");
+        assert!(!cadence_regular(0.35, false), "in the band → stay (no flip-flop)");
+        assert!(cadence_regular(0.20, false), "clearly steady again → back to vsync");
     }
 }
