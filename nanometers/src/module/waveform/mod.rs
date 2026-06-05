@@ -114,12 +114,13 @@ const SUB_VSYNC_SECONDS: f64 = 0.002;
 /// Cadence hysteresis. Switch to TIME when sub-vsync frames are common (primary) OR cov is extreme
 /// (backup); return to the default fixed-px path only when BOTH are clearly low. Biased to stay
 /// fixed-px (the proven path) so vsync hosts never leave it. The wide gap prevents flip-flopping.
-// Biased HARD toward VSYNC: occasional run-loop coalescing under load also produces sub-vsync bursts
-// on a real vsync host, so only a heavy, systematic lumpy signature (FL pumping) should flip us.
-const SUB_VSYNC_HI: f64 = 0.10; // >10% sub-vsync frames → lumpy host (FL); load-coalescing stays under
-const SUB_VSYNC_LO: f64 = 0.03;
-const CADENCE_COV_HI: f64 = 0.70; // cov this high is FL-only (standalone callback jitter peaks ~0.5)
-const CADENCE_COV_LO: f64 = 0.45;
+// With the clean on_frame-entry interval a vsync host reads sub~0% / cov~0.03 (measured), so there's
+// a wide margin below these — tight enough to catch FL, far above the vsync baseline. Run-loop
+// coalescing under load could nudge sub/cov up, so a gentle bias + hysteresis still applies.
+const SUB_VSYNC_HI: f64 = 0.05; // >5% sub-vsync frames → lumpy host (FL)
+const SUB_VSYNC_LO: f64 = 0.02;
+const CADENCE_COV_HI: f64 = 0.40; // cov well above the ~0.03 vsync baseline → lumpy host
+const CADENCE_COV_LO: f64 = 0.22;
 
 /// Advance the continuous time cursor one render (the irregular-cadence path). `dt`·`sample_rate` is
 /// the audio that should have gone by; a gentle pull toward `target` (live edge − reservoir) cancels
@@ -248,8 +249,8 @@ pub struct WaveformModule {
 
     // Host-adaptive cadence: stay on the fixed-px path (above) for vsync hosts; switch to the
     // time-based clock when the frame cadence is clearly irregular (see `cadence_regular`).
-    last_frame: Option<Instant>, // for the frame interval dt
-    dt_ema: f64,                 // smoothed frame interval + its mean-abs-deviation + sub-vsync rate
+    frame_dt: f64,  // clean frame interval from the editor (on_frame entry; see FrameContext)
+    dt_ema: f64,    // smoothed frame interval + its mean-abs-deviation + sub-vsync rate
     mad_ema: f64,
     sub_ema: f64,          // fraction of sub-vsync frames (primary lumpy-host signal)
     cadence_regular: bool, // current mode (true = fixed-px / vsync; default)
@@ -414,7 +415,7 @@ impl WaveformModule {
             prev_closed: 0,
             last_audio_advance: None,
             last_sample_rate: 0.0,
-            last_frame: None,
+            frame_dt: 0.0,
             dt_ema: 0.0,
             mad_ema: 0.0,
             sub_ema: 0.0,
@@ -494,6 +495,7 @@ impl WaveformModule {
 
 impl Module for WaveformModule {
     fn update(&mut self, ctx: &FrameContext, _queue: &wgpu::Queue) {
+        self.frame_dt = ctx.frame_dt; // clean interval timed at on_frame entry (not inside prepare)
         if ctx.sample_rate != self.last_sample_rate {
             self.last_sample_rate = ctx.sample_rate;
             // Store clears its sample clock on a rate change → re-measure the arrival rate + refill.
@@ -555,10 +557,10 @@ impl Module for WaveformModule {
             self.block_size = (self.block_size * BLOCK_DECAY).max(d);
         }
 
-        // Classify the frame cadence: smooth the interval + its mean-abs-deviation; a high coefficient
-        // of variation = a lumpy host (FL) → use the time-based clock; a steady one (vsync) → fixed-px.
-        let dt = self.last_frame.map(|t| (now - t).as_secs_f64());
-        self.last_frame = Some(now);
+        // Classify the frame cadence from the CLEAN on_frame-entry interval (not a clock sample here,
+        // which would carry Fifo-present block jitter). High sub-vsync fraction = a lumpy host (FL) →
+        // time-based clock; steady (vsync) → fixed-px.
+        let dt = (self.frame_dt > 0.0).then_some(self.frame_dt);
         if let Some(dt) = dt {
             if dt > 0.0 && dt < MAX_DT_SECONDS {
                 // Primary signal: was this frame sub-vsync (the host pumped us faster than any display)?
@@ -851,27 +853,24 @@ mod tests {
     // ── cadence_regular: vsync vs lumpy-host hysteresis ──
 
     #[test]
-    fn cadence_stays_vsync_on_callback_jitter_without_sub_vsync_frames() {
-        // Standalone/Logic: no sub-vsync frames (sub≈0), and callback-jitter cov up to ~0.5 — must
-        // stay VSYNC (this is the flip-flop the sub-vsync signal fixes).
-        assert!(cadence_regular(0.0, 0.20, true), "steady → stay vsync");
-        assert!(cadence_regular(0.0, 0.50, true), "high callback-jitter cov but no bursts → stay vsync");
+    fn cadence_stays_vsync_at_the_clean_baseline() {
+        // Standalone/Logic with the clean on_frame-entry dt: sub≈0, cov≈0.03 — solidly VSYNC.
+        assert!(cadence_regular(0.0, 0.03, true), "clean vsync baseline → stay vsync");
+        assert!(cadence_regular(0.02, 0.20, true), "mild jitter still under both thresholds → stay");
     }
 
     #[test]
-    fn cadence_switches_to_time_on_sub_vsync_bursts() {
-        // FL pumps render faster than vsync → many sub-vsync frames → switch to TIME.
-        assert!(!cadence_regular(0.20, 0.30, true), "heavy sub-vsync bursts → TIME");
-        // Backup trigger: an extreme cov (FL-only) also switches, even if sub is marginal.
-        assert!(!cadence_regular(0.0, 0.80, true), "extreme cov → TIME");
-        // …and a load-coalescing host that only occasionally bursts (sub ~5%) must NOT flip.
-        assert!(cadence_regular(0.05, 0.50, true), "occasional load bursts → stay vsync");
+    fn cadence_switches_to_time_on_a_lumpy_signature() {
+        // FL: sub-vsync bursts → TIME (primary signal).
+        assert!(!cadence_regular(0.08, 0.20, true), "sub-vsync bursts → TIME");
+        // Backup trigger: a clearly lumpy cov also switches, even if sub is marginal.
+        assert!(!cadence_regular(0.0, 0.50, true), "lumpy cov → TIME");
     }
 
     #[test]
     fn cadence_returns_to_vsync_only_when_both_signals_clearly_low() {
-        assert!(!cadence_regular(0.10, 0.20, false), "still bursting → stay TIME");
-        assert!(!cadence_regular(0.0, 0.50, false), "cov still high → stay TIME");
-        assert!(cadence_regular(0.0, 0.20, false), "both clearly low → back to vsync");
+        assert!(!cadence_regular(0.08, 0.10, false), "still bursting → stay TIME");
+        assert!(!cadence_regular(0.0, 0.30, false), "cov still high → stay TIME");
+        assert!(cadence_regular(0.01, 0.15, false), "both clearly low → back to vsync");
     }
 }

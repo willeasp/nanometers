@@ -91,6 +91,10 @@ pub struct FrameContext<'a> {
     pub meas: &'a Measurements,
     pub sample_rate: f32,
     pub mono: bool,
+    /// Seconds since the previous `on_frame`, measured at its ENTRY (before the Fifo-present block) —
+    /// the clean frame interval. Modules must use this for cadence/scroll timing rather than sampling
+    /// the clock inside `prepare`, which runs after a variable-latency present wait. 0.0 on the first.
+    pub frame_dt: f64,
 }
 
 /// What a Module reports back to the host's pointer-grab state machine (ADR 0004). A Module must

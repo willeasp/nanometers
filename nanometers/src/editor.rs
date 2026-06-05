@@ -218,6 +218,8 @@ struct RenderWindow {
     /// the frame delivery, so this measures the real `on_frame` interval — mean/min/max + implied
     /// fps over a window — to tell a vsync-locked clock from baseview's ~66.7 Hz CFRunLoopTimer.
     frame_dbg: FrameDebug,
+    /// on_frame-entry timestamp of the previous render → the clean frame interval passed to Modules.
+    last_frame_time: Option<Instant>,
 }
 
 #[derive(Default)]
@@ -353,6 +355,7 @@ impl RenderWindow {
                 enabled: crate::diag_enabled("NANO_DEBUG_FRAMES"),
                 ..Default::default()
             },
+            last_frame_time: None,
         }
     }
 
@@ -377,7 +380,16 @@ impl RenderWindow {
 
 impl baseview::WindowHandler for RenderWindow {
     fn on_frame(&mut self, window: &mut baseview::Window) {
-        self.frame_dbg.tick(Instant::now());
+        // Time the frame interval HERE, at on_frame entry — before the Fifo-present block — so it's
+        // the clean cadence signal. (Sampling the clock in a Module's prepare, after the variable
+        // present wait, adds block-jitter that falsely reads as sub-vsync frames.)
+        let now = Instant::now();
+        self.frame_dbg.tick(now);
+        let frame_dt = self
+            .last_frame_time
+            .map(|t| (now - t).as_secs_f64())
+            .unwrap_or(0.0);
+        self.last_frame_time = Some(now);
         self.drain_audio();
 
         // Phase 1: fan this frame's samples out to every Module to fold + upload.
@@ -388,6 +400,7 @@ impl baseview::WindowHandler for RenderWindow {
             meas: &self.shared.meas,
             sample_rate,
             mono,
+            frame_dt,
         };
         for m in self.modules.iter_mut() {
             m.update(&ctx, &self.queue);
