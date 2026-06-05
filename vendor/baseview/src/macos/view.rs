@@ -239,8 +239,14 @@ unsafe fn create_view_class() -> &'static Class {
 
 /// `- (void)displayLinkFired:(CADisplayLink *)sender` — the per-vsync callback for the AppKit
 /// display link. Drives exactly one frame, like the old timer callback did.
-extern "C" fn display_link_fired(this: &Object, _: Sel, _: id) {
+extern "C" fn display_link_fired(this: &Object, _: Sel, sender: id) {
     let state = unsafe { WindowState::from_view(this) };
+    // DIAGNOSTIC (gated): log when the upcoming frame is predicted to be ON SCREEN, so we can compare
+    // the display-link cadence to the editor's wall-clock frame interval. Off → just one bool check.
+    if state.frame_ts_logging() {
+        let target: f64 = unsafe { msg_send![sender, targetTimestamp] };
+        state.log_target_ts(target);
+    }
     state.trigger_frame();
 }
 

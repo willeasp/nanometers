@@ -293,6 +293,8 @@ impl<'a> Window<'a> {
             display_link: Cell::new(None),
             window_info: Cell::new(window_info),
             deferred_events: RefCell::default(),
+            log_frame_ts: nano_debug_enabled(),
+            target_log: RefCell::new(TargetTsLog::new()),
         });
 
         let window_state_ptr = Rc::into_raw(Rc::clone(&window_state));
@@ -379,6 +381,72 @@ impl<'a> Window<'a> {
     }
 }
 
+/// DIAGNOSTIC ONLY (gated by `~/.nano-debug`): accumulates the display link's `targetTimestamp`
+/// deltas — the instant each frame is predicted to be ON SCREEN — and logs mean/min/max every 240
+/// frames, mirroring the editor's `[nano-frames]` wall-clock line. Comparing the two distributions
+/// answers the open question: does a lumpy host (FL) pollute our display-link CLOCK, or only the
+/// on-screen presentation? Costs nothing when the marker is absent (`WindowState::log_frame_ts`).
+struct TargetTsLog {
+    last: f64,
+    count: u32,
+    sum_ms: f64,
+    min_ms: f64,
+    max_ms: f64,
+}
+
+impl TargetTsLog {
+    fn new() -> Self {
+        Self { last: 0.0, count: 0, sum_ms: 0.0, min_ms: f64::MAX, max_ms: 0.0 }
+    }
+
+    fn tick(&mut self, target: f64) {
+        if self.last > 0.0 {
+            let dt = (target - self.last) * 1000.0;
+            self.count += 1;
+            self.sum_ms += dt;
+            self.min_ms = self.min_ms.min(dt);
+            self.max_ms = self.max_ms.max(dt);
+            if self.count >= 240 {
+                let mean = self.sum_ms / self.count as f64;
+                diag_log(&format!(
+                    "[nano-target] {} frames: mean {:.2} ms ({:.1} fps), min {:.2}, max {:.2}",
+                    self.count,
+                    mean,
+                    1000.0 / mean,
+                    self.min_ms,
+                    self.max_ms
+                ));
+                self.count = 0;
+                self.sum_ms = 0.0;
+                self.min_ms = f64::MAX;
+                self.max_ms = 0.0;
+            }
+        }
+        self.last = target;
+    }
+}
+
+/// `true` when the `~/.nano-debug` marker exists — checked ONCE at window construction. Mirrors the
+/// nanometers crate's `diag_enabled` (baseview can't reach it), kept dead-simple and self-contained.
+fn nano_debug_enabled() -> bool {
+    std::env::var_os("HOME")
+        .map(|h| std::path::Path::new(&h).join(".nano-debug").exists())
+        .unwrap_or(false)
+}
+
+/// Append a diagnostic line to `~/Library/Logs/nanometers.log` (the sandbox-allowed path) and
+/// stderr. Best-effort; mirrors the nanometers crate's `diag_log` so lines interleave in one file.
+fn diag_log(line: &str) {
+    eprintln!("{line}");
+    if let Some(home) = std::env::var_os("HOME") {
+        use std::io::Write;
+        let path = std::path::Path::new(&home).join("Library/Logs/nanometers.log");
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(f, "{line}");
+        }
+    }
+}
+
 pub(super) struct WindowState {
     pub(super) window_inner: WindowInner,
     window_handler: RefCell<Box<dyn WindowHandler>>,
@@ -392,6 +460,11 @@ pub(super) struct WindowState {
 
     /// Events that will be triggered at the end of `window_handler`'s borrow.
     deferred_events: RefCell<VecDeque<Event>>,
+
+    /// Diagnostics (gated by `~/.nano-debug`, checked once): log the display-link `targetTimestamp`
+    /// cadence to compare against the editor's wall-clock frame interval. See `TargetTsLog`.
+    log_frame_ts: bool,
+    target_log: RefCell<TargetTsLog>,
 }
 
 impl WindowState {
@@ -438,6 +511,18 @@ impl WindowState {
         let mut window_handler = self.window_handler.borrow_mut();
         window_handler.on_frame(&mut window);
         self.send_deferred_events(window_handler.as_mut());
+    }
+
+    /// `true` if the `~/.nano-debug` diagnostics are on (set once at construction). Lets the display
+    /// link callback skip the `targetTimestamp` read entirely in shipped builds.
+    pub(super) fn frame_ts_logging(&self) -> bool {
+        self.log_frame_ts
+    }
+
+    /// Record one display-link `targetTimestamp` (seconds, the predicted on-screen instant of the
+    /// upcoming frame). DIAGNOSTIC ONLY — see `TargetTsLog`.
+    pub(super) fn log_target_ts(&self, target: f64) {
+        self.target_log.borrow_mut().tick(target);
     }
 
     pub(super) fn keyboard_state(&self) -> &KeyboardState {
