@@ -118,9 +118,13 @@ const SUB_VSYNC_SECONDS: f64 = 0.002;
 // a wide margin below these — tight enough to catch FL, far above the vsync baseline. Run-loop
 // coalescing under load could nudge sub/cov up, so a gentle bias + hysteresis still applies.
 const SUB_VSYNC_HI: f64 = 0.05; // >5% sub-vsync frames → lumpy host (FL)
-const SUB_VSYNC_LO: f64 = 0.02;
 const CADENCE_COV_HI: f64 = 0.40; // cov well above the ~0.03 vsync baseline → lumpy host
-const CADENCE_COV_LO: f64 = 0.22;
+// Return thresholds are STICKY: once a lumpy host (FL: sub~8%, cov~0.4) is detected, only a
+// rock-solid vsync signal returns us to fixed-px. FL never gets this clean, so it can't flicker
+// TIME↔VSYNC mid-stream — every flicker was an 18% zoom pop (FL's px rounds 2.4→2, so VSYNC columns
+// run ~18% wider than TIME). A genuine display switch (lumpy→vsync) still drops below these.
+const SUB_VSYNC_LO: f64 = 0.005;
+const CADENCE_COV_LO: f64 = 0.10;
 
 /// Advance the continuous time cursor one render (the irregular-cadence path). `dt`·`sample_rate` is
 /// the audio that should have gone by; a gentle pull toward `target` (live edge − reservoir) cancels
@@ -868,9 +872,13 @@ mod tests {
     }
 
     #[test]
-    fn cadence_returns_to_vsync_only_when_both_signals_clearly_low() {
+    fn cadence_returns_to_vsync_only_on_a_rock_solid_vsync_signal() {
+        // STICKY: FL's mid-stream signal (sub~8%, cov~0.4, even its calm dips ~0.15) must NOT return,
+        // or it flickers TIME↔VSYNC = the 18% zoom pop.
         assert!(!cadence_regular(0.08, 0.10, false), "still bursting → stay TIME");
-        assert!(!cadence_regular(0.0, 0.30, false), "cov still high → stay TIME");
-        assert!(cadence_regular(0.01, 0.15, false), "both clearly low → back to vsync");
+        assert!(!cadence_regular(0.0, 0.15, false), "cov still well above the vsync baseline → stay TIME");
+        assert!(!cadence_regular(0.02, 0.05, false), "occasional sub-vsync → stay TIME");
+        // Only a clean vsync signal (a genuine display switch) returns.
+        assert!(cadence_regular(0.0, 0.03, false), "rock-solid vsync → back to fixed-px");
     }
 }
