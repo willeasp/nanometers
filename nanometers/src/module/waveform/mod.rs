@@ -253,8 +253,9 @@ pub struct WaveformModule {
 
     // Host-adaptive cadence: stay on the fixed-px path (above) for vsync hosts; switch to the
     // time-based clock when the frame cadence is clearly irregular (see `cadence_regular`).
-    frame_dt: f64,  // clean frame interval from the editor (on_frame entry; see FrameContext)
-    dt_ema: f64,    // smoothed frame interval + its mean-abs-deviation + sub-vsync rate
+    frame_dt: f64,   // clean WALL-CLOCK frame interval (on_frame entry) — classifies the cadence
+    present_dt: f64, // PRESENTATION interval (display-link targetTimestamp delta) — advances the clock
+    dt_ema: f64,     // smoothed frame interval + its mean-abs-deviation + sub-vsync rate
     mad_ema: f64,
     sub_ema: f64,          // fraction of sub-vsync frames (primary lumpy-host signal)
     cadence_regular: bool, // current mode (true = fixed-px / vsync; default)
@@ -420,6 +421,7 @@ impl WaveformModule {
             last_audio_advance: None,
             last_sample_rate: 0.0,
             frame_dt: 0.0,
+            present_dt: 0.0,
             dt_ema: 0.0,
             mad_ema: 0.0,
             sub_ema: 0.0,
@@ -499,7 +501,8 @@ impl WaveformModule {
 
 impl Module for WaveformModule {
     fn update(&mut self, ctx: &FrameContext, _queue: &wgpu::Queue) {
-        self.frame_dt = ctx.frame_dt; // clean interval timed at on_frame entry (not inside prepare)
+        self.frame_dt = ctx.frame_dt; // clean wall-clock interval (on_frame entry) — for cadence detect
+        self.present_dt = ctx.present_dt; // presentation interval — for the time-based advance
         if ctx.sample_rate != self.last_sample_rate {
             self.last_sample_rate = ctx.sample_rate;
             // Store clears its sample clock on a rate change → re-measure the arrival rate + refill.
@@ -644,15 +647,20 @@ impl Module for WaveformModule {
                 built += 1;
             }
         } else if audio_live {
-            // Irregular (lumpy host): time-based. Advance the cursor by REAL elapsed time (drift-
-            // trimmed toward the edge), then build whole constant-width columns up to it — never past
-            // the closed edge. Movement ∝ elapsed time, so it stays correct on any cadence.
+            // Irregular (lumpy host): time-based. Advance the cursor by the PRESENTATION interval —
+            // when the frame actually reaches the screen — not the wall-clock callback interval. A
+            // host like FL over-pumps the callback in sub-ms bursts that wall-clock would build 0
+            // columns for (then jump), but each burst render is queued for a distinct vblank, so the
+            // present clock stays at vblank cadence → steady per-frame movement. Falls back to
+            // wall-clock when the present clock is unavailable (first frame / timer / non-macOS).
+            // Movement ∝ elapsed time either way, so distance-per-second stays correct on any cadence.
+            let advance_dt = if self.present_dt > 0.0 { self.present_dt } else { dt.unwrap_or(0.0) };
             let target = closed as f64 - reservoir_target;
             if (self.time_cursor - target).abs() > RESYNC_RESERVOIRS * reservoir_target {
                 self.refill_ring(columns, target, spp); // seek / long-stall recovery → re-anchor
             } else {
                 self.time_cursor =
-                    advance_cursor(self.time_cursor, dt.unwrap_or(0.0), sr, target, CURSOR_DRIFT_GAIN);
+                    advance_cursor(self.time_cursor, advance_dt, sr, target, CURSOR_DRIFT_GAIN);
                 let limit = self.time_cursor.min(closed as f64);
                 while self.next_sample + spp <= limit && built < columns as i64 {
                     let lo = self.next_sample.round() as i64;

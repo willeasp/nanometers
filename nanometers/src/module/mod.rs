@@ -92,9 +92,16 @@ pub struct FrameContext<'a> {
     pub sample_rate: f32,
     pub mono: bool,
     /// Seconds since the previous `on_frame`, measured at its ENTRY (before the Fifo-present block) —
-    /// the clean frame interval. Modules must use this for cadence/scroll timing rather than sampling
-    /// the clock inside `prepare`, which runs after a variable-latency present wait. 0.0 on the first.
+    /// the clean WALL-CLOCK frame interval. Use this to CLASSIFY the host cadence (a host that
+    /// over-pumps the callback shows sub-ms bursts here). Sampling the clock inside `prepare`, after
+    /// the variable present wait, adds block-jitter that falsely reads as sub-vsync. 0.0 on the first.
     pub frame_dt: f64,
+    /// Seconds between the previous frame's predicted on-screen instant and this one's — the
+    /// PRESENTATION clock (display-link `targetTimestamp` delta). Use this to ADVANCE time-based
+    /// scroll: it stays at vblank cadence even when `frame_dt` collapses to sub-ms under an
+    /// over-pumping host, because each over-pumped render is queued for a distinct vblank. 0.0 when
+    /// unknown (first frame, or the timer fallback on older macOS).
+    pub present_dt: f64,
 }
 
 /// What a Module reports back to the host's pointer-grab state machine (ADR 0004). A Module must

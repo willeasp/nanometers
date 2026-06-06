@@ -390,6 +390,10 @@ impl baseview::WindowHandler for RenderWindow {
             .map(|t| (now - t).as_secs_f64())
             .unwrap_or(0.0);
         self.last_frame_time = Some(now);
+        // The presentation clock — when this frame is predicted to be ON SCREEN, vs `frame_dt`'s
+        // when-the-callback-fired. Modules advance time-based scroll on this (steady at vblank
+        // cadence even when a host over-pumps the callback); detection still uses `frame_dt`.
+        let present_dt = window.frame_present_delta();
         self.drain_audio();
 
         // Phase 1: fan this frame's samples out to every Module to fold + upload.
@@ -401,6 +405,7 @@ impl baseview::WindowHandler for RenderWindow {
             sample_rate,
             mono,
             frame_dt,
+            present_dt,
         };
         for m in self.modules.iter_mut() {
             m.update(&ctx, &self.queue);

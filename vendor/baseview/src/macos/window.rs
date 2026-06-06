@@ -75,11 +75,24 @@ pub(super) struct WindowInner {
     /// Our subclassed NSView
     ns_view: id,
 
+    /// Seconds between the previous frame's predicted on-screen instant and this one's — the display
+    /// link's `targetTimestamp` delta, set in `display_link_fired` just before `on_frame`. This is the
+    /// PRESENTATION clock: unlike wall-clock callback timing it never collapses to sub-ms under a host
+    /// (e.g. FL) that over-pumps our render callback, because each over-pumped render is queued for a
+    /// distinct future vblank. `0.0` until the second frame / on the timer fallback. See `WindowState`.
+    present_delta: Cell<f64>,
+
     #[cfg(feature = "opengl")]
     pub(super) gl_context: Option<GlContext>,
 }
 
 impl WindowInner {
+    /// Seconds between the previous frame's predicted on-screen instant and this one's. See the
+    /// field doc on `present_delta`. `0.0` when unknown (first frame / timer fallback).
+    pub(super) fn present_delta(&self) -> f64 {
+        self.present_delta.get()
+    }
+
     pub(super) fn close(&self) {
         if self.open.get() {
             self.open.set(false);
@@ -179,6 +192,7 @@ impl<'a> Window<'a> {
                 Some(handle.ns_window.cast())
             },
             ns_view,
+            present_delta: Cell::new(0.0),
 
             #[cfg(feature = "opengl")]
             gl_context: options
@@ -255,6 +269,7 @@ impl<'a> Window<'a> {
             ns_window: Cell::new(Some(ns_window)),
             parent_ns_window: None,
             ns_view,
+            present_delta: Cell::new(0.0),
 
             #[cfg(feature = "opengl")]
             gl_context: options
@@ -293,6 +308,7 @@ impl<'a> Window<'a> {
             display_link: Cell::new(None),
             window_info: Cell::new(window_info),
             deferred_events: RefCell::default(),
+            last_target_ts: Cell::new(0.0),
             log_frame_ts: nano_debug_enabled(),
             target_log: RefCell::new(TargetTsLog::new()),
         });
@@ -363,6 +379,10 @@ impl<'a> Window<'a> {
 
     pub fn set_mouse_cursor(&mut self, _mouse_cursor: MouseCursor) {
         todo!()
+    }
+
+    pub fn frame_present_delta(&self) -> f64 {
+        self.inner.present_delta()
     }
 
     #[cfg(feature = "opengl")]
@@ -461,6 +481,10 @@ pub(super) struct WindowState {
     /// Events that will be triggered at the end of `window_handler`'s borrow.
     deferred_events: RefCell<VecDeque<Event>>,
 
+    /// Previous frame's display-link `targetTimestamp` (seconds), to derive the present-time delta
+    /// stashed in `WindowInner::present_delta`. `0.0` until the first frame.
+    last_target_ts: Cell<f64>,
+
     /// Diagnostics (gated by `~/.nano-debug`, checked once): log the display-link `targetTimestamp`
     /// cadence to compare against the editor's wall-clock frame interval. See `TargetTsLog`.
     log_frame_ts: bool,
@@ -513,16 +537,19 @@ impl WindowState {
         self.send_deferred_events(window_handler.as_mut());
     }
 
-    /// `true` if the `~/.nano-debug` diagnostics are on (set once at construction). Lets the display
-    /// link callback skip the `targetTimestamp` read entirely in shipped builds.
-    pub(super) fn frame_ts_logging(&self) -> bool {
-        self.log_frame_ts
-    }
-
-    /// Record one display-link `targetTimestamp` (seconds, the predicted on-screen instant of the
-    /// upcoming frame). DIAGNOSTIC ONLY — see `TargetTsLog`.
-    pub(super) fn log_target_ts(&self, target: f64) {
-        self.target_log.borrow_mut().tick(target);
+    /// Record this frame's display-link `targetTimestamp` (seconds, the predicted on-screen instant
+    /// of the upcoming frame) before driving `on_frame`. Stashes the delta since the previous frame
+    /// in `WindowInner::present_delta` (the presentation clock the handler reads), and — when the
+    /// `~/.nano-debug` diagnostics are on — also logs the cadence. Called once per display-link fire.
+    pub(super) fn record_present_time(&self, target: f64) {
+        let last = self.last_target_ts.get();
+        // Guard the first frame and any non-monotonic blip (clamp negatives/zero to "unknown").
+        let delta = if last > 0.0 && target > last { target - last } else { 0.0 };
+        self.window_inner.present_delta.set(delta);
+        self.last_target_ts.set(target);
+        if self.log_frame_ts {
+            self.target_log.borrow_mut().tick(target);
+        }
     }
 
     pub(super) fn keyboard_state(&self) -> &KeyboardState {

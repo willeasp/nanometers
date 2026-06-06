@@ -241,12 +241,11 @@ unsafe fn create_view_class() -> &'static Class {
 /// display link. Drives exactly one frame, like the old timer callback did.
 extern "C" fn display_link_fired(this: &Object, _: Sel, sender: id) {
     let state = unsafe { WindowState::from_view(this) };
-    // DIAGNOSTIC (gated): log when the upcoming frame is predicted to be ON SCREEN, so we can compare
-    // the display-link cadence to the editor's wall-clock frame interval. Off → just one bool check.
-    if state.frame_ts_logging() {
-        let target: f64 = unsafe { msg_send![sender, targetTimestamp] };
-        state.log_target_ts(target);
-    }
+    // Record when the upcoming frame is predicted to be ON SCREEN (`targetTimestamp`) before driving
+    // the frame, so the handler can advance scroll/animation on the presentation clock rather than
+    // wall-clock callback timing — see `Window::frame_present_delta`. One ObjC message per vsync.
+    let target: f64 = unsafe { msg_send![sender, targetTimestamp] };
+    state.record_present_time(target);
     state.trigger_frame();
 }
 
