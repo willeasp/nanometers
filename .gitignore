@@ -9,3 +9,6 @@ Cargo.lock.bak
 .claude/scheduled_tasks.lock
 .claude/worktrees/
 .superpowers/
+
+# nano-dsp assembled iOS framework (rebuilt by build-xcframework.sh)
+/crates/nano-dsp/NanoDSP.xcframework/

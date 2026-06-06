@@ -1,0 +1,4 @@
+module NanoDSP {
+    header "nano_dsp.h"
+    export *
+}
