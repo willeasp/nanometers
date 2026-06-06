@@ -15,10 +15,21 @@ crate-type = ["cdylib", "lib"]
 name = "nanometers"
 path = "src/standalone.rs"
 
+# Throwaway terminal mp3-player + meter prototype (see src/nanoplayer.rs). Gated so a plain
+# `cargo build` never pulls in the TUI/audio deps; run with `--features nanoplayer`.
+[[bin]]
+name = "nanoplayer"
+path = "src/nanoplayer.rs"
+required-features = ["nanoplayer"]
+
 [features]
 # Dev-only file player: decode a song and stream it through the waveform without a loopback
 # device. Off by default so the shipped plugin never links symphonia/cpal.
 dev-player = ["dep:symphonia", "dep:cpal"]
+
+# Terminal player prototype: decode + play a file and render the waveform/LUFS in the terminal,
+# reusing the plugin's LoudnessDsp + spectral coloring. Off by default — adds the TUI/audio deps.
+nanoplayer = ["dep:symphonia", "dep:cpal", "dep:crossterm", "dep:image", "dep:libc"]
 
 # Realtime-safety assertion: aborts if the audio thread allocates. Enabled only for shipping
 # builds (build.sh passes it to `cargo xtask bundle`) — nih-plug's standalone wrapper itself
@@ -40,6 +51,19 @@ symphonia = { version = "0.5", optional = true, default-features = false, featur
     "isomp4",
 ] }
 cpal = { version = "0.17", optional = true }
+
+# nanoplayer prototype only: raw-mode terminal control + non-blocking key input for the TUI.
+crossterm = { version = "0.28", optional = true }
+
+# nanoplayer prototype only: decode embedded cover-art (JPEG/PNG) for half-block rendering.
+# default-features off → pulls just png + zune-jpeg, no rayon/avif/webp/tiff machinery.
+image = { version = "0.25.10", optional = true, default-features = false, features = [
+    "jpeg",
+    "png",
+] }
+
+# nanoplayer prototype only: poll(2) for a timed OSC 11 terminal-background query (theme detect).
+libc = { version = "0.2", optional = true }
 
 baseview.workspace = true
 wgpu.workspace = true
