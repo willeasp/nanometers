@@ -46,6 +46,17 @@ const COLOR_WHITE_MIX: f32 = 0.18;
 /// MSAA sample count for the Waveform's own offscreen target (0007 — host pass stays single-sample).
 const MSAA_SAMPLES: u32 = 4;
 
+/// DEBUG-ONLY reference ruler (gated by `~/.nano-debug`). Two rows of vertical ticks scroll left at
+/// the waveform's exact speed, so jitter is visible against a clean reference. TOP row advances by the
+/// INSTANTANEOUS presentation interval (exact constant speed — will stutter if the host presents
+/// erratically, exposing presentation jitter). BOTTOM row advances by the SMOOTHED interval (uniform
+/// per frame — smooth like fixed-px, but its speed only tracks the average). If the waveform is jerkier
+/// than the TOP row, the jitter is our column math; if it matches, it's the host's presentation.
+const MARKER_INTERVAL_SECONDS: f64 = 0.5; // tick spacing in time (≙ one beat at 120 BPM)
+const MARKER_TICK_LEN: f32 = 0.16; // tick height as a fraction of the half-viewport (clip units)
+const MARKER_EMA: f64 = 0.05; // smoothing for the uniform (bottom) ruler's per-frame step
+const MARKER_MAX_TICKS: usize = 64; // vbuf cap per ruler
+
 /// No new closed audio for longer than this → paused; freeze the scroll. Loose enough that ordinary
 /// bursty arrival (a couple of audio blocks) isn't mistaken for a pause.
 const PAUSE_SECONDS: f64 = 0.07;
@@ -262,6 +273,16 @@ pub struct WaveformModule {
     time_cursor: f64,      // smooth time-driven target (irregular mode only)
 
     scroll_dbg: ScrollDbg,
+
+    // DEBUG-ONLY scrolling reference ruler (see the MARKER_* consts). Inert unless `markers_enabled`.
+    markers_enabled: bool,
+    marker_pipeline: wgpu::RenderPipeline, // thin quads, surface format, single-sample
+    marker_vbuf: wgpu::Buffer,
+    marker_verts: Vec<Vertex>,
+    marker_vcount: u32,
+    marker_pos_exact: f64,   // clip-units scrolled, advanced by the instantaneous present interval
+    marker_pos_uniform: f64, // clip-units scrolled, advanced by the smoothed interval
+    marker_dt_ema: f64,      // smoothed present interval driving the uniform ruler
 }
 
 impl WaveformModule {
@@ -301,7 +322,7 @@ impl WaveformModule {
             vertex: wgpu::VertexState {
                 module: &contour_shader,
                 entry_point: Some("vs_main"),
-                buffers: &[vertex_layout],
+                buffers: &[vertex_layout.clone()],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -397,6 +418,41 @@ impl WaveformModule {
             ..Default::default()
         });
 
+        // ── DEBUG marker pipeline: thin quads (reuses the contour shader/vertex layout), drawn in the
+        // host's single-sample pass over the composited waveform. Built only to keep the field valid;
+        // it never draws unless `markers_enabled`. ──
+        let marker_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("waveform-marker-pipeline"),
+            layout: Some(&contour_pl),
+            vertex: wgpu::VertexState {
+                module: &contour_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[vertex_layout],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &contour_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(), // TriangleList
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(), // single-sample (host pass)
+            multiview_mask: None,
+            cache: None,
+        });
+        let marker_cap = (2 * MARKER_MAX_TICKS * 6 * std::mem::size_of::<Vertex>()) as u64;
+        let marker_vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("waveform-marker-vbuf"),
+            contents: &vec![0u8; marker_cap as usize],
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        });
+
         Self {
             store,
             contour_pipeline,
@@ -431,7 +487,60 @@ impl WaveformModule {
                 on: crate::diag_enabled("NANO_DEBUG_SCROLL"),
                 ..Default::default()
             },
+            markers_enabled: crate::diag_enabled("NANO_DEBUG_MARKERS"),
+            marker_pipeline,
+            marker_vbuf,
+            marker_verts: Vec::with_capacity(2 * MARKER_MAX_TICKS * 6),
+            marker_vcount: 0,
+            marker_pos_exact: 0.0,
+            marker_pos_uniform: 0.0,
+            marker_dt_ema: 0.0,
         }
+    }
+
+    /// DEBUG-ONLY: advance the two reference rulers and rebuild their tick geometry. Called once per
+    /// active frame from `prepare` (which owns the queue). `columns` = viewport width in px. See the
+    /// MARKER_* consts for what the two rows mean.
+    fn build_markers(&mut self, queue: &wgpu::Queue, columns: usize) {
+        let present = if self.present_dt > 0.0 { self.present_dt } else { self.frame_dt };
+        if self.marker_dt_ema <= 0.0 {
+            self.marker_dt_ema = present;
+        } else {
+            self.marker_dt_ema = self.marker_dt_ema * (1.0 - MARKER_EMA) + present * MARKER_EMA;
+        }
+        // Scroll speed in clip units/sec: the full width (2.0 clip) shows DISPLAY_WINDOW_SECONDS.
+        let speed = 2.0 / DISPLAY_WINDOW_SECONDS;
+        self.marker_pos_exact += present * speed; // instantaneous → exact speed, exposes jitter
+        self.marker_pos_uniform += self.marker_dt_ema * speed; // smoothed → uniform per frame
+
+        let spacing = (MARKER_INTERVAL_SECONDS * speed) as f32; // clip units between ticks
+        let hw = (2.0 / columns as f32).max(0.0015); // ~2px-wide tick
+        self.marker_verts.clear();
+        // (position, top-edge?, color) — TOP row = exact clock (cyan), BOTTOM row = uniform (magenta).
+        for (pos, top, color) in [
+            (self.marker_pos_exact, true, [0.1, 0.9, 1.0]),
+            (self.marker_pos_uniform, false, [1.0, 0.3, 0.9]),
+        ] {
+            let (y0, y1) = if top {
+                (1.0, 1.0 - MARKER_TICK_LEN)
+            } else {
+                (-1.0 + MARKER_TICK_LEN, -1.0)
+            };
+            let frac = (pos as f32).rem_euclid(spacing);
+            let mut x = 1.0 - frac;
+            let mut drawn = 0;
+            while x > -1.0 && drawn < MARKER_MAX_TICKS {
+                let (l, r) = (x - hw, x + hw);
+                let quad = [[l, y0], [r, y0], [l, y1], [r, y0], [r, y1], [l, y1]];
+                for p in quad {
+                    self.marker_verts.push(Vertex { pos: p, color });
+                }
+                x -= spacing;
+                drawn += 1;
+            }
+        }
+        queue.write_buffer(&self.marker_vbuf, 0, bytemuck::cast_slice(&self.marker_verts));
+        self.marker_vcount = self.marker_verts.len() as u32;
     }
 
     /// (Re)allocate the offscreen MSAA + resolved textures when the viewport size changes; guards
@@ -675,6 +784,11 @@ impl Module for WaveformModule {
         }
         // (paused → ring is left frozen)
 
+        // DEBUG ruler: advance + rebuild only while audio is scrolling, so it tracks the waveform.
+        if self.markers_enabled && audio_live {
+            self.build_markers(queue, columns);
+        }
+
         self.scroll_dbg.tick(built, s_nominal, self.cadence_regular, cov, self.sub_ema);
         let cols = self.display_cols.make_contiguous();
 
@@ -734,6 +848,14 @@ impl Module for WaveformModule {
         rpass.set_pipeline(&self.composite_pipeline);
         rpass.set_bind_group(0, &off.composite_bind_group, &[]);
         rpass.draw(0..3, 0..1);
+
+        // DEBUG reference ruler over the top (see build_markers): the diagnostic signal for whether
+        // jitter is our scroll math or the host's presentation.
+        if self.markers_enabled && self.marker_vcount > 0 {
+            rpass.set_pipeline(&self.marker_pipeline);
+            rpass.set_vertex_buffer(0, self.marker_vbuf.slice(..));
+            rpass.draw(0..self.marker_vcount, 0..1);
+        }
     }
 
     fn on_event(&mut self, _event: &baseview::Event, _viewport: Rect) -> EventStatus {
