@@ -441,8 +441,8 @@ fn run_render_loop(
             Err(std::sync::TryLockError::WouldBlock) => {}
         }
 
-        // Phase 1: fan this frame's samples out to every Module. present_dt is 0 — there's no display
-        // link now; the loop is itself vsync-paced, so frame_dt is the steady per-frame interval.
+        // Phase 1: fan this frame's samples out to every Module. The loop is itself vsync-paced, so
+        // frame_dt is the steady per-frame interval.
         let sample_rate = shared.sample_rate.load(Ordering::Relaxed);
         let mono = shared.mono.load(Ordering::Relaxed);
         let ctx = FrameContext {
@@ -451,7 +451,6 @@ fn run_render_loop(
             sample_rate,
             mono,
             frame_dt,
-            present_dt: 0.0,
         };
         for m in modules.iter_mut() {
             m.update(&ctx, &queue);

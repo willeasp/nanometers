@@ -91,17 +91,10 @@ pub struct FrameContext<'a> {
     pub meas: &'a Measurements,
     pub sample_rate: f32,
     pub mono: bool,
-    /// Seconds since the previous `on_frame`, measured at its ENTRY (before the Fifo-present block) —
-    /// the clean WALL-CLOCK frame interval. Use this to CLASSIFY the host cadence (a host that
-    /// over-pumps the callback shows sub-ms bursts here). Sampling the clock inside `prepare`, after
-    /// the variable present wait, adds block-jitter that falsely reads as sub-vsync. 0.0 on the first.
+    /// Seconds since the previous frame. The editor renders on a dedicated thread paced by the
+    /// swapchain at vblank (ADR 0008), so this is the steady inter-frame interval; currently
+    /// informational (logged via `NANO_DEBUG_FRAMES`). 0.0 on the first frame.
     pub frame_dt: f64,
-    /// Seconds between the previous frame's predicted on-screen instant and this one's — the
-    /// PRESENTATION clock (display-link `targetTimestamp` delta). Use this to ADVANCE time-based
-    /// scroll: it stays at vblank cadence even when `frame_dt` collapses to sub-ms under an
-    /// over-pumping host, because each over-pumped render is queued for a distinct vblank. 0.0 when
-    /// unknown (first frame, or the timer fallback on older macOS).
-    pub present_dt: f64,
 }
 
 /// What a Module reports back to the host's pointer-grab state machine (ADR 0004). A Module must
