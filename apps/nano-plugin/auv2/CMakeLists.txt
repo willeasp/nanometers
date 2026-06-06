@@ -36,7 +36,7 @@ FetchContent_MakeAvailable(clap-wrapper)
 add_library(nanometers_auv2 MODULE)
 
 # Path to the prebuilt CLAP. Bundled into the .component at build time.
-set(NANOMETERS_CLAP_PATH "${CMAKE_SOURCE_DIR}/../target/bundled/nanometers.clap"
+set(NANOMETERS_CLAP_PATH "${CMAKE_SOURCE_DIR}/../../../target/bundled/nanometers.clap"
     CACHE PATH "Path to prebuilt nanometers.clap bundle")
 
 if(NOT EXISTS "${NANOMETERS_CLAP_PATH}")

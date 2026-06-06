@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["crates/nano-dsp", "nanometers", "xtask"]
-default-members = ["nanometers"]
+members = ["crates/nano-dsp", "apps/nano-plugin", "xtask"]
+default-members = ["apps/nano-plugin"]
 
 [workspace.package]
 edition = "2024"

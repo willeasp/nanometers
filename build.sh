@@ -5,6 +5,11 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# In git worktrees, nih_plug_xtask climbs to the highest ancestor with a Cargo.toml — which is the
+# main workspace, not this worktree — and puts bundled output under that root's target/. Force it
+# into the worktree's own target/ so CMake's ../../../target/bundled/nanometers.clap path resolves.
+export CARGO_TARGET_DIR="$(pwd)/target"
+
 PROFILE="release"
 CARGO_FLAGS="--release"
 if [[ "${1:-}" == "--debug" ]]; then
@@ -18,17 +23,17 @@ echo "==> [1/4] Building CLAP via cargo (${PROFILE})..."
 cargo xtask bundle nanometers ${CARGO_FLAGS} --features rt-assert
 
 echo "==> [2/4] Configuring AU wrapper (cmake)..."
-cmake -B auv2/build -S auv2 -DCMAKE_BUILD_TYPE=Release
+cmake -B apps/nano-plugin/auv2/build -S apps/nano-plugin/auv2 -DCMAKE_BUILD_TYPE=Release
 
 echo "==> [3/4] Building AU wrapper..."
 # clap-wrapper's incremental build doesn't always re-stitch the .component's Info.plist
 # (the auv2 AudioComponents array gets stamped only at link time). Nuking the bundle forces
 # a relink while keeping the heavy AudioUnitSDK / clap-wrapper objects cached.
-rm -rf auv2/build/nanometers.component
-cmake --build auv2/build --parallel --config Release
+rm -rf apps/nano-plugin/auv2/build/nanometers.component
+cmake --build apps/nano-plugin/auv2/build --parallel --config Release
 
 # clap-wrapper drops the .component somewhere under auv2/build — find it.
-COMPONENT=$(find auv2/build -name 'nanometers.component' -type d -maxdepth 4 | head -1)
+COMPONENT=$(find apps/nano-plugin/auv2/build -name 'nanometers.component' -type d -maxdepth 4 | head -1)
 if [[ -z "${COMPONENT}" ]]; then
   echo "ERROR: could not locate built nanometers.component under auv2/build/" >&2
   exit 1

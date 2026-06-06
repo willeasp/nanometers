@@ -1,5 +1,6 @@
 /target
 /auv2/build
+/apps/nano-plugin/auv2/build
 Cargo.lock.bak
 .DS_Store
 .idea/
