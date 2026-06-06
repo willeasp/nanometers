@@ -7,6 +7,17 @@ license.workspace = true
 repository.workspace = true
 description = "Platform-free DSP/domain core for nanometers: envelope store, BS.1770 loudness, spectral color, and the audio→GUI value types. No wgpu, no plugin host, no windowing (ADR 0008)."
 
+[lib]
+# `staticlib` is the artifact the iOS .xcframework links; `lib` (rlib) is what the plugin and TUI
+# link. cargo builds the rlib for dependents and the .a only when nano-dsp is a top-level target.
+crate-type = ["lib", "staticlib"]
+
+[features]
+# C-ABI facade for Swift/iOS. Off by default and `#[cfg]`-gating the `ffi` module — so the plugin
+# and TUI, which link nano-dsp WITHOUT this feature, never compile the C-ABI code or carry the
+# `no_mangle` symbols. Enabled only for the .xcframework build (`--features ffi`).
+ffi = []
+
 [dependencies]
 # The only runtime dependency, and a deliberate one: `Measurements` holds the decaying peak as
 # lock-free atomics. `atomic_float` is platform-free pure Rust — it does NOT breach ADR 0008's

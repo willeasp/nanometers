@@ -19,8 +19,10 @@ pub mod loudness;
 /// 3-band spectral-color filterbank + mapping, and the pure scroll control law.
 pub mod waveform;
 
-// NOTE: the `ffi` module (C-ABI facade for iOS) is added in Task 5, not here — its file doesn't
-// exist yet, and declaring it now would either fail to compile or warn on an undeclared feature.
+/// C-ABI facade for the iOS app (ADR 0008 / 0009). Gated behind `ffi` so the plugin/TUI never
+/// compile it; cbindgen-equivalent header is hand-maintained at `include/nano_dsp.h` (Task 6).
+#[cfg(feature = "ffi")]
+pub mod ffi;
 
 /// One interleaved L/R audio frame. The wire format of the audio→GUI ring (ADR 0002).
 pub type StereoFrame = [f32; 2];
