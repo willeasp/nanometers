@@ -30,8 +30,9 @@ plus the few places we diverge from it or from ADR 0008, recorded explicitly bel
    sample-accurate `AVAudioPlayerNode` clock, so the close-up is a direct window into precomputed
    bins — no drift loop needed.
 3. **Monorepo, restructured to ADR 0008's end-state layout.** The app lives at `apps/nano-ios`.
-   Phase 0 both **carves `nano-dsp`** (ADR 0008 step 1) and **relocates the plugin** to
-   `apps/nano-plugin`, so shells are consistently under `apps/`.
+   Phase 0 lands the **`nano-dsp` carve** (ADR 0008 step 1 — already prototyped on a branch, see
+   "Existing carve" under Workspace shape) and **relocates the plugin** to `apps/nano-plugin`, so
+   shells are consistently under `apps/`.
 4. **Scope: playable core + the full close-up/short-term-LUFS soul features, local files only.**
    Cloud/multi-source is deferred to a v2 plan (see Scope).
 
@@ -73,6 +74,21 @@ nanometers/                  (repo root — cargo workspace)
 not mandate a folder. The plugin's regression gate (`./build.sh` + `auval -v`) is unchanged in
 *behavior*; only paths move.
 
+**Existing carve — Phase 0 lands a branch, it doesn't cut from scratch.** A complete, tested
+`nano-dsp` carve already exists on branch `origin/claude/dev-player-iphone-audio-0C2dx` (commit
+`6e6e538`, "Carve nano-dsp: the platform-free domain core — ADR 0008 step 1"). It creates
+`crates/nano-dsp/` as drawn above — moving the BS.1770 loudness, the base-bin envelope store, the
+3-band color filterbank, the value types (`StereoFrame` / `FrameContext` / `Measurements` / `Rect`)
+and the scroll control law (`consume_samples` / `choose_px_per_frame`) down, with the plugin
+re-exporting them under their old paths — and it lands green (29 + 1 + 10 = 40 tests). It is **not on
+`main`**, and was branched before `main`'s render-thread / swapchain divergence (which also edited
+the waveform/module code), so Phase 0 is *rebase that carve onto current `main` and resolve the
+module-side conflicts*, not carve from zero. This de-risks Phase 0 sharply — the cut is proven and
+the iOS-used math (`band_color`, BS.1770) is already cleanly separable. The carve does **not** add
+the C-ABI FFI facade, the `apps/nano-plugin` relocation, or `apps/nano-ios`; those stay net-new
+here. (Note the carve pulls the whole shared domain down, including the scroll law — consistent with
+decision 2, which drops it from *iOS's use*, not from the crate.)
+
 ## The `nano-dsp` FFI seam
 
 Three things cross the Rust↔Swift boundary. Everything else in the app is pure Swift. Exact
@@ -89,11 +105,11 @@ byte-packing and naming are an implementation-plan detail; these are the shapes:
 Packaging: a Rust `staticlib` + a `cbindgen`-generated C header, built for `aarch64-apple-ios`
 and `aarch64-apple-ios-sim`, assembled into a single `.xcframework` the Swift project links.
 
-**Color reconciliation:** the handoff specifies 4 discrete band hexes
-(`#FF6B6B`/`#57D986`/`#6AA6FF`/`#EEF1F6`); `nano-dsp`'s `band_color` produces a richer
-*continuous* desaturated hue (ADR 0001). We use `nano-dsp`'s continuous color (the actual
-decision, byte-identical to the plugin), treating the four hexes as anchor points — which is why
-`analyze` returns a color rather than a band index.
+**Color reconciliation:** the handoff specifies four discrete band colors (bass / mid / treble /
+mix; hexes in §01); `nano-dsp`'s `band_color` instead produces a richer *continuous* desaturated
+hue (ADR 0001). We use `nano-dsp`'s continuous color (byte-identical to the plugin), treating the
+four handoff hexes as anchor points — which is why `analyze` returns a color rather than a band
+index.
 
 ## Swift app architecture (`apps/nano-ios`)
 
@@ -105,8 +121,8 @@ is testable in isolation.
   repeat / nowPlayingContext`. **`progress` and the close-up's `centerTime` derive from the player
   node sample time** (`playerTime` / `lastRenderTime`), never a wall-clock timer. Drives
   `MPNowPlayingInfoCenter` + `MPRemoteCommandCenter`; configures `AVAudioSession(.playback)` and
-  the Audio background mode. Installs the main-mixer tap feeding the live LUFS meter. Behaviors per
-  handoff §03D: prev restarts if >5% in else previous; next at end-of-queue stops unless repeat.
+  the Audio background mode. Installs the main-mixer tap feeding the live LUFS meter. Transport
+  rules (prev-restart threshold, end-of-queue stop-unless-repeat) per handoff §03D.
 - **`LibraryStore`** — SwiftData `ModelContainer` with `Track` and `Playlist` (per handoff §04).
   Playlist ordering uses an explicit `[UUID]` order array (SwiftData relationships aren't reliably
   ordered). v1 import is `UIDocumentPickerViewController(.audio)` + security-scoped bookmarks, plus
@@ -117,19 +133,21 @@ is testable in isolation.
   hash). The same pass yields `integratedLUFS` and the artwork tint. **One decode per file, ever.**
 - **`WaveformCache`** — disk store keyed by content hash; holds compact packed bins. Survives even
   when a (future cloud) file isn't resident.
-- **Renderers (SwiftUI `Canvas`), all consuming the same cached `[Bin]`:**
-  - `OverviewWaveform` — ~150 bars; played full color, upcoming at 20% alpha; 2pt playhead with
-    glow; whole strip scrubs → `engine.seek`; floating LUFS badge top-right; 62pt in Now Playing.
-  - `CloseUpWaveform` — `TimelineView(.animation)` / `CADisplayLink`; windows the cached bins
-    (~9s across, ~7 bars/sec) around `centerTime`; fixed center playhead with cap dots; played side
-    42% alpha, upcoming full; edge fade ≈14% of width. No live audio path.
-  - `MiniWave` — tiny static variant for rows / mini player.
-  - `LufsBadge` — formats short-term `S` (`@Observable`, throttled ~10 Hz from the tap) and the
-    static integrated value for rows.
+- **Renderers (SwiftUI `Canvas`), all consuming the same cached `[Bin]`** — dimensions, alphas,
+  and bar geometry per handoff §02 / §05 (not restated here); the architecture-relevant behavior:
+  - `OverviewWaveform` — full-song scrubber; the whole strip is the scrub hit-target →
+    `engine.seek`; composes the floating `LufsBadge` at top-right. Played-vs-upcoming styling per §05.
+  - `CloseUpWaveform` — `TimelineView(.animation)` / `CADisplayLink` windowing the cached bins
+    around `centerTime` (derived from the player-node sample time, decision 2); fixed center
+    playhead. **No live audio path** — it's a moving window over precomputed bins, not a meter. Look
+    per §05.
+  - `MiniWave` — tiny static variant for rows / mini player (§02).
+  - `LufsBadge` — formats the live short-term `S` (`@Observable`, throttled from the tap per §05)
+    and the static integrated value for rows.
 - **Navigation / chrome** — `RootTabView` with the **custom glass tab bar** overlaid (system tab
-  bar hidden), order fixed `[.library, .playlists, .search]`; `MiniPlayer` docked above it;
-  `NowPlaying` presented full-screen with **`matchedGeometryEffect`** morphing the 44pt mini
-  artwork to the hero. Tab bar hides while Now Playing is up.
+  bar hidden), tab order locked per handoff §03 (`[.library, .playlists, .search]`); `MiniPlayer`
+  docked above it; `NowPlaying` presented full-screen with **`matchedGeometryEffect`** morphing the
+  mini artwork to the hero (§02). Tab bar hides while Now Playing is up.
 - **`Theme`** — `Color`/font tokens straight from handoff §01 (`.continuous` radii, SF Pro + SF
   Mono with `.monospacedDigit()` for all numerics, system materials for glass). **`@AppStorage`**
   holds `zoomWave / showWave / spectrum` — the single source of truth Now Playing reads; toggled
@@ -137,9 +155,9 @@ is testable in isolation.
 
 ### Why native rendering, not nano-render (for the ADR amendment)
 
-The reusable IP for the waveforms lives in `nano-dsp` (band-split, color, the scroll control law),
-not `nano-render` (wgpu draw calls + layout). For a *player*, the scroll control law isn't needed
-(decision 2). What remains in `nano-render` is GPU plumbing for what amounts to a few hundred
+The reusable IP for the waveforms lives in `nano-dsp` (band-split, color, and — though a file player
+doesn't need it, decision 2 — the scroll control law), not `nano-render` (wgpu draw calls +
+layout). What remains in `nano-render` is GPU plumbing for what amounts to a few hundred
 rounded rects — cheap to express in `Canvas`, expensive to reach via a wgpu/Metal/Xcode
 cross-build. Reusing `nano-render` would also still leave us writing `Canvas` for the overview
 (handoff says build it natively) and the mini waveforms (can't host a Metal layer per row) — i.e.
@@ -151,7 +169,8 @@ which is the point at which linking `nano-render` would actually pay for itself.
 
 **In this plan (playable core + soul features, local files only):**
 
-- Phase 0 — workspace relocation + `nano-dsp` carve + FFI `.xcframework` + ADR amendment.
+- Phase 0 — rebase the existing `nano-dsp` carve onto current `main` (resolve module-side
+  conflicts) + relocate the plugin to `apps/nano-plugin` + C-ABI FFI `.xcframework` + ADR 0009.
 - Phase 1 — shell: project, `Theme`, `RootTabView` + glass tab bar, SwiftData models,
   document-picker import + demo tracks, Library / Playlists / Detail / Search with `NMRow`.
 - Phase 2 — local playback: `AudioEngine`, transport, queue/context, sample-time progress,
@@ -189,14 +208,17 @@ iOS 17+ (SwiftData).
 3. **Color reconciliation** (handoff 4-discrete vs `nano-dsp` continuous) — resolved: use
    `nano-dsp`'s continuous color.
 4. **Sample-time → `progress` accuracy across seeks** — derive from `playerTime`; well-trodden.
-5. **Keeping the plugin green through the relocation+carve** — mechanical path edits; `./build.sh`
-   + `auval` is the verifiable gate at the end of Phase 0.
+5. **Keeping the plugin green through the relocation+carve** — the carve is already proven green on
+   its branch (40 tests); the residual risk is rebasing it past `main`'s module-side divergence plus
+   the path edits for the `apps/` move. `./build.sh` + `auval` is the verifiable gate at the end of
+   Phase 0.
 
 ## Open implementation-plan details (not blockers)
 
-- Exact FFI byte layout / error handling; whether the streaming meter is one struct or per-channel.
+- Exact FFI byte layout, error/return-code strategy across the Rust↔Swift boundary, and whether the
+  streaming meter is one struct or per-channel.
 - Xcode project vs SwiftPM-only; how the `.xcframework` build is wired into the Rust toolchain
   (cargo target + a build script vs a manual step).
-- Bin density chosen for the cache (must satisfy the close-up's ~7 bars/sec while aggregating down
-  to ~150 for the overview) and the on-disk packed format.
+- Bin density chosen for the cache (must satisfy the close-up's bar density while aggregating down
+  to the overview's bar count — both per handoff §05) and the on-disk packed format.
 - Exact title/wording of the new `0009` ADR (decision is pinned; phrasing is open).
