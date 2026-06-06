@@ -67,16 +67,15 @@ cargo run --bin nanometers -- --audio-layout 2 \
 
 ## Architecture quick-tour
 
-Two threads, one ring:
+Three threads, one ring:
 
 - **Audio thread**: `Plugin::process` pushes interleaved `[L, R]` samples into an `rtrb::Producer<StereoFrame>` via wait-free `push`. Also computes a decaying peak per channel and stores it in `AtomicF32`s.
-- **GUI thread**: each `on_frame` drains the SPSC ring into a 4096-sample local ring (per channel), linearises it into contiguous scratch arrays, uploads to per-channel `vertex_buffer`s, and renders.
+- **Main / event thread**: baseview's run loop. Handles window events (resize, input) and forwards them to Modules; `RenderWindow::on_frame` is a **no-op** (it does NOT render). It owns no GPU state.
+- **Render thread**: `editor.rs::run_render_loop` owns the wgpu device/queue/surface and the `Vec<Box<dyn Module + Send>>`, and loops `drain ring → update Modules → acquire → render → present`. The blocking `get_current_texture()` (Fifo + `desired_maximum_frame_latency=2`) is the clock — it stalls until a drawable frees at vblank, so the loop self-paces to the display **independent of the host's main loop**. This is what makes the scroll smooth in every DAW including FL Studio (which starves the main run loop). See **ADR 0008** — and don't reintroduce a display-link/`on_frame`-driven render path; that was the whole problem.
 
-The SPSC `Consumer` lives behind `Mutex<Consumer>` in `Shared` only because `rtrb::Consumer` is `!Sync`. The audio thread NEVER touches that mutex, so it's effectively uncontended — `try_lock` always succeeds.
+The SPSC `Consumer` lives behind `Mutex<Consumer>` in `Shared` only because `rtrb::Consumer` is `!Sync`. The render thread is its sole consumer, so it's effectively uncontended — `try_lock` always succeeds. Teardown is the crash-prone seam: a per-instance `RenderControl` stops+joins the render thread in `EditorHandle::drop` BEFORE `window.close()` frees the view (the thread's `Surface` references the view's `CAMetalLayer`).
 
-Per-channel `bind_group`s for the waveform renderer are deliberate: a previous version reused one uniform buffer and overwrote it between L and R draws, which doesn't work because `queue.write_buffer` is scheduled before the next submit, not interleaved with encoded commands. Both draws ended up reading the second write. Single line where two should be. See `feedback_wgpu_uniform_race` if needed.
-
-This describes the code as it stands today (a single renderer). The in-progress rearchitecture into a multi-Module host — each Module owning its pipelines, the audio→GUI seam carrying one pushed sample stream — is designed in [`docs/adr/`](docs/adr/) (0002–0004), not here.
+The multi-Module host (each Module owning its pipelines; the host draining one ring and fanning a `FrameContext` to each) is built — designed in [`docs/adr/`](docs/adr/) 0002–0004. Per-channel waveform draws used to hit a `queue.write_buffer`-vs-submit ordering trap (one uniform buffer overwritten between L and R draws); see `feedback_wgpu_uniform_race` if you touch that.
 
 ## Roadmap & architecture decisions
 

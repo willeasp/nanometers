@@ -1,5 +1,9 @@
 # Waveform renders as a scrolling min/max contour, not per-column bars
 
+> Update: the scroll *timing* is settled by [ADR 0008](0008-render-thread-swapchain-paced.md). The
+> editor renders on a swapchain-paced thread (one vblank-paced present per frame), so the waveform is
+> always fixed-px — the host-cadence detector and time-based scroll path once layered here are gone.
+
 The Waveform Module draws its amplitude envelope as a filled **min/max contour** per channel — a
 triangle strip spanning the channel's max-curve (top) and min-curve (bottom), the silhouette a
 continuous sloped polyline — and **scrolls** newest-sample-right. An optional brighter stroke traces
