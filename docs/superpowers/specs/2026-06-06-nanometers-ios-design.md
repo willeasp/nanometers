@@ -24,9 +24,9 @@ plus the few places we diverge from it or from ADR 0008, recorded explicitly bel
    waveform rendering natively in SwiftUI. Link the Rust **`nano-dsp`** crate (band-split +
    BS.1770) via a C-ABI staticlib. Do **not** reuse `nano-render` (the wgpu renderers) on iOS.
 2. **`nano-dsp`'s role on iOS is the pure math only** — `(peak, color)` binning and BS.1770
-   loudness. The **scroll control law is deliberately not ported**: the reservoir / time-cursor /
-   resync machinery exists to reconcile live, bursty audio-block arrival against an independent
-   render clock (the *plugin's* problem). A file player owns the whole decoded file and a
+   loudness. The **scroll control law is deliberately not ported**: the reservoir control loop
+   (`consume_samples` / `choose_px_per_frame`) exists to reconcile live, bursty audio-block arrival
+   against an independent render clock (the *plugin's* problem). A file player owns the whole decoded file and a
    sample-accurate `AVAudioPlayerNode` clock, so the close-up is a direct window into precomputed
    bins — no drift loop needed.
 3. **Monorepo, restructured to ADR 0008's end-state layout.** The app lives at `apps/nano-ios`.
@@ -89,13 +89,45 @@ and the scroll control law (`consume_samples` / `choose_px_per_frame`) down, wit
 re-exporting them under their old paths — and it lands green (29 + 1 + 10 = 40 tests). It is **not on
 `main`**, and was branched before two things now on `main`: the render-thread / swapchain
 divergence (which edited the waveform/module code) and the `nanoplayer` TUI (`d3da50b`), which
-reuses the very `LoudnessDsp` / `Filterbank` symbols the carve moves. So Phase 0 is *rebase the
-carve onto current `main`, then re-point both the plugin and the extracted TUI at `nano-dsp`*, not
-carve from zero. This de-risks Phase 0 sharply — the cut is proven and
-the iOS-used math (`band_color`, BS.1770) is already cleanly separable. The carve does **not** add
-the C-ABI FFI facade, the `apps/nano-plugin` relocation, or `apps/nano-ios`; those stay net-new
-here. (Note the carve pulls the whole shared domain down, including the scroll law — consistent with
-decision 2, which drops it from *iOS's use*, not from the crate.)
+reuses the very `LoudnessDsp` / `Filterbank` symbols the carve moves — so it can't be blind-replayed
+onto current `main`. It still de-risks Phase 0 sharply (the cut is proven; the iOS-used math —
+`band_color`, BS.1770 — is already cleanly separable); the landing method and its small, *known*
+conflict surface are spelled out in "Landing the carve on current `main`" below. The carve does
+**not** add the C-ABI FFI facade, the `apps/nano-plugin` relocation, or `apps/nano-ios`; those stay
+net-new here. (Note the carve pulls the whole shared domain down, including the scroll law —
+consistent with decision 2, which drops it from *iOS's use*, not from the crate.)
+
+### Landing the carve on current `main` — the Phase 0 method
+
+The carve commit can't be `git rebase`d onto current `main` cleanly: its edits to the module files
+collide with `main`'s later refactor. So treat `6e6e538` as the **proven recipe** — the cut list,
+the `nano-dsp` `Cargo.toml` / `lib.rs`, and the `pure_core_standalone.rs` renderer-independence
+guard test — and *re-derive* it on top of `main`. Verified against the two trees, the conflict
+surface is bounded:
+
+- **Moves clean (`git mv`, no content conflict):** `loudness.rs`, `waveform/color.rs`,
+  `waveform/store.rs`. `main` never touched these since the carve's base, so the verbatim renames
+  apply as-is — this is the bulk of the DSP.
+- **Re-extract by hand — the only real merge — in three files both sides edited:** `lib.rs`
+  (`StereoFrame`), `module/mod.rs` (`FrameContext` / `Measurements` / `Rect`), and `waveform/mod.rs`
+  (the scroll law). Take `main`'s *current* versions. The scroll-law symbols the carve lifts —
+  `consume_samples`, `choose_px_per_frame`, the reservoir loop — are all still on `main`; only the
+  old `time_cursor` / TIME-mode path is already gone (deleted in `main`'s waveform refactor), so
+  there's *less* to lift down, not a conflict to resolve.
+- **Plugin compiles unchanged via re-exports.** As the carve does, the plugin re-exports the moved
+  items under their old paths, so its internal users — `dev.rs`, `editor.rs`, `oscilloscope.rs` —
+  need no edits; they travel with the plugin to `apps/nano-plugin`.
+- **The TUI is the lone out-of-crate re-point.** `nanoplayer.rs` leaves the plugin crate, so it
+  can't ride the re-exports. Its three DSP imports swap 1:1 — names unchanged, only the crate root:
+  `nanometers::{StereoFrame, loudness::{Channels, LoudnessDsp}, module::waveform::color::{Filterbank, band_color}}`
+  → `nano_dsp::{…}`. `NANOPLAYER_NOTES.md` travels with it.
+
+Order, each step compiling and independently revertable: **(1)** re-derive `crates/nano-dsp` on
+`main` + plugin re-exports → whole workspace green (`cargo test` + `./build.sh` / `auval`); **(2)**
+`git mv nanometers → apps/nano-plugin`, fix paths + `build.sh`; **(3)** extract
+`nanoplayer.rs → apps/nano-tui` linking `nano-dsp`, drop the `nanoplayer` feature gate, `nano-tui`
+builds/runs; **(4)** add `apps/nano-ios` + the FFI facade. The carve's own `pure_core_standalone.rs`
+test rides along from step 1 as the standing guard that the cut stays renderer-independent.
 
 ## The `nano-dsp` FFI seam
 
@@ -177,10 +209,10 @@ which is the point at which linking `nano-render` would actually pay for itself.
 
 **In this plan (playable core + soul features, local files only):**
 
-- Phase 0 — workspace restructure: rebase the existing `nano-dsp` carve onto current `main`
-  (resolving the module-side + `nanoplayer` conflicts), relocate the plugin to `apps/nano-plugin`
-  and the TUI nanoplayer to `apps/nano-tui` (both re-pointed at `nano-dsp`), build the C-ABI FFI
-  `.xcframework`, and write ADR 0009.
+- Phase 0 — workspace restructure: re-derive the existing `nano-dsp` carve onto current `main` (the
+  bounded method is in "Landing the carve"), relocate the plugin to `apps/nano-plugin` and the TUI
+  nanoplayer to `apps/nano-tui` (both re-pointed at `nano-dsp`), build the C-ABI FFI `.xcframework`,
+  and write ADR 0009.
 - Phase 1 — shell: project, `Theme`, `RootTabView` + glass tab bar, SwiftData models,
   document-picker import + demo tracks, Library / Playlists / Detail / Search with `NMRow`.
 - Phase 2 — local playback: `AudioEngine`, transport, queue/context, sample-time progress,
@@ -221,10 +253,12 @@ iOS 17+ (SwiftData).
 3. **Color reconciliation** (handoff 4-discrete vs `nano-dsp` continuous) — resolved: use
    `nano-dsp`'s continuous color.
 4. **Sample-time → `progress` accuracy across seeks** — derive from `playerTime`; well-trodden.
-5. **Keeping the plugin + TUI green through the restructure** — the carve is already proven green on
-   its branch (40 tests); the residual risk is rebasing it past `main`'s module-side divergence and
-   the new `nanoplayer` TUI, then re-pointing both shells at `nano-dsp` plus the `apps/` path edits.
-   Gates at the end of Phase 0: `./build.sh` + `auval` (plugin) and a `nano-tui` build/run (TUI).
+5. **Keeping the plugin + TUI green through the restructure** — the carve is proven green on its
+   branch (40 tests) and the conflict surface is now *mapped, not guessed* (see "Landing the carve"):
+   three pure files move clean, `waveform/mod.rs` is the only real merge (and its scroll-law symbols
+   all survive on `main`), and `nanoplayer.rs` is the lone out-of-crate re-point. Re-deriving from
+   the recipe rather than blind-replaying keeps every step revertable. Gates at the end of Phase 0:
+   `./build.sh` + `auval` (plugin) and a `nano-tui` build/run (TUI).
 
 ## Open implementation-plan details (not blockers)
 
