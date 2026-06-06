@@ -1455,6 +1455,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "nano-tui"
+version = "0.0.1"
+dependencies = [
+ "cpal",
+ "crossterm",
+ "image",
+ "libc",
+ "nano-dsp",
+ "rtrb",
+ "symphonia",
+]
+
+[[package]]
 name = "nanometers"
 version = "0.0.1"
 dependencies = [
@@ -1463,10 +1476,7 @@ dependencies = [
  "bytemuck",
  "cpal",
  "crossbeam",
- "crossterm",
  "ebur128",
- "image",
- "libc",
  "log",
  "nano-dsp",
  "nih_plug",

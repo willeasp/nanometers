@@ -24,9 +24,6 @@ use wgpu::util::DeviceExt;
 use super::{EventStatus, FrameContext, Module, Rect};
 // The Waveform's GPU-free core now lives in `nano-dsp` (ADR 0008): the base-bin store, the spectral
 // color mapping, and the scroll control law. This module is the thin wgpu wrapper over them.
-// Re-export `color` under the old path so `nanoplayer.rs` (and any other consumer of
-// `nanometers::module::waveform::color`) keeps compiling unchanged.
-pub use nano_dsp::waveform::color;
 use nano_dsp::waveform::color::band_color;
 use nano_dsp::waveform::store::{self, WaveStore};
 use nano_dsp::waveform::{choose_px_per_frame, consume_samples};

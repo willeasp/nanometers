@@ -6,8 +6,8 @@
 //! If yes, this is the seed of a shared-DSP crate the monorepo idea rests on.
 //!
 //! What's reused from the plugin, verbatim (the thesis):
-//!   * `nanometers::loudness::LoudnessDsp` — momentary/short/integrated LUFS.
-//!   * `nanometers::module::waveform::color::{Filterbank, band_color}` — the spectral coloring
+//!   * `nano_dsp::loudness::LoudnessDsp` — momentary/short/integrated LUFS.
+//!   * `nano_dsp::waveform::color::{Filterbank, band_color}` — the spectral coloring
 //!     (low→red, mid→green, high→blue; dominance drives saturation), same crossovers + white-mix.
 //! Both are fed frame-by-frame off the same `rtrb` ring the wgpu GUI drains.
 //!
@@ -41,9 +41,9 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::{MetadataOptions, MetadataRevision, StandardTagKey, StandardVisualKey};
 use symphonia::core::probe::{Hint, ProbeResult, ProbedMetadata};
 
-use nanometers::StereoFrame;
-use nanometers::loudness::{Channels, LoudnessDsp};
-use nanometers::module::waveform::color::{Filterbank, band_color};
+use nano_dsp::StereoFrame;
+use nano_dsp::loudness::{Channels, LoudnessDsp};
+use nano_dsp::waveform::color::{Filterbank, band_color};
 
 /// Seconds of audio shown across the full waveform width (the scroll window).
 const WINDOW_SECS: f32 = 4.0;
