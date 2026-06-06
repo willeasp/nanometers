@@ -110,21 +110,6 @@ impl<'a> Window<'a> {
         self.window.focus()
     }
 
-    /// Seconds between the previous frame's predicted on-screen instant and this one's — the
-    /// PRESENTATION clock (macOS display-link `targetTimestamp` delta). Prefer this over wall-clock
-    /// `Instant` timing for scroll/animation: a host that over-pumps the render callback (FL Studio)
-    /// makes wall-clock intervals collapse to sub-ms, but the present clock stays at vblank cadence
-    /// because each over-pumped render is queued for a distinct vblank. `0.0` when unknown / first
-    /// frame / on platforms without a presentation clock.
-    #[cfg(target_os = "macos")]
-    pub fn frame_present_delta(&self) -> f64 {
-        self.window.frame_present_delta()
-    }
-    #[cfg(not(target_os = "macos"))]
-    pub fn frame_present_delta(&self) -> f64 {
-        0.0
-    }
-
     /// If provided, then an OpenGL context will be created for this window. You'll be able to
     /// access this context through [crate::Window::gl_context].
     #[cfg(feature = "opengl")]

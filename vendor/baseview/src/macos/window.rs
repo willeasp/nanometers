@@ -75,23 +75,11 @@ pub(super) struct WindowInner {
     /// Our subclassed NSView
     ns_view: id,
 
-    /// Seconds between the previous frame's predicted on-screen instant and this one's — the display
-    /// link's `targetTimestamp` delta, set in `display_link_fired` just before `on_frame`. This is the
-    /// PRESENTATION clock: unlike wall-clock callback timing it never collapses to sub-ms under a host
-    /// (e.g. FL) that over-pumps our render callback, because each over-pumped render is queued for a
-    /// distinct future vblank. `0.0` until the second frame / on the timer fallback. See `WindowState`.
-    present_delta: Cell<f64>,
-
     #[cfg(feature = "opengl")]
     pub(super) gl_context: Option<GlContext>,
 }
 
 impl WindowInner {
-    /// Seconds between the previous frame's predicted on-screen instant and this one's. See the
-    /// field doc on `present_delta`. `0.0` when unknown (first frame / timer fallback).
-    pub(super) fn present_delta(&self) -> f64 {
-        self.present_delta.get()
-    }
 
     pub(super) fn close(&self) {
         if self.open.get() {
@@ -192,7 +180,6 @@ impl<'a> Window<'a> {
                 Some(handle.ns_window.cast())
             },
             ns_view,
-            present_delta: Cell::new(0.0),
 
             #[cfg(feature = "opengl")]
             gl_context: options
@@ -269,7 +256,6 @@ impl<'a> Window<'a> {
             ns_window: Cell::new(Some(ns_window)),
             parent_ns_window: None,
             ns_view,
-            present_delta: Cell::new(0.0),
 
             #[cfg(feature = "opengl")]
             gl_context: options
@@ -308,9 +294,6 @@ impl<'a> Window<'a> {
             display_link: Cell::new(None),
             window_info: Cell::new(window_info),
             deferred_events: RefCell::default(),
-            last_target_ts: Cell::new(0.0),
-            log_frame_ts: nano_debug_enabled(),
-            target_log: RefCell::new(TargetTsLog::new()),
         });
 
         let window_state_ptr = Rc::into_raw(Rc::clone(&window_state));
@@ -381,10 +364,6 @@ impl<'a> Window<'a> {
         todo!()
     }
 
-    pub fn frame_present_delta(&self) -> f64 {
-        self.inner.present_delta()
-    }
-
     #[cfg(feature = "opengl")]
     pub fn gl_context(&self) -> Option<&GlContext> {
         self.inner.gl_context.as_ref()
@@ -401,72 +380,6 @@ impl<'a> Window<'a> {
     }
 }
 
-/// DIAGNOSTIC ONLY (gated by `~/.nano-debug`): accumulates the display link's `targetTimestamp`
-/// deltas — the instant each frame is predicted to be ON SCREEN — and logs mean/min/max every 240
-/// frames, mirroring the editor's `[nano-frames]` wall-clock line. Comparing the two distributions
-/// answers the open question: does a lumpy host (FL) pollute our display-link CLOCK, or only the
-/// on-screen presentation? Costs nothing when the marker is absent (`WindowState::log_frame_ts`).
-struct TargetTsLog {
-    last: f64,
-    count: u32,
-    sum_ms: f64,
-    min_ms: f64,
-    max_ms: f64,
-}
-
-impl TargetTsLog {
-    fn new() -> Self {
-        Self { last: 0.0, count: 0, sum_ms: 0.0, min_ms: f64::MAX, max_ms: 0.0 }
-    }
-
-    fn tick(&mut self, target: f64) {
-        if self.last > 0.0 {
-            let dt = (target - self.last) * 1000.0;
-            self.count += 1;
-            self.sum_ms += dt;
-            self.min_ms = self.min_ms.min(dt);
-            self.max_ms = self.max_ms.max(dt);
-            if self.count >= 240 {
-                let mean = self.sum_ms / self.count as f64;
-                diag_log(&format!(
-                    "[nano-target] {} frames: mean {:.2} ms ({:.1} fps), min {:.2}, max {:.2}",
-                    self.count,
-                    mean,
-                    1000.0 / mean,
-                    self.min_ms,
-                    self.max_ms
-                ));
-                self.count = 0;
-                self.sum_ms = 0.0;
-                self.min_ms = f64::MAX;
-                self.max_ms = 0.0;
-            }
-        }
-        self.last = target;
-    }
-}
-
-/// `true` when the `~/.nano-debug` marker exists — checked ONCE at window construction. Mirrors the
-/// nanometers crate's `diag_enabled` (baseview can't reach it), kept dead-simple and self-contained.
-fn nano_debug_enabled() -> bool {
-    std::env::var_os("HOME")
-        .map(|h| std::path::Path::new(&h).join(".nano-debug").exists())
-        .unwrap_or(false)
-}
-
-/// Append a diagnostic line to `~/Library/Logs/nanometers.log` (the sandbox-allowed path) and
-/// stderr. Best-effort; mirrors the nanometers crate's `diag_log` so lines interleave in one file.
-fn diag_log(line: &str) {
-    eprintln!("{line}");
-    if let Some(home) = std::env::var_os("HOME") {
-        use std::io::Write;
-        let path = std::path::Path::new(&home).join("Library/Logs/nanometers.log");
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-            let _ = writeln!(f, "{line}");
-        }
-    }
-}
-
 pub(super) struct WindowState {
     pub(super) window_inner: WindowInner,
     window_handler: RefCell<Box<dyn WindowHandler>>,
@@ -480,15 +393,6 @@ pub(super) struct WindowState {
 
     /// Events that will be triggered at the end of `window_handler`'s borrow.
     deferred_events: RefCell<VecDeque<Event>>,
-
-    /// Previous frame's display-link `targetTimestamp` (seconds), to derive the present-time delta
-    /// stashed in `WindowInner::present_delta`. `0.0` until the first frame.
-    last_target_ts: Cell<f64>,
-
-    /// Diagnostics (gated by `~/.nano-debug`, checked once): log the display-link `targetTimestamp`
-    /// cadence to compare against the editor's wall-clock frame interval. See `TargetTsLog`.
-    log_frame_ts: bool,
-    target_log: RefCell<TargetTsLog>,
 }
 
 impl WindowState {
@@ -535,21 +439,6 @@ impl WindowState {
         let mut window_handler = self.window_handler.borrow_mut();
         window_handler.on_frame(&mut window);
         self.send_deferred_events(window_handler.as_mut());
-    }
-
-    /// Record this frame's display-link `targetTimestamp` (seconds, the predicted on-screen instant
-    /// of the upcoming frame) before driving `on_frame`. Stashes the delta since the previous frame
-    /// in `WindowInner::present_delta` (the presentation clock the handler reads), and — when the
-    /// `~/.nano-debug` diagnostics are on — also logs the cadence. Called once per display-link fire.
-    pub(super) fn record_present_time(&self, target: f64) {
-        let last = self.last_target_ts.get();
-        // Guard the first frame and any non-monotonic blip (clamp negatives/zero to "unknown").
-        let delta = if last > 0.0 && target > last { target - last } else { 0.0 };
-        self.window_inner.present_delta.set(delta);
-        self.last_target_ts.set(target);
-        if self.log_frame_ts {
-            self.target_log.borrow_mut().tick(target);
-        }
     }
 
     pub(super) fn keyboard_state(&self) -> &KeyboardState {

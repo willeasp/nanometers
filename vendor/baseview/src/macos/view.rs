@@ -238,14 +238,9 @@ unsafe fn create_view_class() -> &'static Class {
 }
 
 /// `- (void)displayLinkFired:(CADisplayLink *)sender` — the per-vsync callback for the AppKit
-/// display link. Drives exactly one frame, like the old timer callback did.
-extern "C" fn display_link_fired(this: &Object, _: Sel, sender: id) {
+/// display link. Drives exactly one frame (on_frame), like the old timer callback did.
+extern "C" fn display_link_fired(this: &Object, _: Sel, _sender: id) {
     let state = unsafe { WindowState::from_view(this) };
-    // Record when the upcoming frame is predicted to be ON SCREEN (`targetTimestamp`) before driving
-    // the frame, so the handler can advance scroll/animation on the presentation clock rather than
-    // wall-clock callback timing — see `Window::frame_present_delta`. One ObjC message per vsync.
-    let target: f64 = unsafe { msg_send![sender, targetTimestamp] };
-    state.record_present_time(target);
     state.trigger_frame();
 }
 
