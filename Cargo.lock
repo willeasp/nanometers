@@ -1447,6 +1447,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "nano-dsp"
+version = "0.0.1"
+dependencies = [
+ "atomic_float",
+ "ebur128",
+]
+
+[[package]]
 name = "nanometers"
 version = "0.0.1"
 dependencies = [
@@ -1460,6 +1468,7 @@ dependencies = [
  "image",
  "libc",
  "log",
+ "nano-dsp",
  "nih_plug",
  "pollster",
  "raw-window-handle 0.5.2",

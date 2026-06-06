@@ -39,6 +39,10 @@ rt-assert = ["nih_plug/assert_process_allocs"]
 [dependencies]
 nih_plug.workspace = true
 
+# The platform-free DSP/domain core (ADR 0008). The plugin re-exports its items under their old
+# paths so the rest of the crate is unchanged.
+nano-dsp = { path = "../crates/nano-dsp" }
+
 # Dev-player only. cpal pinned to nih-plug's version to avoid a duplicate native dependency.
 # Formats match what CLAUDE.md documents the dev-player accepts (mp3/flac/wav/aac); `pcm` is the
 # WAV sample codec, `isomp4` the AAC container. Dev-only, so binary size here doesn't matter.

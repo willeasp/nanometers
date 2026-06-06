@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["nanometers", "xtask"]
+members = ["crates/nano-dsp", "nanometers", "xtask"]
 default-members = ["nanometers"]
 
 [workspace.package]

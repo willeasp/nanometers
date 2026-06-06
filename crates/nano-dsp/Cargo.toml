@@ -1,0 +1,19 @@
+[package]
+name = "nano-dsp"
+version = "0.0.1"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Platform-free DSP/domain core for nanometers: envelope store, BS.1770 loudness, spectral color, and the audio→GUI value types. No wgpu, no plugin host, no windowing (ADR 0008)."
+
+[dependencies]
+# The only runtime dependency, and a deliberate one: `Measurements` holds the decaying peak as
+# lock-free atomics. `atomic_float` is platform-free pure Rust — it does NOT breach ADR 0008's
+# "no wgpu / no plugin host / no windowing" rule.
+atomic_float.workspace = true
+
+[dev-dependencies]
+# Reference BS.1770 implementation, used only as a conformance oracle for the loudness core
+# (ADR 0006). Never linked into anything that ships.
+ebur128 = "0.1.10"
