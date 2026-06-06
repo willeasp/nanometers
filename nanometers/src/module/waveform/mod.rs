@@ -489,7 +489,10 @@ impl WaveformModule {
                 on: crate::diag_enabled("NANO_DEBUG_SCROLL"),
                 ..Default::default()
             },
-            markers_enabled: crate::diag_enabled("NANO_DEBUG_MARKERS"),
+            // DEBUG BUILDS ONLY: `cfg!(debug_assertions)` is false in any --release build (the dev-player
+            // run with --release, and the shipped plugin via build.sh), so the rulers never appear there.
+            // In a debug build they're still opt-in via the marker/env so they don't clutter every run.
+            markers_enabled: cfg!(debug_assertions) && crate::diag_enabled("NANO_DEBUG_MARKERS"),
             marker_pipeline,
             marker_vbuf,
             marker_verts: Vec::with_capacity(2 * MARKER_MAX_TICKS * 6),
