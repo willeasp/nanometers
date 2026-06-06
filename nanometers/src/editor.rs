@@ -15,8 +15,10 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
+        mpsc::{Receiver, Sender},
     },
-    time::Instant,
+    thread::JoinHandle,
+    time::{Duration, Instant},
 };
 use wgpu::SurfaceTargetUnsafe;
 
@@ -132,6 +134,13 @@ impl Editor for NanometersEditor {
         let gui_context = Arc::clone(&context);
         let params = Arc::clone(&self.params);
         let shared = Arc::clone(&self.shared);
+        // Per-instance render-thread control, created here so it's fresh for every open and shared by
+        // exactly this editor's thread (set in the build closure) and its EditorHandle (Drop).
+        let render_ctl = Arc::new(RenderControl {
+            stop: AtomicBool::new(false),
+            join: Mutex::new(None),
+        });
+        let build_ctl = Arc::clone(&render_ctl);
 
         let window = baseview::Window::open_parented(
             &ParentWindowHandleAdapter(parent),
@@ -144,13 +153,14 @@ impl Editor for NanometersEditor {
                 ..Default::default()
             },
             move |window: &mut baseview::Window<'_>| -> RenderWindow {
-                RenderWindow::new(window, gui_context, params, shared, scaling.unwrap_or(1.0))
+                RenderWindow::new(window, gui_context, params, shared, build_ctl, scaling.unwrap_or(1.0))
             },
         );
 
         self.params.editor_state.open.store(true, Ordering::Release);
         Box::new(EditorHandle {
             state: Arc::clone(&self.params.editor_state),
+            render_ctl,
             window,
         })
     }
@@ -174,6 +184,7 @@ impl Editor for NanometersEditor {
 
 struct EditorHandle {
     state: Arc<EditorState>,
+    render_ctl: Arc<RenderControl>,
     window: WindowHandle,
 }
 
@@ -184,6 +195,15 @@ unsafe impl Send for EditorHandle {}
 impl Drop for EditorHandle {
     fn drop(&mut self) {
         self.state.open.store(false, Ordering::Release);
+        // Stop + join the render thread BEFORE closing the window. The thread owns the wgpu Surface,
+        // which references the NSView's CAMetalLayer; `window.close()` releases that view. If the
+        // thread outlived the view it would use-after-free on its next acquire — so it goes first.
+        // (Promptness is from the post-acquire stop-check in run_render_loop, NOT this store's
+        // ordering — `join` provides the happens-before for the surface dropping before view release.)
+        self.render_ctl.stop.store(true, Ordering::Release);
+        if let Some(handle) = self.render_ctl.join.lock().unwrap().take() {
+            let _ = handle.join();
+        }
         self.window.close();
     }
 }
@@ -192,34 +212,24 @@ impl Drop for EditorHandle {
 // Render window — owns wgpu, the per-frame display buffer, and the waveform renderer.
 // ────────────────────────────────────────────────────────────────────────────────────────
 
+/// Lifetime control for ONE editor instance's render thread. Per-instance (held by `EditorHandle` and
+/// shared with the thread), NOT per-plugin — so an overlapping reopen / second editor can't un-stop or
+/// orphan another instance's thread. `stop` breaks the loop; `join` holds the handle. `EditorHandle`
+/// stops + joins this BEFORE `window.close()` releases the NSView the thread's `Surface` references.
+struct RenderControl {
+    stop: AtomicBool,
+    join: Mutex<Option<JoinHandle<()>>>,
+}
+
+/// The baseview `WindowHandler` — but it does NOT render. Rendering runs on a dedicated thread
+/// (`run_render_loop`) paced by the swapchain's blocking acquire, so frame delivery is independent of
+/// the host pumping baseview's `on_frame` (FL Studio starves/over-pumps it). This struct only owns
+/// the main-thread side: it forwards resize events to the render thread. The GPU state, Modules, and
+/// per-frame work all live on the render thread (owned by `run_render_loop`).
 struct RenderWindow {
-    #[allow(dead_code)]
-    gui_context: Arc<dyn GuiContext>,
     params: Arc<NanometersParams>,
-    shared: Arc<Shared>,
-
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    surface: wgpu::Surface<'static>,
-    surface_config: wgpu::SurfaceConfiguration,
-
-    /// The hosted Modules, left→right — one per `layout` column, built from the persisted strip.
-    modules: Vec<Box<dyn Module>>,
-
-    /// The column geometry/metadata that `modules` mirrors (same length, same order). Drives the
-    /// per-column viewports each frame; reorder/resize (Phase E) mutates this and `EditorState`.
-    layout: Vec<Column>,
-
-    /// This frame's freshly drained samples, oldest→newest. GUI-thread-only and reused across
-    /// frames (cleared each frame), so its growth never touches the audio path.
-    new_samples: Vec<StereoFrame>,
-
-    /// Frame-cadence diagnostics (gated on `NANO_DEBUG_FRAMES`). The scroll can only be as smooth as
-    /// the frame delivery, so this measures the real `on_frame` interval — mean/min/max + implied
-    /// fps over a window — to tell a vsync-locked clock from baseview's ~66.7 Hz CFRunLoopTimer.
-    frame_dbg: FrameDebug,
-    /// on_frame-entry timestamp of the previous render → the clean frame interval passed to Modules.
-    last_frame_time: Option<Instant>,
+    /// Physical surface size → the render thread, which owns the surface and reconfigures it.
+    resize_tx: Sender<(u32, u32)>,
 }
 
 #[derive(Default)]
@@ -261,7 +271,7 @@ fn build_module(
     module_type: &str,
     device: &wgpu::Device,
     format: wgpu::TextureFormat,
-) -> Box<dyn Module> {
+) -> Box<dyn Module + Send> {
     use crate::layout::module_type as mt;
     match module_type {
         mt::WAVEFORM => Box::new(WaveformModule::new(device, format)),
@@ -277,28 +287,27 @@ impl RenderWindow {
         gui_context: Arc<dyn GuiContext>,
         params: Arc<NanometersParams>,
         shared: Arc<Shared>,
+        render_ctl: Arc<RenderControl>,
         scaling_factor: f32,
     ) -> Self {
+        let _ = gui_context; // the render thread doesn't need it (no param GUI yet)
         let target = baseview_window_to_surface_target(window);
         let (width, height) = scaled_size(params.editor_state.size(), scaling_factor);
-
-        pollster::block_on(Self::create(
-            target,
-            width,
-            height,
-            gui_context,
-            params,
-            shared,
-        ))
+        pollster::block_on(Self::create(target, width, height, params, shared, render_ctl))
     }
 
+    /// Create the GPU state and hand it to a dedicated RENDER THREAD, then return the lightweight
+    /// main-thread handler. The render thread (not baseview's `on_frame`) drives every frame, paced
+    /// by the swapchain — so a host that starves/over-pumps the main run loop (FL Studio) can't make
+    /// our frame delivery lumpy. The blocking `get_current_texture` is the clock; there is no display
+    /// link in our path.
     async fn create(
         target: SurfaceTargetUnsafe,
         width: u32,
         height: u32,
-        gui_context: Arc<dyn GuiContext>,
         params: Arc<NanometersParams>,
         shared: Arc<Shared>,
+        render_ctl: Arc<RenderControl>,
     ) -> Self {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let surface = unsafe { instance.create_surface_unsafe(target) }.unwrap();
@@ -325,145 +334,177 @@ impl RenderWindow {
             .expect("Failed to create wgpu device");
 
         let mut surface_config = surface.get_default_config(&adapter, width, height).unwrap();
-        // Pin vsync: `get_default_config` just takes `present_modes.first()`, which on Metal isn't
-        // guaranteed to be Fifo — Immediate/Mailbox would tear and waste GPU. Fifo is the vsync-
-        // locked mode every backend supports. (Frame *cadence* is still baseview's ~66.7 Hz
-        // CFRunLoopTimer, not vsync — that's the separate scroll-smoothness limit.)
+        // Fifo = vsync-locked present (Metal's default isn't guaranteed Fifo; Immediate/Mailbox tear).
         surface_config.present_mode = wgpu::PresentMode::Fifo;
+        // maximumDrawableCount = latency + 1 = 3 on Metal. The blocking acquire still paces the loop
+        // to vblank (it stalls once all drawables are in flight), but 3 drawables let the CPU and GPU
+        // PIPELINE — latency=1 (2 drawables) serializes them and starved us below the refresh rate
+        // (~95 fps on a 120 Hz panel → missed vblanks → judder). One extra frame of latency (~8 ms)
+        // is invisible on a meter; sustaining the full refresh is what matters.
+        surface_config.desired_maximum_frame_latency = 2;
         surface.configure(&device, &surface_config);
 
-        // Build the Module strip from the persisted layout (ADR 0003). Order and count mirror the
-        // layout, so `modules` and `layout` zip 1:1 with the per-column viewports.
+        // Build the Module strip from the persisted layout (ADR 0003), 1:1 with the columns.
         let layout = params.editor_state.layout_snapshot();
-        let modules: Vec<Box<dyn Module>> = layout
+        let modules: Vec<Box<dyn Module + Send>> = layout
             .iter()
             .map(|c| build_module(&c.module_type, &device, surface_config.format))
             .collect();
 
-        Self {
-            gui_context,
-            params,
-            shared,
-            device,
-            queue,
-            surface,
-            surface_config,
-            modules,
-            layout,
-            new_samples: Vec::with_capacity(4096),
-            frame_dbg: FrameDebug {
-                enabled: crate::diag_enabled("NANO_DEBUG_FRAMES"),
-                ..Default::default()
-            },
-            last_frame_time: None,
-        }
-    }
+        let (resize_tx, resize_rx) = std::sync::mpsc::channel::<(u32, u32)>();
+        let render_shared = Arc::clone(&shared);
+        let loop_ctl = Arc::clone(&render_ctl);
+        let handle = std::thread::Builder::new()
+            .name("nanometers-render".into())
+            .spawn(move || {
+                run_render_loop(
+                    device,
+                    queue,
+                    surface,
+                    surface_config,
+                    modules,
+                    layout,
+                    render_shared,
+                    loop_ctl,
+                    resize_rx,
+                );
+            })
+            .expect("spawn nanometers render thread");
+        *render_ctl.join.lock().unwrap() = Some(handle);
 
-    fn reconfigure_surface(&mut self) {
-        self.surface.configure(&self.device, &self.surface_config);
-    }
-
-    /// Drain whatever the audio thread produced since last frame into `new_samples` (cleared
-    /// first), oldest→newest. Wait-free pops; stop when the ring is empty. The lock is
-    /// uncontended — only this thread ever touches `samples_rx`; the Mutex is there because
-    /// rtrb::Consumer is !Sync, not to coordinate threads.
-    fn drain_audio(&mut self) {
-        self.new_samples.clear();
-        let Ok(mut rx) = self.shared.samples_rx.try_lock() else {
-            return;
-        };
-        while let Ok(frame) = rx.pop() {
-            self.new_samples.push(frame);
-        }
+        Self { params, resize_tx }
     }
 }
 
-impl baseview::WindowHandler for RenderWindow {
-    fn on_frame(&mut self, window: &mut baseview::Window) {
-        // Time the frame interval HERE, at on_frame entry — before the Fifo-present block — so it's
-        // the clean cadence signal. (Sampling the clock in a Module's prepare, after the variable
-        // present wait, adds block-jitter that falsely reads as sub-vsync frames.)
-        let now = Instant::now();
-        self.frame_dbg.tick(now);
-        let frame_dt = self
-            .last_frame_time
-            .map(|t| (now - t).as_secs_f64())
-            .unwrap_or(0.0);
-        self.last_frame_time = Some(now);
-        // The presentation clock — when this frame is predicted to be ON SCREEN, vs `frame_dt`'s
-        // when-the-callback-fired. Modules advance time-based scroll on this (steady at vblank
-        // cadence even when a host over-pumps the callback); detection still uses `frame_dt`.
-        let present_dt = window.frame_present_delta();
-        self.drain_audio();
+/// The dedicated render thread: `drain → update → acquire → render → present`, forever, until
+/// `shared.render_stop`. The `get_current_texture` acquire BLOCKS to vblank (Fifo + 2 drawables),
+/// so the loop is self-pacing — no display link, no main-thread dependency. Owns all the GPU state
+/// and the Modules; the main thread only feeds it resizes via `resize_rx`.
+#[allow(clippy::too_many_arguments)]
+fn run_render_loop(
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    surface: wgpu::Surface<'static>,
+    mut surface_config: wgpu::SurfaceConfiguration,
+    mut modules: Vec<Box<dyn Module + Send>>,
+    layout: Vec<Column>,
+    shared: Arc<Shared>,
+    ctl: Arc<RenderControl>,
+    resize_rx: Receiver<(u32, u32)>,
+) {
+    /// Frame-interval clamp handed to Modules: the first iteration and every post-occlusion-sleep
+    /// iteration have a large real interval; cap it so a Module integrating `dt` can't lurch.
+    const MAX_FRAME_DT: f64 = 0.1;
 
-        // Phase 1: fan this frame's samples out to every Module to fold + upload.
-        let sample_rate = self.shared.sample_rate.load(Ordering::Relaxed);
-        let mono = self.shared.mono.load(Ordering::Relaxed);
+    let mut new_samples: Vec<StereoFrame> = Vec::with_capacity(4096);
+    // Cadence diagnostics now measure the PRESENT interval (this loop presents once per iteration),
+    // gated on `NANO_DEBUG_FRAMES` — the true smoothness signal.
+    let mut frame_dbg = FrameDebug {
+        enabled: crate::diag_enabled("NANO_DEBUG_FRAMES"),
+        ..Default::default()
+    };
+    let mut last = Instant::now();
+
+    while !ctl.stop.load(Ordering::Relaxed) {
+        // Apply the latest pending resize (host → main thread → here); the render thread owns the
+        // surface, so reconfiguration must happen here.
+        let mut new_size = None;
+        while let Ok(sz) = resize_rx.try_recv() {
+            new_size = Some(sz);
+        }
+        if let Some((w, h)) = new_size {
+            surface_config.width = w.max(1);
+            surface_config.height = h.max(1);
+            surface.configure(&device, &surface_config);
+        }
+
+        let now = Instant::now();
+        let frame_dt = (now - last).as_secs_f64().min(MAX_FRAME_DT);
+        last = now;
+        frame_dbg.tick(now);
+
+        // Drain audio (sole consumer; the Mutex only exists because rtrb::Consumer is !Sync). Recover
+        // a poisoned lock — a Module panic must not silently kill the meter for the rest of the session.
+        new_samples.clear();
+        match shared.samples_rx.try_lock() {
+            Ok(mut rx) => {
+                while let Ok(frame) = rx.pop() {
+                    new_samples.push(frame);
+                }
+            }
+            Err(std::sync::TryLockError::Poisoned(p)) => {
+                let mut rx = p.into_inner();
+                while let Ok(frame) = rx.pop() {
+                    new_samples.push(frame);
+                }
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {}
+        }
+
+        // Phase 1: fan this frame's samples out to every Module. present_dt is 0 — there's no display
+        // link now; the loop is itself vsync-paced, so frame_dt is the steady per-frame interval.
+        let sample_rate = shared.sample_rate.load(Ordering::Relaxed);
+        let mono = shared.mono.load(Ordering::Relaxed);
         let ctx = FrameContext {
-            new: &self.new_samples,
-            meas: &self.shared.meas,
+            new: &new_samples,
+            meas: &shared.meas,
             sample_rate,
             mono,
             frame_dt,
-            present_dt,
+            present_dt: 0.0,
         };
-        for m in self.modules.iter_mut() {
-            m.update(&ctx, &self.queue);
+        for m in modules.iter_mut() {
+            m.update(&ctx, &queue);
         }
 
-        let mut recreate_surface = false;
-        let frame = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(texture) => Some(texture),
-            // Window not visible or compositor stalled — skip this frame.
+        // Acquire — BLOCKS until a drawable frees at vblank. This is the pacing clock.
+        let frame = match surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(texture) => texture,
+            // Hidden/occluded/stalled: don't busy-spin — wait roughly a frame and retry.
             wgpu::CurrentSurfaceTexture::Occluded
             | wgpu::CurrentSurfaceTexture::Timeout
-            | wgpu::CurrentSurfaceTexture::Validation => return,
-            // Reconfigure the surface and skip; we'll catch up next frame.
-            wgpu::CurrentSurfaceTexture::Suboptimal(_) | wgpu::CurrentSurfaceTexture::Outdated => {
-                None
+            | wgpu::CurrentSurfaceTexture::Validation => {
+                std::thread::sleep(Duration::from_millis(16));
+                continue;
             }
-            // Device-lost / context dropped — rebuild the surface from the window handle.
-            wgpu::CurrentSurfaceTexture::Lost => {
-                recreate_surface = true;
-                None
+            // Stale/lost config: reconfigure, then sleep so a wedged surface can't busy-spin a core.
+            wgpu::CurrentSurfaceTexture::Suboptimal(_)
+            | wgpu::CurrentSurfaceTexture::Outdated
+            | wgpu::CurrentSurfaceTexture::Lost => {
+                surface.configure(&device, &surface_config);
+                std::thread::sleep(Duration::from_millis(16));
+                continue;
             }
         };
 
-        let Some(frame) = frame else {
-            if recreate_surface {
-                let target = baseview_window_to_surface_target(window);
-                let instance =
-                    wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-                self.surface = unsafe { instance.create_surface_unsafe(target) }.unwrap();
-            }
-            self.reconfigure_surface();
-            return;
-        };
+        // The acquire above can block for a full frame; check the stop flag the moment it returns so
+        // teardown (EditorHandle::drop → join) waits at most one frame, not the NEXT blocking acquire.
+        // The acquired drawable just drops unpresented, which releases it.
+        if ctl.stop.load(Ordering::Relaxed) {
+            break;
+        }
 
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("nanometers-encoder"),
-            });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("nanometers-encoder"),
+        });
 
-        // Per-column viewports: integer boundaries from the layout fractions, tiling the surface
-        // with no gaps/overlaps (ADR 0003). One Rect per Module, in order.
-        let surface_w = self.surface_config.width as f32;
-        let surface_h = self.surface_config.height as f32;
-        let viewports = viewports(&self.layout, surface_w, surface_h);
+        // Per-column viewports tiling the surface (ADR 0003), one Rect per Module in order.
+        let viewports = viewports(
+            &layout,
+            surface_config.width as f32,
+            surface_config.height as f32,
+        );
 
         // Phase 2a: each Module encodes its own offscreen passes before the shared pass opens.
-        for (m, vp) in self.modules.iter_mut().zip(viewports.iter()) {
-            m.prepare(&self.device, &self.queue, &mut encoder, *vp);
+        for (m, vp) in modules.iter_mut().zip(viewports.iter()) {
+            m.prepare(&device, &queue, &mut encoder, *vp);
         }
 
-        // Phase 2b: one shared single-sample pass, cleared once; each Module draws into its column.
-        // Per Module the host sets the viewport (affine-maps [-1,1] → the column) AND the scissor
-        // (hard-clips), so a Module emits plain [-1,1] geometry and lands column-local. write_buffer
-        // uploads from `update` are ordered before this submit, so the draws see them.
+        // Phase 2b: one shared single-sample pass; each Module draws into its column (host sets the
+        // viewport + scissor, so a Module emits plain [-1,1] geometry and lands column-local).
         {
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("nanometers-frame"),
@@ -481,16 +522,25 @@ impl baseview::WindowHandler for RenderWindow {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            for (m, vp) in self.modules.iter_mut().zip(viewports.iter()) {
+            for (m, vp) in modules.iter_mut().zip(viewports.iter()) {
                 rpass.set_viewport(vp.x, vp.y, vp.w, vp.h, 0.0, 1.0);
                 rpass.set_scissor_rect(vp.x as u32, vp.y as u32, vp.w as u32, vp.h as u32);
                 m.render(&mut rpass, *vp);
             }
         }
 
-        self.queue.submit(Some(encoder.finish()));
+        queue.submit(Some(encoder.finish()));
+        // Async present (CAMetalLayer.presentsWithTransaction defaults false, wgpu doesn't override),
+        // so the finished frame is handed to the render server WITHOUT waiting on the host's CATransaction.
         frame.present();
     }
+}
+
+impl baseview::WindowHandler for RenderWindow {
+    /// Intentionally empty. Rendering is driven by the dedicated render thread (`run_render_loop`),
+    /// not by this callback — that's the whole point: a host pumping `on_frame` erratically (FL) no
+    /// longer dictates our frame cadence. baseview still calls this at the host's whim; we ignore it.
+    fn on_frame(&mut self, _window: &mut baseview::Window) {}
 
     fn on_event(
         &mut self,
@@ -502,9 +552,10 @@ impl baseview::WindowHandler for RenderWindow {
                 info.logical_size().width.round() as u32,
                 info.logical_size().height.round() as u32,
             ));
-            self.surface_config.width = info.physical_size().width;
-            self.surface_config.height = info.physical_size().height;
-            self.reconfigure_surface();
+            // The render thread owns the surface; hand it the new physical size to reconfigure.
+            let _ = self
+                .resize_tx
+                .send((info.physical_size().width, info.physical_size().height));
         }
         baseview::EventStatus::Captured
     }

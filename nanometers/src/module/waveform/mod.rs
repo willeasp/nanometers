@@ -706,7 +706,13 @@ impl Module for WaveformModule {
         }
         let cov = if self.dt_ema > 0.0 { self.mad_ema / self.dt_ema } else { 0.0 };
         let was_regular = self.cadence_regular;
-        self.cadence_regular = cadence_regular(self.sub_ema, cov, was_regular);
+        // The editor now renders on a dedicated thread, presenting exactly one frame per vblank, so
+        // every host is effectively vsync-paced here — always fixed-px. The per-frame loop timing is
+        // bimodal (the swapchain hands out a free drawable immediately, then blocks), which would fool
+        // the old cadence detector into TIME mode; ignore it. (The detector + TIME path are now dead
+        // and will be deleted.) `_ = cadence_regular(...)` keeps the fn referenced until then.
+        let _ = cadence_regular(self.sub_ema, cov, was_regular);
+        self.cadence_regular = true;
         let mode_flipped = was_regular != self.cadence_regular;
 
         // Adaptive reservoir target: a couple of audio blocks behind the edge — the minimal slack that
