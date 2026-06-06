@@ -103,7 +103,7 @@ broad scrolling Waveform and replaces what's on screen.)
   `on_event(&event, viewport) -> EventStatus`, and the opaque-config pair
   `save_config(&self) -> Vec<u8>` / `load_config(&mut self, &[u8])` ([0003]). The host's
   `set_scissor_rect(viewport)` only **clips** — the Waveform maps its own geometry into `viewport`
-  ([0002]). Build the Waveform against exactly this (mirrors `nanometers/src/module.rs`).
+  ([0002]). Build the Waveform against exactly this (mirrors `apps/nano-plugin/src/module/mod.rs`).
 - **No host AA dependency.** AA is per-Module (§4): the Waveform self-AAs via its own offscreen
   target, so the host's shared pass can stay single-sample. No sample-count coordination needed.
 - **No shared spectrum** in `FrameContext` — the Waveform computes its own bands (0001); the host

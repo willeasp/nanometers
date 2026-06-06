@@ -53,7 +53,7 @@ trait Module {
 `set_scissor_rect(viewport)` (host-applied before each `render`) only **clips**; it applies no
 coordinate transform, so each Module maps its own geometry into `viewport`. `prepare` defaults to a
 no-op — Modules that draw straight into the shared pass (Loudness, the Oscilloscope) don't override
-it. (This is the built shape in `nanometers/src/module.rs`; the code is the source of truth.)
+it. (This is the built shape in `apps/nano-plugin/src/module/mod.rs`; the code is the source of truth.)
 
 ## Why not the alternatives
 
