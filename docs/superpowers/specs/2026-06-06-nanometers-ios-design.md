@@ -31,8 +31,11 @@ plus the few places we diverge from it or from ADR 0008, recorded explicitly bel
    bins — no drift loop needed.
 3. **Monorepo, restructured to ADR 0008's end-state layout.** The app lives at `apps/nano-ios`.
    Phase 0 lands the **`nano-dsp` carve** (ADR 0008 step 1 — already prototyped on a branch, see
-   "Existing carve" under Workspace shape) and **relocates the plugin** to `apps/nano-plugin`, so
-   shells are consistently under `apps/`.
+   "Existing carve" under Workspace shape) and **relocates both existing shells under `apps/`**: the
+   plugin to `apps/nano-plugin`, and the TUI nanoplayer — today a feature-gated `[[bin]]` *inside*
+   the plugin crate (`nanometers/src/nanoplayer.rs`) — out to `apps/nano-tui` as its own crate
+   linking `nano-dsp`. After Phase 0 every shell (plugin, TUI, iOS) sits under `apps/` over the one
+   shared core — exactly ADR 0008's named end-state, which already lists `apps/nano-tui`.
 4. **Scope: playable core + the full close-up/short-term-LUFS soul features, local files only.**
    Cloud/multi-source is deferred to a v2 plan (see Scope).
 
@@ -65,6 +68,9 @@ nanometers/                  (repo root — cargo workspace)
 ├── apps/
 │   ├── nano-plugin/         MOVED from ./nanometers (nih_plug Plugin + baseview editor host).
 │   │                              auv2/ (clap-wrapper AU build) travels with it.
+│   ├── nano-tui/            MOVED from nanometers/src/nanoplayer.rs (terminal player; symphonia +
+│   │                              cpal + crossterm). Own crate linking nano-dsp; the `nanoplayer`
+│   │                              feature gate goes away. Keeps its own audio I/O — nano-audio later.
 │   └── nano-ios/            NEW: SwiftUI app + the nano-dsp .xcframework.
 ├── xtask/                   stays at root — workspace build shim.
 └── build.sh                 paths updated for the relocation.
@@ -81,9 +87,11 @@ not mandate a folder. The plugin's regression gate (`./build.sh` + `auval -v`) i
 3-band color filterbank, the value types (`StereoFrame` / `FrameContext` / `Measurements` / `Rect`)
 and the scroll control law (`consume_samples` / `choose_px_per_frame`) down, with the plugin
 re-exporting them under their old paths — and it lands green (29 + 1 + 10 = 40 tests). It is **not on
-`main`**, and was branched before `main`'s render-thread / swapchain divergence (which also edited
-the waveform/module code), so Phase 0 is *rebase that carve onto current `main` and resolve the
-module-side conflicts*, not carve from zero. This de-risks Phase 0 sharply — the cut is proven and
+`main`**, and was branched before two things now on `main`: the render-thread / swapchain
+divergence (which edited the waveform/module code) and the `nanoplayer` TUI (`d3da50b`), which
+reuses the very `LoudnessDsp` / `Filterbank` symbols the carve moves. So Phase 0 is *rebase the
+carve onto current `main`, then re-point both the plugin and the extracted TUI at `nano-dsp`*, not
+carve from zero. This de-risks Phase 0 sharply — the cut is proven and
 the iOS-used math (`band_color`, BS.1770) is already cleanly separable. The carve does **not** add
 the C-ABI FFI facade, the `apps/nano-plugin` relocation, or `apps/nano-ios`; those stay net-new
 here. (Note the carve pulls the whole shared domain down, including the scroll law — consistent with
@@ -169,8 +177,10 @@ which is the point at which linking `nano-render` would actually pay for itself.
 
 **In this plan (playable core + soul features, local files only):**
 
-- Phase 0 — rebase the existing `nano-dsp` carve onto current `main` (resolve module-side
-  conflicts) + relocate the plugin to `apps/nano-plugin` + C-ABI FFI `.xcframework` + ADR 0009.
+- Phase 0 — workspace restructure: rebase the existing `nano-dsp` carve onto current `main`
+  (resolving the module-side + `nanoplayer` conflicts), relocate the plugin to `apps/nano-plugin`
+  and the TUI nanoplayer to `apps/nano-tui` (both re-pointed at `nano-dsp`), build the C-ABI FFI
+  `.xcframework`, and write ADR 0009.
 - Phase 1 — shell: project, `Theme`, `RootTabView` + glass tab bar, SwiftData models,
   document-picker import + demo tracks, Library / Playlists / Detail / Search with `NMRow`.
 - Phase 2 — local playback: `AudioEngine`, transport, queue/context, sample-time progress,
@@ -195,6 +205,9 @@ iOS 17+ (SwiftData).
   add FFI tests (sine buffer → expected band; known-LUFS buffer → expected value within tolerance).
 - **Plugin regression:** `./build.sh` + `auval -v aufx Nano Wlsp` green after the relocation/carve
   (the stated gate). Verify in a *new* Logic project (per CLAUDE.md cache traps).
+- **TUI regression:** `apps/nano-tui` builds and runs after the extraction (now linking `nano-dsp`
+  rather than reaching into the plugin crate). It's the carve's renderer-independence proof — a
+  second, non-GPU frontend over the same DSP — so keeping it green guards the seam.
 - **Swift:** unit tests for `WaveformAnalyzer` (known WAV → bins), `AudioEngine` queue logic
   (next / prev / repeat, prev-restart-threshold), and `WaveformCache` round-trip. UI checked against
   the four reference screenshots and the prototype.
@@ -208,10 +221,10 @@ iOS 17+ (SwiftData).
 3. **Color reconciliation** (handoff 4-discrete vs `nano-dsp` continuous) — resolved: use
    `nano-dsp`'s continuous color.
 4. **Sample-time → `progress` accuracy across seeks** — derive from `playerTime`; well-trodden.
-5. **Keeping the plugin green through the relocation+carve** — the carve is already proven green on
-   its branch (40 tests); the residual risk is rebasing it past `main`'s module-side divergence plus
-   the path edits for the `apps/` move. `./build.sh` + `auval` is the verifiable gate at the end of
-   Phase 0.
+5. **Keeping the plugin + TUI green through the restructure** — the carve is already proven green on
+   its branch (40 tests); the residual risk is rebasing it past `main`'s module-side divergence and
+   the new `nanoplayer` TUI, then re-pointing both shells at `nano-dsp` plus the `apps/` path edits.
+   Gates at the end of Phase 0: `./build.sh` + `auval` (plugin) and a `nano-tui` build/run (TUI).
 
 ## Open implementation-plan details (not blockers)
 
