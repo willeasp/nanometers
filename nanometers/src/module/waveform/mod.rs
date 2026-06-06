@@ -47,14 +47,16 @@ const COLOR_WHITE_MIX: f32 = 0.18;
 const MSAA_SAMPLES: u32 = 4;
 
 /// DEBUG-ONLY reference ruler (gated by `~/.nano-debug`). Two rows of vertical ticks scroll left at
-/// the waveform's exact speed, so jitter is visible against a clean reference. TOP row advances by the
-/// INSTANTANEOUS presentation interval (exact constant speed — will stutter if the host presents
-/// erratically, exposing presentation jitter). BOTTOM row advances by the SMOOTHED interval (uniform
-/// per frame — smooth like fixed-px, but its speed only tracks the average). If the waveform is jerkier
-/// than the TOP row, the jitter is our column math; if it matches, it's the host's presentation.
+/// the waveform's speed, so motion quality is visible against a clean reference.
+/// - TOP row (cyan): advances by the raw present interval — EXACT speed, but jerks 1:1 with the
+///   host's erratic present cadence (this is what the waveform itself does today).
+/// - BOTTOM row (magenta): a true wall-clock LINEAR target that the drawn position EXPONENTIALLY
+///   FOLLOWS — linear average speed, but each frame moves only a fraction of the remaining error, so
+///   present-gaps ease in instead of jumping and it never overshoots (no back-and-forth). This is the
+///   candidate smooth+linear scroll; once it looks right here, port it to the waveform.
 const MARKER_INTERVAL_SECONDS: f64 = 0.5; // tick spacing in time (≙ one beat at 120 BPM)
 const MARKER_TICK_LEN: f32 = 0.16; // tick height as a fraction of the half-viewport (clip units)
-const MARKER_EMA: f64 = 0.05; // smoothing for the uniform (bottom) ruler's per-frame step
+const MARKER_TAU: f64 = 0.06; // bottom ruler: follow time-constant (s) — frame-rate-independent low-pass
 const MARKER_MAX_TICKS: usize = 64; // vbuf cap per ruler
 
 /// No new closed audio for longer than this → paused; freeze the scroll. Loose enough that ordinary
@@ -280,9 +282,9 @@ pub struct WaveformModule {
     marker_vbuf: wgpu::Buffer,
     marker_verts: Vec<Vertex>,
     marker_vcount: u32,
-    marker_pos_exact: f64,   // clip-units scrolled, advanced by the instantaneous present interval
-    marker_pos_uniform: f64, // clip-units scrolled, advanced by the smoothed interval
-    marker_dt_ema: f64,      // smoothed present interval driving the uniform ruler
+    marker_pos_exact: f64,  // TOP ruler: clip-units, advanced by the raw present interval (exact, jerky)
+    marker_target: f64,     // BOTTOM ruler: true wall-clock-linear target position (clip-units)
+    marker_pos_smooth: f64, // BOTTOM ruler: drawn position, exponentially following marker_target
 }
 
 impl WaveformModule {
@@ -493,8 +495,8 @@ impl WaveformModule {
             marker_verts: Vec::with_capacity(2 * MARKER_MAX_TICKS * 6),
             marker_vcount: 0,
             marker_pos_exact: 0.0,
-            marker_pos_uniform: 0.0,
-            marker_dt_ema: 0.0,
+            marker_target: 0.0,
+            marker_pos_smooth: 0.0,
         }
     }
 
@@ -502,24 +504,28 @@ impl WaveformModule {
     /// active frame from `prepare` (which owns the queue). `columns` = viewport width in px. See the
     /// MARKER_* consts for what the two rows mean.
     fn build_markers(&mut self, queue: &wgpu::Queue, columns: usize) {
-        let present = if self.present_dt > 0.0 { self.present_dt } else { self.frame_dt };
-        if self.marker_dt_ema <= 0.0 {
-            self.marker_dt_ema = present;
-        } else {
-            self.marker_dt_ema = self.marker_dt_ema * (1.0 - MARKER_EMA) + present * MARKER_EMA;
-        }
         // Scroll speed in clip units/sec: the full width (2.0 clip) shows DISPLAY_WINDOW_SECONDS.
         let speed = 2.0 / DISPLAY_WINDOW_SECONDS;
-        self.marker_pos_exact += present * speed; // instantaneous → exact speed, exposes jitter
-        self.marker_pos_uniform += self.marker_dt_ema * speed; // smoothed → uniform per frame
+        // TOP (cyan): raw present interval → exact speed, jerks with the host's present cadence.
+        let present = if self.present_dt > 0.0 { self.present_dt } else { self.frame_dt };
+        self.marker_pos_exact += present * speed;
+        // BOTTOM (magenta): advance a TRUE wall-clock-linear target, then low-pass the drawn position
+        // toward it with a TIME-CONSTANT (not per-frame) fraction: alpha = 1 − e^(−dt/τ). Average speed
+        // = the target's (linear); a present-gap eases in over ~τ instead of jumping, the step never
+        // exceeds the error (no overshoot → no back-and-forth), and being time-based it's immune to the
+        // host's burst rate (many sub-ms renders each take a tiny step, so they can't burn the lag).
+        let real = if self.frame_dt > 0.0 { self.frame_dt } else { present };
+        self.marker_target += real * speed;
+        let alpha = 1.0 - (-real / MARKER_TAU).exp();
+        self.marker_pos_smooth += (self.marker_target - self.marker_pos_smooth) * alpha;
 
         let spacing = (MARKER_INTERVAL_SECONDS * speed) as f32; // clip units between ticks
         let hw = (2.0 / columns as f32).max(0.0015); // ~2px-wide tick
         self.marker_verts.clear();
-        // (position, top-edge?, color) — TOP row = exact clock (cyan), BOTTOM row = uniform (magenta).
+        // (position, top-edge?, color) — TOP row = exact clock (cyan), BOTTOM row = smooth follow (magenta).
         for (pos, top, color) in [
             (self.marker_pos_exact, true, [0.1, 0.9, 1.0]),
-            (self.marker_pos_uniform, false, [1.0, 0.3, 0.9]),
+            (self.marker_pos_smooth, false, [1.0, 0.3, 0.9]),
         ] {
             let (y0, y1) = if top {
                 (1.0, 1.0 - MARKER_TICK_LEN)
