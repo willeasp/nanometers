@@ -12,6 +12,11 @@ cells"?
 If yes, this is the seed of a shared-DSP crate that the monorepo idea rests on: multiple frontends
 (wgpu plugin, terminal player, …) over one set of pure meter/scope/color modules.
 
+That carve is designed in [ADR 0009](../../docs/adr/0009-workspace-crate-split-cross-platform.md):
+this binary becomes `apps/nano-tui`, and the **Reused vs. throwaway** table below is the migration
+map — "reused unchanged" sinks to `nano-dsp`, the `dev.rs`-forked decode/playback to `nano-audio`,
+the rest to the `apps/nano-tui` shell.
+
 ## What it does
 
 - Decodes a file (symphonia: mp3/flac/wav/aac), plays it to the default output device (cpal),

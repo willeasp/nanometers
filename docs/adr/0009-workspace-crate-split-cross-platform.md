@@ -40,7 +40,12 @@ and the dependency a crate carries is exactly the reuse it offers:
   It owns the `nih_plug` glue, the raw-window-handle 0.5↔0.6 plumbing, and the
   `baseview::Event → InputEvent` translation.
 - **`apps/nano-tui`** and **`apps/nano-ios`** — additive. The TUI links `nano-dsp` + `nano-audio`
-  and renders meters to a terminal (it deliberately does *not* link `nano-render`). The iOS app is
+  and renders meters to a terminal (it deliberately does *not* link `nano-render`). Its seed already
+  exists in-tree: the `nanoplayer` binary (`nanometers/src/nanoplayer.rs`, behind the `nanoplayer`
+  feature) — see [`NANOPLAYER_NOTES.md`](../../nanometers/src/NANOPLAYER_NOTES.md) for the
+  reuse-vs-throwaway ledger that maps onto these crates. Note it already proves the litmus test below
+  (it links **zero `wgpu`**), and its decode/playback is a fork of `dev.rs` — both copies reconcile
+  into `nano-audio` at step (4), not just `dev.rs`. The iOS app is
   a `staticlib` linking `nano-render` + `nano-dsp` + a CoreAudio FFI bridge, wrapped by an Xcode
   project drawing into a `CAMetalLayer`.
 
