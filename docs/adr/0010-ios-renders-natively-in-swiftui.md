@@ -1,6 +1,6 @@
 # iOS renders natively in SwiftUI and links only nano-dsp
 
-ADR [0008] (`0008-workspace-crate-split-cross-platform.md`) sketched the iOS app as "a `staticlib`
+ADR [0009] (`0009-workspace-crate-split-cross-platform.md`) sketched the iOS app as "a `staticlib`
 linking `nano-render` + `nano-dsp` … wrapped by an Xcode project drawing into a `CAMetalLayer`."
 While building out the iOS design (`docs/superpowers/specs/2026-06-06-nanometers-ios-design.md`) we
 resolved that clause differently. This ADR records the change so the codebase and the accepted
@@ -32,9 +32,9 @@ not `nano-render`.** The Rust↔Swift boundary is a small C-ABI facade over `nan
 - `nano-render` is **not** built or linked for iOS. The escape hatch stays open: if profiling shows
   the close-up can't hold 120 Hz ProMotion in `Canvas`, that single view can move to Metal — which
   is the point at which linking `nano-render` would actually pay for itself. Re-open this ADR then.
-- This supersedes only the iOS-rendering clause of [0008]; the workspace split, the `nano-dsp`
+- This supersedes only the iOS-rendering clause of [0009]; the workspace split, the `nano-dsp`
   carve, and `apps/nano-tui` are unchanged and were executed in Phase 0.
 - The iOS app gains a maintained C-ABI surface on `nano-dsp` (the `ffi` feature). Growing it is a
   deliberate vocabulary change, not a dumping ground.
 
-[0008]: 0008-workspace-crate-split-cross-platform.md
+[0009]: 0009-workspace-crate-split-cross-platform.md

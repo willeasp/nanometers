@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-06
 **Status:** approved (brainstorm) — next step is an implementation plan
-**Source material:** `~/Downloads/design_handoff_nanometers/` (locked hi-fi handoff, 5 docs + React/HTML prototype + 4 reference screenshots), and `docs/adr/0008-workspace-crate-split-cross-platform.md`.
+**Source material:** `~/Downloads/design_handoff_nanometers/` (locked hi-fi handoff, 5 docs + React/HTML prototype + 4 reference screenshots), and `docs/adr/0009-workspace-crate-split-cross-platform.md`.
 
 ## What we're building
 
@@ -16,7 +16,7 @@ radii, and motion in the handoff are final and recreated pixel-accurately.
 
 The handoff is the source of truth for *look and behavior*. This document is the source of truth
 for the *native architecture* — the decisions the handoff deliberately left to the implementer,
-plus the few places we diverge from it or from ADR 0008, recorded explicitly below.
+plus the few places we diverge from it or from ADR 0009, recorded explicitly below.
 
 ## Decisions (the forks we resolved)
 
@@ -29,33 +29,33 @@ plus the few places we diverge from it or from ADR 0008, recorded explicitly bel
    against an independent render clock (the *plugin's* problem). A file player owns the whole decoded file and a
    sample-accurate `AVAudioPlayerNode` clock, so the close-up is a direct window into precomputed
    bins — no drift loop needed.
-3. **Monorepo, restructured to ADR 0008's end-state layout.** The app lives at `apps/nano-ios`.
-   Phase 0 lands the **`nano-dsp` carve** (ADR 0008 step 1 — already prototyped on a branch, see
+3. **Monorepo, restructured to ADR 0009's end-state layout.** The app lives at `apps/nano-ios`.
+   Phase 0 lands the **`nano-dsp` carve** (ADR 0009 step 1 — already prototyped on a branch, see
    "Existing carve" under Workspace shape) and **relocates both existing shells under `apps/`**: the
    plugin to `apps/nano-plugin`, and the TUI nanoplayer — today a feature-gated `[[bin]]` *inside*
    the plugin crate (`nanometers/src/nanoplayer.rs`) — out to `apps/nano-tui` as its own crate
    linking `nano-dsp`. After Phase 0 every shell (plugin, TUI, iOS) sits under `apps/` over the one
-   shared core — exactly ADR 0008's named end-state, which already lists `apps/nano-tui`.
+   shared core — exactly ADR 0009's named end-state, which already lists `apps/nano-tui`.
 4. **Scope: playable core + the full close-up/short-term-LUFS soul features, local files only.**
    Cloud/multi-source is deferred to a v2 plan (see Scope).
 
-### This supersedes part of ADR 0008 — and that gets recorded
+### This supersedes part of ADR 0009 — and that gets recorded
 
-The relevant ADR is **`0008-workspace-crate-split-cross-platform.md`** (referenced as "ADR 0008"
+The relevant ADR is **`0009-workspace-crate-split-cross-platform.md`** (referenced as "ADR 0009"
 throughout). It states the iOS app is "a `staticlib` linking `nano-render` + `nano-dsp` … wrapped
 by an Xcode project drawing into a `CAMetalLayer`." Decisions 1–2 above deliberately drop the
 `nano-render`/Metal reuse for iOS in favor of native SwiftUI `Canvas` rendering. Per CLAUDE.md,
 an accepted ADR is not something to silently contradict. **Phase 0 includes writing a new ADR**
-— `docs/adr/0009-ios-renders-natively-in-swiftui.md` — superseding that clause and recording:
+— `docs/adr/0010-ios-renders-natively-in-swiftui.md` — superseding that clause and recording:
 *iOS renders natively in SwiftUI `Canvas` and links only `nano-dsp`; `nano-render` reuse on iOS is
 dropped, re-openable only if profiling forces the close-up to Metal.* The rationale is captured
 below under "Why native rendering, not nano-render."
 
-> Repo-hygiene note: `main` currently carries **two** ADRs numbered 0008 — the workspace-split one
-> above and an unrelated `0008-render-thread-swapchain-paced.md` from concurrent editor work. They
-> collide on number only; this spec depends solely on the workspace-split one. The iOS ADR takes
-> the next free number, **0009**, rather than adding to the collision. Renumbering the duplicate is
-> a separate decision for the maintainer, out of scope here.
+> Repo-hygiene note: an earlier dual-`0008` collision (the workspace-split ADR vs. the unrelated
+> `0008-render-thread-swapchain-paced.md`) was resolved on `main` (commit `064aa7a`) by renumbering
+> the **workspace-split** ADR to `0009-workspace-crate-split-cross-platform.md`; the render-thread
+> ADR keeps `0008`. This spec depends solely on the workspace-split one (now **0009**), so the iOS
+> ADR takes the next free number, **0010**.
 
 ## Workspace shape
 
@@ -64,7 +64,7 @@ nanometers/                  (repo root — cargo workspace)
 ├── crates/
 │   └── nano-dsp/            NEW: pure domain (WaveStore/BaseBin, BIN_SECONDS, band_color,
 │        └── ffi/                 loudness/BS.1770, StereoFrame) + a C-ABI facade for iOS.
-│                                 nano-render / nano-audio remain future ADR-0008 steps — NOT this plan.
+│                                 nano-render / nano-audio remain future ADR-0009 steps — NOT this plan.
 ├── apps/
 │   ├── nano-plugin/         MOVED from ./nanometers (nih_plug Plugin + baseview editor host).
 │   │                              auv2/ (clap-wrapper AU build) travels with it.
@@ -76,7 +76,7 @@ nanometers/                  (repo root — cargo workspace)
 └── build.sh                 paths updated for the relocation.
 ```
 
-`crates/` (libraries) vs `apps/` (shells) is our convention; ADR 0008 names the crates but does
+`crates/` (libraries) vs `apps/` (shells) is our convention; ADR 0009 names the crates but does
 not mandate a folder. The plugin's regression gate (`./build.sh` + `auval -v`) is unchanged in
 *behavior*; only paths move.
 
@@ -212,7 +212,7 @@ which is the point at which linking `nano-render` would actually pay for itself.
 - Phase 0 — workspace restructure: re-derive the existing `nano-dsp` carve onto current `main` (the
   bounded method is in "Landing the carve"), relocate the plugin to `apps/nano-plugin` and the TUI
   nanoplayer to `apps/nano-tui` (both re-pointed at `nano-dsp`), build the C-ABI FFI `.xcframework`,
-  and write ADR 0009.
+  and write ADR 0010.
 - Phase 1 — shell: project, `Theme`, `RootTabView` + glass tab bar, SwiftData models,
   document-picker import + demo tracks, Library / Playlists / Detail / Search with `NMRow`.
 - Phase 2 — local playback: `AudioEngine`, transport, queue/context, sample-time progress,
@@ -268,4 +268,4 @@ iOS 17+ (SwiftData).
   (cargo target + a build script vs a manual step).
 - Bin density chosen for the cache (must satisfy the close-up's bar density while aggregating down
   to the overview's bar count — both per handoff §05) and the on-disk packed format.
-- Exact title/wording of the new `0009` ADR (decision is pinned; phrasing is open).
+- Exact title/wording of the new `0010` ADR (decision is pinned; phrasing is open).
