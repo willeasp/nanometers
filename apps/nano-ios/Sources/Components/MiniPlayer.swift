@@ -24,7 +24,7 @@ struct MiniPlayer: View {
             Button(action: onTapBody) {
                 HStack(spacing: 12) {
                     NMArtwork(data: track.artworkData, size: 44, radius: 9)
-                        .matchedGeometryEffect(id: "artwork-\(track.id)", in: namespace)
+                        .matchedGeometryEffect(id: "nowPlayingArtwork", in: namespace)   // constant id (matches NowPlayingScreen hero)
 
                     VStack(alignment: .leading, spacing: 1) {
                         Text(track.title)

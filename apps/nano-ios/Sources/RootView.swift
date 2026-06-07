@@ -18,14 +18,14 @@ struct RootView: View {
                 }
             }
 
-            VStack(spacing: 10) {
-                MiniPlayer(namespace: heroNS, onTapBody: { open() })
-                GlassTabBar(selection: $tab)
+            if !npOpen {                                   // REMOVE the dock (not just hide it) so only one
+                VStack(spacing: 10) {                      // matched artwork exists at a time → the morph works
+                    MiniPlayer(namespace: heroNS, onTapBody: { open() })
+                    GlassTabBar(selection: $tab)
+                }
+                .padding(.bottom, 10)
+                .transition(.move(edge: .bottom))          // tab bar slides down as Now Playing rises
             }
-            .padding(.bottom, 10)
-            .offset(y: npOpen ? 220 : 0)
-            .opacity(npOpen ? 0 : 1)
-            .animation(.spring(response: 0.4, dampingFraction: 0.9), value: npOpen)
 
             if npOpen {
                 NowPlayingScreen(namespace: heroNS, onClose: { close() })

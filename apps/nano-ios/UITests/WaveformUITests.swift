@@ -21,8 +21,9 @@ final class WaveformUITests: XCTestCase {
         XCTAssertTrue(nowPlaying.waitForExistence(timeout: 5), "Now Playing screen should appear")
         let overview = app.otherElements["overviewWaveform"]
         XCTAssertTrue(overview.waitForExistence(timeout: 5), "overview waveform should render in Now Playing")
-        let before = app.staticTexts["miniPlayerTitle"].label   // playback context exists
+        // The Now Playing title shows the track (the mini player is gone while NP is up).
+        let before = app.staticTexts["npTitle"].label
         overview.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.5)).tap()  // scrub near the end
-        XCTAssertEqual(app.staticTexts["miniPlayerTitle"].label, before)  // same track, just seeked
+        XCTAssertEqual(app.staticTexts["npTitle"].label, before)  // same track, just seeked (not skipped)
     }
 }

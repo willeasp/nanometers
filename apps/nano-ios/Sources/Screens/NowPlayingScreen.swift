@@ -18,7 +18,22 @@ struct NowPlayingScreen: View {
     @State private var bins: [WaveBin] = []
 
     var body: some View {
-        ZStack {
+        VStack(spacing: 18) {
+            topBar
+            Spacer(minLength: 8)
+            hero
+            Spacer(minLength: 8)
+            titleRow
+            scrubber
+            timeRow
+            transportRow
+            volumeRow
+            bottomRail
+        }
+        .padding(.horizontal, 26)
+        .padding(.top, 8).padding(.bottom, 28)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)   // fill the screen; content stays within the safe area
+        .background {                                        // gradient bleeds full-screen, the content above does NOT
             LinearGradient(stops: [.init(color: tint, location: 0),
                                    .init(color: Theme.npGradientMid, location: 0.46),
                                    .init(color: Theme.npGradientBottom, location: 1)],
@@ -30,21 +45,6 @@ struct NowPlayingScreen: View {
                     }.allowsHitTesting(false)
                 }
                 .ignoresSafeArea()
-
-            VStack(spacing: 18) {
-                topBar
-                Spacer(minLength: 8)
-                hero
-                Spacer(minLength: 8)
-                titleRow
-                scrubber
-                timeRow
-                transportRow
-                volumeRow
-                bottomRail
-            }
-            .padding(.horizontal, 26)
-            .padding(.top, 8).padding(.bottom, 28)
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("nowPlaying")
@@ -128,6 +128,7 @@ struct NowPlayingScreen: View {
             HStack(alignment: .top, spacing: 12) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(track.title).font(Theme.sans(22, .bold)).tracking(-0.3).foregroundStyle(Theme.text).lineLimit(1)
+                        .accessibilityIdentifier("npTitle")
                     Text(track.artist).font(Theme.sans(17)).foregroundStyle(.white.opacity(0.62)).lineLimit(1)
                 }
                 Spacer(minLength: 8)
@@ -197,7 +198,7 @@ struct NowPlayingScreen: View {
     @ViewBuilder private var hero: some View {
         if let track = engine.current {
             NMArtwork(data: track.artworkData, size: 340, radius: Theme.Radius.albumNowPlaying)   // §03D ≤340 cap
-                .matchedGeometryEffect(id: "artwork-\(track.id)", in: namespace)
+                .matchedGeometryEffect(id: "nowPlayingArtwork", in: namespace)   // constant id: persists across track changes (no ghost)
                 .shadow(color: .black.opacity(0.45), radius: 30, y: 10)
                 .shadow(color: .black.opacity(0.3), radius: 8, y: 2)
                 .scaleEffect(reduceMotion ? 1.0 : (engine.isPlaying ? 1.0 : 0.86))

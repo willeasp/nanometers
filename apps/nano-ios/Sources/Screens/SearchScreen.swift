@@ -53,7 +53,7 @@ struct SearchScreen: View {
                 }
             }
             .padding(.horizontal, Theme.Layout.screenMargin)
-            .padding(.top, 50)
+            .padding(.top, 8)   // the ScrollView already clears the status bar via the safe area
             .padding(.bottom, engine.current == nil ? Theme.Layout.scrollBottomPadding : Theme.Layout.scrollBottomPaddingPlaying)
         }
         .background(Theme.bg)
