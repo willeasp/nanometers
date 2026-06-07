@@ -5,6 +5,7 @@ import SwiftUI
 /// tasks. The hero artwork morphs from the mini player's 44pt tile via the shared namespace.
 struct NowPlayingScreen: View {
     @Environment(AudioEngine.self) private var engine
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var namespace: Namespace.ID
     var onClose: () -> Void
 
@@ -199,7 +200,7 @@ struct NowPlayingScreen: View {
                 .matchedGeometryEffect(id: "artwork-\(track.id)", in: namespace)
                 .shadow(color: .black.opacity(0.45), radius: 30, y: 10)
                 .shadow(color: .black.opacity(0.3), radius: 8, y: 2)
-                .scaleEffect(engine.isPlaying ? 1.0 : 0.86)
+                .scaleEffect(reduceMotion ? 1.0 : (engine.isPlaying ? 1.0 : 0.86))
                 .animation(.spring(response: 0.5, dampingFraction: 0.86), value: engine.isPlaying)
         }
     }
