@@ -6,7 +6,6 @@ import SwiftUI
 /// The optional 56×22 mini-waveform slot (§02) appears once the track's bins are analyzed.
 struct MiniPlayer: View {
     @Environment(AudioEngine.self) private var engine
-    var namespace: Namespace.ID
     var onTapBody: () -> Void = {}
 
     @State private var bins: [WaveBin] = []
@@ -23,9 +22,9 @@ struct MiniPlayer: View {
             // Left tap area: artwork + title. A real Button so XCTest can reliably hit-test it.
             Button(action: onTapBody) {
                 HStack(spacing: 12) {
-                    MorphArtwork(data: track.artworkData, radius: 9)
-                        .frame(width: 44, height: 44)
-                        .matchedGeometryEffect(id: "nowPlayingArtwork", in: namespace)   // resizable so the morph can scale it
+                    Color.clear                         // the real artwork is the single floating layer in PlayerContainer;
+                        .frame(width: 44, height: 44)   // this just reserves + measures the 44pt slot it morphs into
+                        .reportPlayerSlot("miniArt")
 
                     VStack(alignment: .leading, spacing: 1) {
                         Text(track.title)

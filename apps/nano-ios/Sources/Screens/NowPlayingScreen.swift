@@ -6,8 +6,6 @@ import UIKit
 /// tasks. The hero artwork morphs from the mini player's 44pt tile via the shared namespace.
 struct NowPlayingScreen: View {
     @Environment(AudioEngine.self) private var engine
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    var namespace: Namespace.ID
     var onClose: () -> Void
 
     @State private var tint: Color = Theme.bgElev2
@@ -66,8 +64,7 @@ struct NowPlayingScreen: View {
         .task(id: engine.current?.persistentModelID) {
             if let t = engine.current { bins = await WaveformStore.shared.bins(for: t) ?? [] }
         }
-        .contentShape(Rectangle())
-        .gesture(DragGesture().onEnded { if $0.translation.height > 80 { onClose() } })
+        // Drag-to-collapse is owned by PlayerContainer (continuous, finger-following) — not a threshold here.
         .sheet(isPresented: $showContext) {
             if let t = engine.current { TrackContextSheet(track: t) }
         }
@@ -208,14 +205,10 @@ struct NowPlayingScreen: View {
     }
 
     @ViewBuilder private var hero: some View {
-        if let track = engine.current {
-            MorphArtwork(data: track.artworkData, radius: Theme.Radius.albumNowPlaying)
-                .frame(width: 340, height: 340)   // §03D ≤340 cap; resizable so the geometry match can scale it
-                .matchedGeometryEffect(id: "nowPlayingArtwork", in: namespace)   // constant id: stable across track changes
-                .shadow(color: .black.opacity(0.45), radius: 30, y: 10)
-                .shadow(color: .black.opacity(0.3), radius: 8, y: 2)
-                .scaleEffect(reduceMotion ? 1.0 : (engine.isPlaying ? 1.0 : 0.86))
-                .animation(.spring(response: 0.5, dampingFraction: 0.86), value: engine.isPlaying)
+        if engine.current != nil {
+            Color.clear                            // the real artwork floats in PlayerContainer; this measures the 340pt hero slot
+                .frame(width: 340, height: 340)    // §03D ≤340 cap
+                .reportPlayerSlot("heroArt")
         }
     }
 

@@ -21,23 +21,31 @@ final class NowPlayingUITests: XCTestCase {
     }
 
     @MainActor
-    func test_miniPlayerTapPresentsAndChevronDismissesNowPlaying() {
+    func test_miniPlayerExpandsAndChevronCollapses() {
         let app = XCUIApplication()
         app.launch()
         XCTAssertTrue(app.staticTexts["Mercy"].waitForExistence(timeout: 10))
         app.staticTexts["Mercy"].tap()                       // dock the mini player
 
-        // Tap the miniPlayerBody button (artwork+title area of the mini player) to open Now Playing.
-        // Using firstMatch because the button may appear at the bottom of the Z-stack which XCTest
-        // reports slightly outside the visible window rect (but synthetic taps still land correctly).
-        let miniBody = app.buttons.matching(identifier: "miniPlayerBody").firstMatch
-        XCTAssertTrue(miniBody.waitForExistence(timeout: 5), "Mini player body should appear after tapping a track")
-        miniBody.tap()                                       // tap mini body → present NP
+        // The player is ONE persistent view morphing on a 0…1 progress, so present/dismiss are
+        // checked via INTERACTIVITY (the mini is hittable only when collapsed, the chevron only when
+        // expanded) rather than existence — every element is always in the tree.
+        let miniBody = app.buttons["miniPlayerBody"].firstMatch
+        XCTAssertTrue(miniBody.waitForExistence(timeout: 5), "mini player should appear after tapping a track")
+        miniBody.tap()                                       // tap mini body → expand to Now Playing
 
-        let np = app.otherElements["nowPlaying"]
-        XCTAssertTrue(np.waitForExistence(timeout: 5), "Now Playing should present")
+        let dismiss = app.buttons["npDismiss"]
+        XCTAssertTrue(dismiss.waitForExistence(timeout: 5))
+        expect(dismiss.isHittable && !miniBody.isHittable, within: 5, "Now Playing should be expanded")
 
-        app.buttons["npDismiss"].tap()                       // chevron.down dismiss
-        XCTAssertFalse(np.waitForExistence(timeout: 3), "Now Playing should dismiss")
+        dismiss.tap()                                        // chevron.down → collapse
+        expect(miniBody.isHittable, within: 5, "mini player should return after collapsing")
+    }
+
+    /// Poll a UI condition (spring animations settle asynchronously).
+    @MainActor
+    private func expect(_ condition: @escaping @autoclosure () -> Bool, within timeout: TimeInterval, _ message: String) {
+        let exp = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in condition() }, object: nil)
+        XCTAssertEqual(XCTWaiter().wait(for: [exp], timeout: timeout), .completed, message)
     }
 }
