@@ -6,6 +6,7 @@ struct LibraryScreen: View {
     @Query(sort: \Track.dateAdded, order: .reverse) private var tracks: [Track]
     @Query private var playlists: [Playlist]
     @State private var importing = false
+    var onSearch: () -> Void = {}
 
     var body: some View {
         ScrollView {
@@ -14,7 +15,7 @@ struct LibraryScreen: View {
                     Text("Library").font(Theme.sans(32, .bold))
                         .foregroundStyle(Theme.text)
                     Spacer()
-                    GlassRoundButton(systemName: "magnifyingglass")
+                    GlassRoundButton(systemName: "magnifyingglass") { onSearch() }
                     GlassRoundButton(systemName: "folder") { importing = true }   // shell: import; Sources hub is v2
                     GlassRoundButton(systemName: "gearshape")                       // Settings sheet is Phase 4
                 }

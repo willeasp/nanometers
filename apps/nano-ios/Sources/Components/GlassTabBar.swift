@@ -3,7 +3,7 @@ import SwiftUI
 enum Tab: CaseIterable {
     case library, playlists, search
     var title: String { switch self { case .library: "Library"; case .playlists: "Playlists"; case .search: "Search" } }
-    var icon: String { switch self { case .library: "music.note.list"; case .playlists: "music.note.list"; case .search: "magnifyingglass" } }
+    var icon: String { switch self { case .library: "square.stack"; case .playlists: "music.note.list"; case .search: "magnifyingglass" } }
 }
 
 struct GlassTabBar: View {

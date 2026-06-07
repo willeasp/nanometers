@@ -9,13 +9,14 @@ struct RootView: View {
 
             Group {
                 switch tab {
-                case .library:   LibraryScreen()
+                case .library:   LibraryScreen(onSearch: { tab = .search })
                 case .playlists: PlaylistsScreen()
                 case .search:    SearchScreen()
                 }
             }
 
             GlassTabBar(selection: $tab)
+                .padding(.bottom, 10)
         }
         .preferredColorScheme(.dark)
         .tint(Theme.accent)
