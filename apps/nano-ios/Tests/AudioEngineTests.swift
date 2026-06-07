@@ -34,6 +34,13 @@ final class AudioEngineTests: XCTestCase {
                           "expected ~silence when paused, got \(engine.outputLevel)")
     }
 
+    func test_setVolumeClampsToUnitRange() {
+        let engine = AudioEngine()
+        engine.setVolume(0.5);  XCTAssertEqual(engine.volume, 0.5, accuracy: 1e-6)
+        engine.setVolume(1.7);  XCTAssertEqual(engine.volume, 1.0, accuracy: 1e-6)
+        engine.setVolume(-0.3); XCTAssertEqual(engine.volume, 0.0, accuracy: 1e-6)
+    }
+
     /// Writes `seconds` of a mono 44.1k float-WAV sine. The `AVAudioFile` writer is out of scope on
     /// return, so the file's header is finalized and it's immediately readable.
     private static func writeSine(to url: URL, seconds: Double, frequency: Double) throws {

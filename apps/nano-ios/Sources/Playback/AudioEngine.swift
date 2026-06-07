@@ -22,6 +22,8 @@ final class AudioEngine {
     /// RMS of the signal at the main mixer — the audio actually being rendered to the output.
     /// Non-zero only while real sound is flowing; foundation for the Phase 5 live meter (ADR 0002).
     private(set) var outputLevel: Float = 0
+    /// Player gain, 0…1. Drives `player.volume`; NOT system volume.
+    private(set) var volume: Double = 1.0
     private(set) var context: PlayContext = .library
     var isRepeat: Bool {
         get { queue.isRepeat }
@@ -86,6 +88,12 @@ final class AudioEngine {
             player.play(); isPlaying = true; startTicker()
         }
         updateNowPlayingInfo()
+    }
+
+    func setVolume(_ v: Double) {
+        let clamped = min(1, max(0, v))
+        volume = clamped
+        player.volume = Float(clamped)
     }
 
     // MARK: Loading / scheduling

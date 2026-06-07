@@ -32,6 +32,7 @@ struct NowPlayingScreen: View {
                 Spacer(minLength: 8)
                 titleRow
                 transportRow
+                volumeRow
             }
             .padding(.horizontal, 26)
             .padding(.top, 8).padding(.bottom, 28)
@@ -117,6 +118,27 @@ struct NowPlayingScreen: View {
                 Image(systemName: "repeat").font(.system(size: 22))
                     .foregroundStyle(engine.isRepeat ? Theme.accent : .white.opacity(0.85))
             }.buttonStyle(.plain).frame(maxWidth: .infinity)
+        }
+    }
+
+    @ViewBuilder private var volumeRow: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "waveform").font(.system(size: 16)).foregroundStyle(.white.opacity(0.4))
+            GeometryReader { geo in                                    // custom: track white@14%, fill white@85%, white knob
+                let w = geo.size.width
+                ZStack(alignment: .leading) {
+                    Capsule().fill(.white.opacity(0.14)).frame(height: 4)
+                    Capsule().fill(.white.opacity(0.85)).frame(width: w * CGFloat(engine.volume), height: 4)
+                    Circle().fill(.white).frame(width: 14, height: 14)
+                        .shadow(color: .black.opacity(0.4), radius: 4, y: 1)
+                        .offset(x: max(0, min(w - 14, w * CGFloat(engine.volume) - 7)))
+                }
+                .frame(maxHeight: .infinity, alignment: .center)
+                .contentShape(Rectangle())
+                .gesture(DragGesture(minimumDistance: 0).onChanged { engine.setVolume(min(1, max(0, $0.location.x / w))) })
+            }
+            .frame(height: 24).accessibilityIdentifier("npVolume")
+            Image(systemName: "waveform").font(.system(size: 22)).foregroundStyle(.white.opacity(0.4))  // asymmetric 16/22 (§ JSX)
         }
     }
 
