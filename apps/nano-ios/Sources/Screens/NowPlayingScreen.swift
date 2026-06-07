@@ -8,9 +8,21 @@ struct NowPlayingScreen: View {
     var namespace: Namespace.ID
     var onClose: () -> Void
 
+    @State private var tint: Color = Theme.bgElev2
+
     var body: some View {
         ZStack {
-            Theme.npGradientBottom.ignoresSafeArea()   // Task 3 swaps this for the tint gradient
+            LinearGradient(stops: [.init(color: tint, location: 0),
+                                   .init(color: Theme.npGradientMid, location: 0.46),
+                                   .init(color: Theme.npGradientBottom, location: 1)],
+                           startPoint: .top, endPoint: .bottom)
+                .overlay {                                   // §03D faint glass scrim (system material per §01)
+                    ZStack {
+                        Rectangle().fill(.ultraThinMaterial).opacity(0.18)
+                        Theme.npGradientBottom.opacity(0.35)     // #111319 @ 0.35
+                    }.allowsHitTesting(false)
+                }
+                .ignoresSafeArea()
 
             VStack(spacing: 18) {
                 topBar
@@ -23,6 +35,9 @@ struct NowPlayingScreen: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("nowPlaying")
+        .task(id: engine.current?.persistentModelID) {
+            if let t = engine.current { tint = await ArtworkTintStore.shared.tint(for: t) }
+        }
         .contentShape(Rectangle())
         .gesture(DragGesture().onEnded { if $0.translation.height > 80 { onClose() } })
     }
