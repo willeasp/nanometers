@@ -23,8 +23,9 @@ struct MiniPlayer: View {
             // Left tap area: artwork + title. A real Button so XCTest can reliably hit-test it.
             Button(action: onTapBody) {
                 HStack(spacing: 12) {
-                    NMArtwork(data: track.artworkData, size: 44, radius: 9)
-                        .matchedGeometryEffect(id: "nowPlayingArtwork", in: namespace)   // constant id (matches NowPlayingScreen hero)
+                    MorphArtwork(data: track.artworkData, radius: 9)
+                        .frame(width: 44, height: 44)
+                        .matchedGeometryEffect(id: "nowPlayingArtwork", in: namespace)   // resizable so the morph can scale it
 
                     VStack(alignment: .leading, spacing: 1) {
                         Text(track.title)

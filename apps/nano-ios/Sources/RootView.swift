@@ -18,18 +18,19 @@ struct RootView: View {
                 }
             }
 
-            if !npOpen {                                   // REMOVE the dock (not just hide it) so only one
-                VStack(spacing: 10) {                      // matched artwork exists at a time → the morph works
+            // The dock and Now Playing are mutually exclusive (one matched artwork at a time) and use
+            // the DEFAULT (opacity) transition — NOT .move, which would drag the hero along and fight
+            // the geometry match. matchedGeometryEffect alone morphs the artwork between the two.
+            if !npOpen {
+                VStack(spacing: 10) {
                     MiniPlayer(namespace: heroNS, onTapBody: { open() })
                     GlassTabBar(selection: $tab)
                 }
                 .padding(.bottom, 10)
-                .transition(.move(edge: .bottom))          // tab bar slides down as Now Playing rises
             }
 
             if npOpen {
                 NowPlayingScreen(namespace: heroNS, onClose: { close() })
-                    .transition(.move(edge: .bottom))
                     .zIndex(1)
             }
         }

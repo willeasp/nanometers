@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// Full-screen Now Playing surface, presented as an in-tree overlay from RootView (NOT a cover —
 /// matchedGeometryEffect can't cross a cover/sheet boundary). Sections are built up across Phase 4
@@ -17,6 +18,16 @@ struct NowPlayingScreen: View {
     @AppStorage("spectrum") private var spectrum = false
     @State private var bins: [WaveBin] = []
 
+    /// The REAL device safe-area insets, read from the key window. RootView's `Theme.bg.ignoresSafeArea()`
+    /// makes the ZStack hand full-screen bounds to this overlay (so SwiftUI's own `safeAreaInsets` read 0
+    /// here) — we pad by the window insets directly to keep the top bar below the status bar / island.
+    private static var windowSafeAreaInsets: UIEdgeInsets {
+        UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap(\.windows)
+            .first(where: \.isKeyWindow)?.safeAreaInsets ?? .zero
+    }
+
     var body: some View {
         VStack(spacing: 18) {
             topBar
@@ -31,7 +42,8 @@ struct NowPlayingScreen: View {
             bottomRail
         }
         .padding(.horizontal, 26)
-        .padding(.top, 8).padding(.bottom, 28)
+        .padding(.top, Self.windowSafeAreaInsets.top + 8)      // clear the status bar / dynamic island
+        .padding(.bottom, Self.windowSafeAreaInsets.bottom + 20)   // clear the home indicator
         .frame(maxWidth: .infinity, maxHeight: .infinity)   // fill the screen; content stays within the safe area
         .background {                                        // gradient bleeds full-screen, the content above does NOT
             LinearGradient(stops: [.init(color: tint, location: 0),
@@ -197,8 +209,9 @@ struct NowPlayingScreen: View {
 
     @ViewBuilder private var hero: some View {
         if let track = engine.current {
-            NMArtwork(data: track.artworkData, size: 340, radius: Theme.Radius.albumNowPlaying)   // §03D ≤340 cap
-                .matchedGeometryEffect(id: "nowPlayingArtwork", in: namespace)   // constant id: persists across track changes (no ghost)
+            MorphArtwork(data: track.artworkData, radius: Theme.Radius.albumNowPlaying)
+                .frame(width: 340, height: 340)   // §03D ≤340 cap; resizable so the geometry match can scale it
+                .matchedGeometryEffect(id: "nowPlayingArtwork", in: namespace)   // constant id: stable across track changes
                 .shadow(color: .black.opacity(0.45), radius: 30, y: 10)
                 .shadow(color: .black.opacity(0.3), radius: 8, y: 2)
                 .scaleEffect(reduceMotion ? 1.0 : (engine.isPlaying ? 1.0 : 0.86))
