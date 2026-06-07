@@ -3,6 +3,7 @@ import AVFoundation
 import MediaPlayer
 import Observation
 import UIKit
+import Accelerate
 
 /// The playback engine (handoff §04). `@MainActor @Observable` so SwiftUI reads `current`,
 /// `isPlaying`, `progress` directly. Owns a pure `PlaybackQueue` and an `AVAudioEngine`/
@@ -18,6 +19,9 @@ final class AudioEngine {
     private(set) var isPlaying = false
     private(set) var progress: Double = 0    // 0…1
     private(set) var elapsed: Double = 0     // seconds
+    /// RMS of the signal at the main mixer — the audio actually being rendered to the output.
+    /// Non-zero only while real sound is flowing; foundation for the Phase 5 live meter (ADR 0002).
+    private(set) var outputLevel: Float = 0
     private(set) var context: PlayContext = .library
     var isRepeat: Bool {
         get { queue.isRepeat }
@@ -43,8 +47,20 @@ final class AudioEngine {
     init() {
         engine.attach(player)
         engine.connect(player, to: engine.mainMixerNode, format: nil)
+        installOutputMeter()
         configureSession()
         configureRemoteCommands()            // Task 10
+    }
+
+    /// Tap the main mixer and publish the rendered signal's RMS as `outputLevel` (real audio
+    /// flowing ⇒ > 0). The tap lives and dies with this engine instance — no global state to clean.
+    private func installOutputMeter() {
+        engine.mainMixerNode.installTap(onBus: 0, bufferSize: 1024, format: nil) { [weak self] buffer, _ in
+            guard let data = buffer.floatChannelData, buffer.frameLength > 0 else { return }
+            var rms: Float = 0
+            vDSP_rmsqv(data[0], 1, &rms, vDSP_Length(buffer.frameLength))
+            Task { @MainActor in self?.outputLevel = rms }
+        }
     }
 
     deinit {
