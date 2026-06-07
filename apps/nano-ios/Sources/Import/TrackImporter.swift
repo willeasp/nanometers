@@ -35,6 +35,8 @@ enum TrackImporter {
                 artworkData: meta.artwork
             )
             ctx.insert(track)
+            // Kick analysis so the waveform/LUFS are ready by the time the row appears.
+            Task { @MainActor in await WaveformStore.shared.bins(for: track) }
             count += 1
         }
         return count
