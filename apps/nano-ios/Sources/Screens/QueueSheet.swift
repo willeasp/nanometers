@@ -34,7 +34,7 @@ struct QueueSheet: View {
                     Text("End of queue").font(Theme.sans(14)).foregroundStyle(Theme.text3)
                         .frame(maxWidth: .infinity).padding(.vertical, 24).listRowBackground(Theme.bg)
                 } else {
-                    ForEach(upcoming, id: \.track.id) { item in
+                    ForEach(upcoming, id: \.offset) { item in   // positional id: a track may legitimately appear twice in the queue
                         Button { engine.jump(to: item.offset); dismiss() } label: {
                             HStack(spacing: 12) {
                                 NMArtwork(data: item.track.artworkData, size: 42, radius: 8)

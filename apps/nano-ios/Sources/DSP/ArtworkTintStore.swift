@@ -11,7 +11,9 @@ import SwiftData
 @Observable
 final class ArtworkTintStore {
     static let shared = ArtworkTintStore()
-    private var inflight: Set<PersistentIdentifier> = []
+    /// In-flight extractions keyed by track identity — concurrent callers await the same Task
+    /// (not a bail-with-fallback), so a second caller can't miss the real tint.
+    private var inflight: [PersistentIdentifier: Task<Color, Never>] = [:]
 
     /// The gradient top-stop color for `track`. Cache hit → parse; miss → extract + persist; no art → fallback.
     func tint(for track: Track) async -> Color {
@@ -19,14 +21,19 @@ final class ArtworkTintStore {
         guard let data = track.artworkData else { return Theme.bgElev2 }
 
         let id = track.persistentModelID
-        guard !inflight.contains(id) else { return Theme.bgElev2 }
-        inflight.insert(id); defer { inflight.remove(id) }
+        if let task = inflight[id] { return await task.value }
 
-        guard let hex = await Task.detached(priority: .utility, operation: { Self.averageHex(data) }).value else {
-            return Theme.bgElev2
+        let task = Task { @MainActor () -> Color in
+            guard let hex = await Task.detached(priority: .utility, operation: { Self.averageHex(data) }).value else {
+                return Theme.bgElev2
+            }
+            track.artworkTintHex = hex
+            return Color(hex: hex)
         }
-        track.artworkTintHex = hex
-        return Color(hex: hex)
+        inflight[id] = task
+        let result = await task.value
+        inflight[id] = nil
+        return result
     }
 
     /// Nonisolated 1×1 CIAreaAverage → "#RRGGBB" (nil on undecodable data). Safe to call off-main.
