@@ -7,6 +7,7 @@ struct LibraryScreen: View {
     @Query(sort: \Track.dateAdded, order: .reverse) private var tracks: [Track]
     @Query private var playlists: [Playlist]
     @State private var importing = false
+    @State private var detailTrack: Track?
     var onSearch: () -> Void = {}
 
     var body: some View {
@@ -39,7 +40,8 @@ struct LibraryScreen: View {
                             track: track,
                             isCurrent: engine.current?.id == track.id,
                             isPlaying: engine.isPlaying && engine.current?.id == track.id,
-                            onTap: { engine.play(track, in: tracks, context: .library) }
+                            onTap: { engine.play(track, in: tracks, context: .library) },
+                            onEllipsis: { detailTrack = track }
                         )
                         Divider().background(Theme.hair).padding(.leading, Theme.Layout.rowSeparatorInset)
                     }
@@ -55,6 +57,7 @@ struct LibraryScreen: View {
                 Task { _ = await TrackImporter.importFiles(urls, into: ctx) }
             }
         }
+        .sheet(item: $detailTrack) { TrackDetailScreen(track: $0) }
     }
 }
 

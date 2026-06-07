@@ -6,6 +6,7 @@ struct PlaylistDetailScreen: View {
     @Environment(AudioEngine.self) private var engine
     let playlist: Playlist
     @State private var adding = false
+    @State private var detailTrack: Track?
 
     private var tracks: [Track] { (try? LibraryStore.tracks(in: playlist, ctx)) ?? [] }
 
@@ -48,7 +49,8 @@ struct PlaylistDetailScreen: View {
                         track: t,
                         isCurrent: engine.current?.id == t.id,
                         isPlaying: engine.isPlaying && engine.current?.id == t.id,
-                        onTap: { engine.play(t, in: tracks, context: .playlist(playlist.name)) }
+                        onTap: { engine.play(t, in: tracks, context: .playlist(playlist.name)) },
+                        onEllipsis: { detailTrack = t }
                     )
                 }
                 .onMove { from, to in LibraryStore.move(in: playlist, fromOffsets: from, toOffset: to) }
@@ -67,6 +69,7 @@ struct PlaylistDetailScreen: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { EditButton() }
         .sheet(isPresented: $adding) { AddSongsSheet(playlist: playlist) }
+        .sheet(item: $detailTrack) { TrackDetailScreen(track: $0) }
     }
 
     private var totalMinutes: Int { Int(tracks.reduce(0) { $0 + $1.durationSec } / 60) }
