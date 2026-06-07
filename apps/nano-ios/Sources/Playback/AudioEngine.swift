@@ -160,8 +160,51 @@ final class AudioEngine {
         try? s.setActive(true)
     }
 
-    // MARK: Temporary stubs — replaced in Task 5 (transport) and Task 10 (now-playing/remote)
-    func next() {}
+    // MARK: Transport (Task 5)
+
+    func next() {
+        if let t = queue.advance() {
+            loadAndStart(t)
+        } else {                       // end of queue, repeat off → stop
+            player.stop(); stopTicker()
+            isPlaying = false; progress = 0; elapsed = 0
+            updateNowPlayingInfo()
+        }
+    }
+
+    func prev() {
+        switch queue.goPrev(progress: progress) {
+        case .restartCurrent: seek(toFraction: 0)
+        case .play(let t):    loadAndStart(t)
+        }
+    }
+
+    func jump(to i: Int) {
+        if let t = queue.jump(to: i) { loadAndStart(t) }
+    }
+
+    func playShuffle(_ list: [Track], context: PlayContext) {
+        guard !list.isEmpty else { return }
+        self.context = context
+        let first = Int.random(in: 0..<list.count)
+        if let t = queue.loadShuffled(list, firstIndex: first) { loadAndStart(t) }
+    }
+
+    func setShuffle(_ on: Bool) { queue.isShuffle = on }   // flag only; reorder happens via playShuffle
+    func setRepeat(_ on: Bool) { isRepeat = on }
+
+    func seek(toFraction f: Double) {
+        guard let file, totalFrames > 0 else { return }
+        let target = AVAudioFramePosition(Double(totalFrames) * min(1, max(0, f)))
+        let wasPlaying = isPlaying
+        player.stop()
+        schedule(file, from: target)
+        if wasPlaying { if !engine.isRunning { try? engine.start() }; player.play() }
+        updateProgress()
+        updateNowPlayingInfo()
+    }
+
+    // MARK: Temporary stubs — replaced in Task 10 (now-playing/remote)
     private func configureRemoteCommands() {}
     private func updateNowPlayingInfo() {}
 }
