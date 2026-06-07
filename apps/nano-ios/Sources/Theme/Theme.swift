@@ -40,6 +40,7 @@ enum Theme {
         static let rowMinHeight: CGFloat = 56
         static let rowSeparatorInset: CGFloat = 78   // after 46pt artwork + gaps
         static let scrollBottomPadding: CGFloat = 100 // no-mini case; ~168 once the mini player exists (Phase 2)
+        static let scrollBottomPaddingPlaying: CGFloat = 168 // mini player + tab bar (handoff §03)
     }
 
     // Fonts — SF Pro for text, SF Mono for ALL numerics (.monospacedDigit), §01.

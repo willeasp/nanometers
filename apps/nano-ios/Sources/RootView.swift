@@ -2,6 +2,7 @@ import SwiftUI
 
 struct RootView: View {
     @State private var tab: Tab = .library
+    @State private var engine = AudioEngine()
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -15,9 +16,13 @@ struct RootView: View {
                 }
             }
 
-            GlassTabBar(selection: $tab)
-                .padding(.bottom, 10)
+            VStack(spacing: 10) {
+                MiniPlayer()                 // renders only when engine.current != nil
+                GlassTabBar(selection: $tab)
+            }
+            .padding(.bottom, 10)
         }
+        .environment(engine)
         .preferredColorScheme(.dark)
         .tint(Theme.accent)
     }
