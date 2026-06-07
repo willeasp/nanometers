@@ -6,6 +6,7 @@ import SwiftUI
 /// The optional 56×22 mini-waveform slot (§02) appears once the track's bins are analyzed.
 struct MiniPlayer: View {
     @Environment(AudioEngine.self) private var engine
+    var namespace: Namespace.ID
     var onTapBody: () -> Void = {}
 
     @State private var bins: [WaveBin] = []
@@ -18,16 +19,27 @@ struct MiniPlayer: View {
 
     @ViewBuilder
     private func content(_ track: Track) -> some View {
-        HStack(spacing: 12) {
-            NMArtwork(data: track.artworkData, size: 44, radius: 9)
+        HStack(spacing: 0) {
+            // Left tap area: artwork + title. A real Button so XCTest can reliably hit-test it.
+            Button(action: onTapBody) {
+                HStack(spacing: 12) {
+                    NMArtwork(data: track.artworkData, size: 44, radius: 9)
+                        .matchedGeometryEffect(id: "artwork-\(track.id)", in: namespace)
 
-            VStack(alignment: .leading, spacing: 1) {
-                Text(track.title)
-                    .font(Theme.sans(14.5, .semibold)).foregroundStyle(Theme.text).lineLimit(1)
-                    .accessibilityIdentifier("miniPlayerTitle")
-                Text(track.artist)
-                    .font(Theme.sans(12.5)).foregroundStyle(Theme.text2).lineLimit(1)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(track.title)
+                            .font(Theme.sans(14.5, .semibold)).foregroundStyle(Theme.text).lineLimit(1)
+                            .accessibilityIdentifier("miniPlayerTitle")
+                        Text(track.artist)
+                            .font(Theme.sans(12.5)).foregroundStyle(Theme.text2).lineLimit(1)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("miniPlayerBody")
+
             Spacer(minLength: 8)
 
             if !bins.isEmpty {
@@ -63,8 +75,6 @@ struct MiniPlayer: View {
         .overlay(alignment: .bottom) { progressBar }
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .shadow(color: .black.opacity(0.4), radius: 18, y: 8)
-        .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .onTapGesture { onTapBody() }
         .task(id: track.persistentModelID) {
             bins = await WaveformStore.shared.bins(for: track) ?? []
         }
