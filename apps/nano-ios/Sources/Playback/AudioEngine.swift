@@ -36,12 +36,21 @@ final class AudioEngine {
     private var seekOffsetFrames: AVAudioFramePosition = 0
     private var scheduleToken = 0            // invalidates stale completion callbacks
     private var ticker: Timer?
+    // Written once in `configureRemoteCommands` (init), read once in `deinit` — no concurrent
+    // access, so `nonisolated(unsafe)` lets the nonisolated deinit unregister our handlers.
+    nonisolated(unsafe) private var remoteTargets: [(MPRemoteCommand, Any)] = []
 
     init() {
         engine.attach(player)
         engine.connect(player, to: engine.mainMixerNode, format: nil)
         configureSession()
         configureRemoteCommands()            // Task 10
+    }
+
+    deinit {
+        // Remove our handlers from the process-global command center so a re-instantiated engine
+        // (SwiftUI previews, tests) doesn't stack duplicate remote-command handlers.
+        remoteTargets.forEach { $0.0.removeTarget($0.1) }
     }
 
     // MARK: Public API (handoff §04)
@@ -144,7 +153,8 @@ final class AudioEngine {
     func updateProgress() {
         progress = PlaybackMath.fraction(frame: currentFrame, total: totalFrames)
         elapsed = sampleRate > 0 ? Double(currentFrame) / sampleRate : 0
-        if Int(elapsed * 20) % 20 == 0 { updateNowPlayingInfo() }
+        // The lock-screen position is anchored at play/pause/seek/track-change (iOS extrapolates
+        // from rate + elapsed), so there's no need to re-push now-playing info every tick.
     }
 
     private func startTicker() {
@@ -169,7 +179,7 @@ final class AudioEngine {
         if let t = queue.advance() {
             loadAndStart(t)
         } else {                       // end of queue, repeat off → stop
-            player.stop(); stopTicker()
+            player.stop(); stopTicker(); releaseScope()
             isPlaying = false; progress = 0; elapsed = 0
             updateNowPlayingInfo()
         }
@@ -211,18 +221,20 @@ final class AudioEngine {
 
     private func configureRemoteCommands() {
         let c = MPRemoteCommandCenter.shared()
-        c.playCommand.addTarget { [weak self] _ in self?.resume(); return .success }
-        c.pauseCommand.addTarget { [weak self] _ in self?.pausePlayback(); return .success }
-        c.togglePlayPauseCommand.addTarget { [weak self] _ in self?.toggle(); return .success }
-        c.nextTrackCommand.addTarget { [weak self] _ in self?.next(); return .success }
-        c.previousTrackCommand.addTarget { [weak self] _ in self?.prev(); return .success }
-        c.changePlaybackPositionCommand.addTarget { [weak self] event in
-            guard let self,
-                  let e = event as? MPChangePlaybackPositionCommandEvent,
-                  self.totalFrames > 0, self.sampleRate > 0 else { return .commandFailed }
-            self.seek(toFraction: e.positionTime * self.sampleRate / Double(self.totalFrames))
-            return .success
-        }
+        remoteTargets = [
+            (c.playCommand,            c.playCommand.addTarget { [weak self] _ in self?.resume(); return .success }),
+            (c.pauseCommand,           c.pauseCommand.addTarget { [weak self] _ in self?.pausePlayback(); return .success }),
+            (c.togglePlayPauseCommand, c.togglePlayPauseCommand.addTarget { [weak self] _ in self?.toggle(); return .success }),
+            (c.nextTrackCommand,       c.nextTrackCommand.addTarget { [weak self] _ in self?.next(); return .success }),
+            (c.previousTrackCommand,   c.previousTrackCommand.addTarget { [weak self] _ in self?.prev(); return .success }),
+            (c.changePlaybackPositionCommand, c.changePlaybackPositionCommand.addTarget { [weak self] event in
+                guard let self,
+                      let e = event as? MPChangePlaybackPositionCommandEvent,
+                      self.totalFrames > 0, self.sampleRate > 0 else { return .commandFailed }
+                self.seek(toFraction: e.positionTime * self.sampleRate / Double(self.totalFrames))
+                return .success
+            }),
+        ]
     }
 
     private func resume() { if !isPlaying { toggle() } }

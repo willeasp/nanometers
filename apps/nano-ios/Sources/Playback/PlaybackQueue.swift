@@ -63,7 +63,8 @@ struct PlaybackQueue {
     mutating func goPrev(progress: Double) -> PrevAction {
         if progress > Self.prevRestartThreshold { return .restartCurrent }
         index = max(0, index - 1)
-        return .play(current ?? tracks.first ?? tracks[index])
+        // Non-empty queues always have a `current` here; an empty queue can't step anywhere.
+        return current.map { .play($0) } ?? .restartCurrent
     }
 
     /// Jump to an explicit index; nil (and no change) if out of range.
