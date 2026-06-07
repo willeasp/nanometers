@@ -15,6 +15,9 @@ targets:
     type: application
     platform: iOS
     sources: [Sources, Resources]
+    dependencies:
+      - framework: ../../crates/nano-dsp/NanoDSP.xcframework
+        embed: false        # static archive (libnano_dsp.a) — link, do not embed
     info:
       path: Sources/Info.plist
       properties:
