@@ -57,7 +57,7 @@ struct LibraryScreen: View {
                 Task { _ = await TrackImporter.importFiles(urls, into: ctx) }
             }
         }
-        .sheet(item: $detailTrack) { TrackDetailScreen(track: $0) }
+        .sheet(item: $detailTrack) { TrackContextSheet(track: $0) }
     }
 }
 

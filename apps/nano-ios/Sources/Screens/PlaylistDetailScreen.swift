@@ -69,7 +69,7 @@ struct PlaylistDetailScreen: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { EditButton() }
         .sheet(isPresented: $adding) { AddSongsSheet(playlist: playlist) }
-        .sheet(item: $detailTrack) { TrackDetailScreen(track: $0) }
+        .sheet(item: $detailTrack) { TrackContextSheet(track: $0) }
     }
 
     private var totalMinutes: Int { Int(tracks.reduce(0) { $0 + $1.durationSec } / 60) }

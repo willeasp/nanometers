@@ -11,6 +11,10 @@ struct NowPlayingScreen: View {
     @State private var tint: Color = Theme.bgElev2
     @State private var showContext = false
 
+    @AppStorage("showWave") private var showWave = true
+    @AppStorage("spectrum") private var spectrum = false
+    @State private var bins: [WaveBin] = []
+
     var body: some View {
         ZStack {
             LinearGradient(stops: [.init(color: tint, location: 0),
@@ -31,6 +35,8 @@ struct NowPlayingScreen: View {
                 hero
                 Spacer(minLength: 8)
                 titleRow
+                scrubber
+                timeRow
                 transportRow
                 volumeRow
             }
@@ -42,11 +48,53 @@ struct NowPlayingScreen: View {
         .task(id: engine.current?.persistentModelID) {
             if let t = engine.current { tint = await ArtworkTintStore.shared.tint(for: t) }
         }
+        .task(id: engine.current?.persistentModelID) {
+            if let t = engine.current { bins = await WaveformStore.shared.bins(for: t) ?? [] }
+        }
         .contentShape(Rectangle())
         .gesture(DragGesture().onEnded { if $0.translation.height > 80 { onClose() } })
         .sheet(isPresented: $showContext) {
             if let t = engine.current { TrackContextSheet(track: t) }
         }
+    }
+
+    @ViewBuilder private var scrubber: some View {
+        if showWave {
+            OverviewWaveform(bins: bins, progress: engine.progress, coloringOn: spectrum,
+                             onScrub: { engine.seek(toFraction: $0) })
+                .overlay(alignment: .topTrailing) {
+                    LUFSBadge(lufs: engine.current?.integratedLUFS).offset(y: -6)
+                }
+        } else {                                   // both/overview off → plain 6pt bar (§03D item 5)
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(.white.opacity(0.16)).frame(height: 6)
+                    Capsule().fill(Theme.accent).frame(width: geo.size.width * CGFloat(engine.progress), height: 6)
+                    Circle().fill(.white).frame(width: 14, height: 14)              // §03D item 5: 14pt white knob
+                        .shadow(color: .black.opacity(0.4), radius: 4, y: 1)
+                        .offset(x: max(0, min(geo.size.width - 14, geo.size.width * CGFloat(engine.progress) - 7)))
+                }
+                .frame(maxHeight: .infinity, alignment: .center)
+                .contentShape(Rectangle())
+                .gesture(DragGesture(minimumDistance: 0).onChanged { engine.seek(toFraction: min(1, max(0, $0.location.x / geo.size.width))) })
+            }
+            .frame(height: 14)
+        }
+    }
+
+    @ViewBuilder private var timeRow: some View {
+        let dur = engine.current?.durationSec ?? 0
+        HStack {
+            Text(PlaybackMath.clock(engine.elapsed))
+            Spacer()
+            if !showWave {                                   // no overview → LUFS sits inline here as plain text (NOT the capsule)
+                Text((engine.current?.integratedLUFS).map { String(format: "%.1f LUFS", $0) } ?? "— LUFS")
+                    .foregroundStyle(.white.opacity(0.55))
+                Spacer()
+            }
+            Text("-" + PlaybackMath.clock(max(0, dur - engine.elapsed)))
+        }
+        .font(Theme.mono(12)).foregroundStyle(.white.opacity(0.5))
     }
 
     @ViewBuilder private var topBar: some View {
