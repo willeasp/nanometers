@@ -36,9 +36,18 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.willeasp.nanometers.ios.tests
+  NanoMetersUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [UITests]
+    dependencies:
+      - target: NanoMeters
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.willeasp.nanometers.ios.uitests
 schemes:
   NanoMeters:
     build:
-      targets: { NanoMeters: all, NanoMetersTests: [test] }
+      targets: { NanoMeters: all, NanoMetersTests: [test], NanoMetersUITests: [test] }
     test:
-      targets: [NanoMetersTests]
+      targets: [NanoMetersTests, NanoMetersUITests]

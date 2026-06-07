@@ -22,6 +22,7 @@ struct MiniPlayer: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text(track.title)
                     .font(Theme.sans(14.5, .semibold)).foregroundStyle(Theme.text).lineLimit(1)
+                    .accessibilityIdentifier("miniPlayerTitle")
                 Text(track.artist)
                     .font(Theme.sans(12.5)).foregroundStyle(Theme.text2).lineLimit(1)
             }
@@ -33,6 +34,8 @@ struct MiniPlayer: View {
                     .frame(width: 40, height: 40).contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .accessibilityIdentifier("miniPlayerPlayPause")
+            .accessibilityLabel(engine.isPlaying ? "Pause" : "Play")
 
             Button { engine.next() } label: {
                 Image(systemName: "forward.fill")
@@ -40,6 +43,8 @@ struct MiniPlayer: View {
                     .frame(width: 40, height: 40).contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .accessibilityIdentifier("miniPlayerNext")
+            .accessibilityLabel("Next")
         }
         .padding(.leading, 10).padding(.trailing, 6).padding(.vertical, 8)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
