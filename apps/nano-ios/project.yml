@@ -19,6 +19,8 @@ targets:
       path: Sources/Info.plist
       properties:
         CFBundleDisplayName: NanoMeters
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
         UILaunchScreen: {}
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
     settings:

@@ -1,5 +1,6 @@
 import XCTest
 import SwiftData
+import AVFoundation
 @testable import NanoMeters
 
 @MainActor
@@ -28,5 +29,37 @@ final class ImportTests: XCTestCase {
         var stale = false
         let resolved = try URL(resolvingBookmarkData: t.bookmark!, bookmarkDataIsStale: &stale)
         XCTAssertEqual(resolved.lastPathComponent, "My_Bounce.wav")
+    }
+
+    func test_importReadsRealAudioDuration() async throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Tone_\(UUID().uuidString).wav")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        // Write 1.0s of silence, then let the writer deallocate so the WAV header is finalized
+        // (data-chunk size written) BEFORE we read it back — otherwise duration reads as 0.
+        try Self.writeSilentWAV(to: url, seconds: 1.0)
+
+        let config = ModelConfiguration(isStoredInMemoryOnly: true)
+        let container = try ModelContainer(for: Track.self, Playlist.self, configurations: config)
+        let ctx = ModelContext(container)
+
+        let n = await TrackImporter.importFiles([url], into: ctx)
+        XCTAssertEqual(n, 1)
+        let t = try LibraryStore.allTracks(ctx)[0]
+        XCTAssertEqual(t.format, "WAV")
+        XCTAssertEqual(t.durationSec, 1.0, accuracy: 0.1)   // real duration, not a fallback
+    }
+
+    /// Writes `seconds` of silence to a WAV at `url`. The `AVAudioFile` is fully out of scope when
+    /// this returns, so its closing header (data-chunk size) is flushed and the file is readable.
+    private static func writeSilentWAV(to url: URL, seconds: Double) throws {
+        let sr = 44_100.0
+        let fmt = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: sr, channels: 1, interleaved: false)!
+        let file = try AVAudioFile(forWriting: url, settings: fmt.settings)
+        let frames = AVAudioFrameCount(sr * seconds)
+        let buf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: frames)!
+        buf.frameLength = frames
+        try file.write(from: buf)
     }
 }
