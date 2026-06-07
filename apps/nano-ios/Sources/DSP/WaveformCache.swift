@@ -44,10 +44,9 @@ enum WaveformCache {
         guard let m: UInt32 = get(UInt32.self, 4), m == magic,
               let _: UInt16 = get(UInt16.self, 2),
               let _: UInt32 = get(UInt32.self, 4),                 // sampleRate bits
-              let durBits: UInt64 = get(UInt64.self, 8),
+              let _: UInt64 = get(UInt64.self, 8),                 // durationSec bits (unused on load)
               let lufsBits: UInt64 = get(UInt64.self, 8),
               let count: UInt32 = get(UInt32.self, 4) else { return nil }
-        _ = durBits
         var bins: [WaveBin] = []; bins.reserveCapacity(Int(count))
         for _ in 0..<Int(count) {
             guard let p: UInt32 = get(UInt32.self, 4), let r: UInt32 = get(UInt32.self, 4),

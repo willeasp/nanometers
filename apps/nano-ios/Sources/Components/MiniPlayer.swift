@@ -3,7 +3,7 @@ import SwiftUI
 /// Docked mini player (handoff §02): artwork · title/artist · play-pause · next, with a 2pt
 /// accent progress bar pinned to the bottom edge. Reads the engine from the environment; only
 /// renders when a track is loaded. Body tap is reserved for Now Playing (Phase 4) via `onTapBody`.
-/// The optional 56×22 mini-waveform slot (§02) is Phase 3 and omitted here.
+/// The optional 56×22 mini-waveform slot (§02) appears once the track's bins are analyzed.
 struct MiniPlayer: View {
     @Environment(AudioEngine.self) private var engine
     var onTapBody: () -> Void = {}
