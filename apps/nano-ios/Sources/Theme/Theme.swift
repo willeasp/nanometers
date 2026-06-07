@@ -23,6 +23,9 @@ enum Theme {
     static let glassBorder = Color.white.opacity(0.10)
     static let glassSheen  = Color.white.opacity(0.14)
     static let artFallback = Color(hex: 0x22252E)
+    // Now Playing gradient stops (§01 / §03D background).
+    static let npGradientMid    = Color(hex: 0x14161C)
+    static let npGradientBottom = Color(hex: 0x111319)
 
     // Corner radii (§01)
     enum Radius {
@@ -32,6 +35,7 @@ enum Theme {
         static let searchField: CGFloat = 12
         static let mosaic: CGFloat = 12
         static let button: CGFloat = 14
+        static let albumNowPlaying: CGFloat = 18   // §03D artwork hero
     }
 
     // Layout (§01)
@@ -62,5 +66,12 @@ extension Color {
             blue: Double(hex & 0xFF) / 255,
             opacity: 1
         )
+    }
+
+    /// "#RRGGBB" (or "RRGGBB") → Color; `.clear` on malformed input. Used by the artwork-tint cache.
+    init(hex string: String) {
+        let s = string.hasPrefix("#") ? String(string.dropFirst()) : string
+        guard s.count == 6, let v = UInt32(s, radix: 16) else { self = .clear; return }
+        self.init(hex: v)
     }
 }
