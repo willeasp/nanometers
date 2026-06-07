@@ -1,0 +1,68 @@
+import SwiftUI
+
+/// Docked mini player (handoff §02): artwork · title/artist · play-pause · next, with a 2pt
+/// accent progress bar pinned to the bottom edge. Reads the engine from the environment; only
+/// renders when a track is loaded. Body tap is reserved for Now Playing (Phase 4) via `onTapBody`.
+/// The optional 56×22 mini-waveform slot (§02) is Phase 3 and omitted here.
+struct MiniPlayer: View {
+    @Environment(AudioEngine.self) private var engine
+    var onTapBody: () -> Void = {}
+
+    var body: some View {
+        if let track = engine.current {
+            content(track)
+        }
+    }
+
+    @ViewBuilder
+    private func content(_ track: Track) -> some View {
+        HStack(spacing: 12) {
+            NMArtwork(data: track.artworkData, size: 44, radius: 9)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(track.title)
+                    .font(Theme.sans(14.5, .semibold)).foregroundStyle(Theme.text).lineLimit(1)
+                Text(track.artist)
+                    .font(Theme.sans(12.5)).foregroundStyle(Theme.text2).lineLimit(1)
+            }
+            Spacer(minLength: 8)
+
+            Button { engine.toggle() } label: {
+                Image(systemName: engine.isPlaying ? "pause.fill" : "play.fill")
+                    .font(.system(size: 18)).foregroundStyle(Theme.text)
+                    .frame(width: 40, height: 40).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            Button { engine.next() } label: {
+                Image(systemName: "forward.fill")
+                    .font(.system(size: 16)).foregroundStyle(Theme.text)
+                    .frame(width: 40, height: 40).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.leading, 10).padding(.trailing, 6).padding(.vertical, 8)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .strokeBorder(Theme.glassBorder, lineWidth: 0.5)
+        )
+        .overlay(alignment: .bottom) { progressBar }
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .shadow(color: .black.opacity(0.4), radius: 18, y: 8)
+        .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .onTapGesture { onTapBody() }
+        .padding(.horizontal, 12)
+    }
+
+    private var progressBar: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Rectangle().fill(.white.opacity(0.08))
+                Rectangle().fill(Theme.accent)
+                    .frame(width: geo.size.width * CGFloat(engine.progress))
+            }
+        }
+        .frame(height: 2)
+    }
+}
