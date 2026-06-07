@@ -7,6 +7,8 @@ struct NMRow: View {
     var onTap: () -> Void = {}
     var onEllipsis: () -> Void = {}
 
+    @State private var bins: [WaveBin] = []
+
     var body: some View {
         HStack(spacing: 12) {
             NMArtwork(data: track.artworkData, size: 46, radius: Theme.Radius.albumRow)
@@ -38,7 +40,13 @@ struct NMRow: View {
             }
             Spacer(minLength: 8)
 
-            // Phase 3 fills these: a 42×20 mini-waveform and the per-track LUFS (mono, tabular).
+            if !bins.isEmpty {
+                NMMiniWave(bins: bins, bars: 22)
+                    .frame(width: 42, height: 20).opacity(0.7)
+                    .accessibilityHidden(true)
+            }
+            NMLufsValue(lufs: track.integratedLUFS)
+                .frame(minWidth: 44, alignment: .trailing)
 
             Button(action: onEllipsis) {
                 Image(systemName: "ellipsis")
@@ -51,5 +59,8 @@ struct NMRow: View {
         .frame(minHeight: Theme.Layout.rowMinHeight)
         .contentShape(Rectangle())
         .onTapGesture { onTap() }
+        .task(id: track.persistentModelID) {
+            bins = await WaveformStore.shared.bins(for: track) ?? []
+        }
     }
 }

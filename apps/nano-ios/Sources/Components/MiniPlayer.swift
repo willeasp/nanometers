@@ -8,6 +8,8 @@ struct MiniPlayer: View {
     @Environment(AudioEngine.self) private var engine
     var onTapBody: () -> Void = {}
 
+    @State private var bins: [WaveBin] = []
+
     var body: some View {
         if let track = engine.current {
             content(track)
@@ -27,6 +29,12 @@ struct MiniPlayer: View {
                     .font(Theme.sans(12.5)).foregroundStyle(Theme.text2).lineLimit(1)
             }
             Spacer(minLength: 8)
+
+            if !bins.isEmpty {
+                NMMiniWave(bins: bins, bars: 22, colored: false, tint: Theme.accent)
+                    .frame(width: 56, height: 22)
+                    .accessibilityHidden(true)
+            }
 
             Button { engine.toggle() } label: {
                 Image(systemName: engine.isPlaying ? "pause.fill" : "play.fill")
@@ -57,6 +65,9 @@ struct MiniPlayer: View {
         .shadow(color: .black.opacity(0.4), radius: 18, y: 8)
         .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .onTapGesture { onTapBody() }
+        .task(id: track.persistentModelID) {
+            bins = await WaveformStore.shared.bins(for: track) ?? []
+        }
         .padding(.horizontal, 12)
     }
 
