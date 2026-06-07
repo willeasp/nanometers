@@ -9,6 +9,7 @@ struct NowPlayingScreen: View {
     var onClose: () -> Void
 
     @State private var tint: Color = Theme.bgElev2
+    @State private var showContext = false
 
     var body: some View {
         ZStack {
@@ -29,6 +30,7 @@ struct NowPlayingScreen: View {
                 Spacer(minLength: 8)
                 hero
                 Spacer(minLength: 8)
+                titleRow
             }
             .padding(.horizontal, 26)
             .padding(.top, 8).padding(.bottom, 28)
@@ -40,16 +42,48 @@ struct NowPlayingScreen: View {
         }
         .contentShape(Rectangle())
         .gesture(DragGesture().onEnded { if $0.translation.height > 80 { onClose() } })
+        .sheet(isPresented: $showContext) {
+            if let t = engine.current { TrackContextSheet(track: t) }
+        }
     }
 
     @ViewBuilder private var topBar: some View {
-        HStack {
-            Button(action: onClose) {
-                Image(systemName: "chevron.down").font(.system(size: 26, weight: .semibold))
-                    .foregroundStyle(Theme.text).frame(width: 44, height: 44)
+        ZStack {
+            VStack(spacing: 1) {
+                Text(engine.context.kind)
+                    .font(Theme.sans(10.5, .bold)).tracking(1.4).foregroundStyle(.white.opacity(0.5))
+                Text(engine.context.name)
+                    .font(Theme.sans(13, .semibold)).foregroundStyle(Theme.text)
             }
-            .accessibilityIdentifier("npDismiss")
-            Spacer()
+            HStack {
+                Button(action: onClose) {
+                    Image(systemName: "chevron.down").font(.system(size: 26, weight: .semibold))
+                        .foregroundStyle(Theme.text).frame(width: 44, height: 44)
+                }.accessibilityIdentifier("npDismiss")
+                Spacer()
+                Button { showContext = true } label: {
+                    Image(systemName: "ellipsis").font(.system(size: 24))
+                        .foregroundStyle(Theme.text).frame(width: 44, height: 44)
+                }.accessibilityIdentifier("npEllipsis")
+            }
+        }
+    }
+
+    @ViewBuilder private var titleRow: some View {
+        if let track = engine.current {
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(track.title).font(Theme.sans(22, .bold)).tracking(-0.3).foregroundStyle(Theme.text).lineLimit(1)
+                    Text(track.artist).font(Theme.sans(17)).foregroundStyle(.white.opacity(0.62)).lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                Button { track.isLoved.toggle() } label: {
+                    Image(systemName: track.isLoved ? "heart.fill" : "heart")
+                        .font(.system(size: 24)).foregroundStyle(track.isLoved ? Theme.accent : Theme.text)
+                        .frame(width: 44, height: 44)
+                }
+                .buttonStyle(.plain).accessibilityIdentifier("npHeart")
+            }
         }
     }
 
@@ -64,3 +98,6 @@ struct NowPlayingScreen: View {
         }
     }
 }
+
+// TEMP stub — replaced by the real TrackContextSheet in Phase 4 Task 9.
+struct TrackContextSheet: View { let track: Track; var body: some View { Text(track.title).padding() } }
