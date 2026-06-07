@@ -8,6 +8,7 @@ struct LibraryScreen: View {
     @Query private var playlists: [Playlist]
     @State private var importing = false
     @State private var detailTrack: Track?
+    @State private var showSettings = false
     var onSearch: () -> Void = {}
 
     var body: some View {
@@ -19,7 +20,8 @@ struct LibraryScreen: View {
                     Spacer()
                     GlassRoundButton(systemName: "magnifyingglass") { onSearch() }
                     GlassRoundButton(systemName: "folder") { importing = true }   // shell: import; Sources hub is v2
-                    GlassRoundButton(systemName: "gearshape")                       // Settings sheet is Phase 4
+                    GlassRoundButton(systemName: "gearshape") { showSettings = true }
+                        .accessibilityIdentifier("settingsButton")
                 }
 
                 HStack(spacing: 10) {
@@ -58,6 +60,7 @@ struct LibraryScreen: View {
             }
         }
         .sheet(item: $detailTrack) { TrackContextSheet(track: $0) }
+        .sheet(isPresented: $showSettings) { SettingsSheet() }
     }
 }
 

@@ -4,6 +4,23 @@ final class NowPlayingUITests: XCTestCase {
     override func setUp() { super.setUp(); continueAfterFailure = false }
 
     @MainActor
+    func test_settingsTrackOverviewTogglesScrubber() {
+        let app = XCUIApplication()
+        app.launch()
+        // Open Settings via the gear button.
+        let gear = app.buttons["settingsButton"].firstMatch
+        XCTAssertTrue(gear.waitForExistence(timeout: 5), "Settings gear button should exist")
+        gear.tap()
+        // Assert all three toggle rows are present.
+        XCTAssertTrue(app.switches["Close-up (DJ scroll)"].waitForExistence(timeout: 5), "Close-up toggle should be in Settings")
+        XCTAssertTrue(app.switches["Track overview"].exists, "Track overview toggle should be in Settings")
+        XCTAssertTrue(app.switches["Frequency coloring"].exists, "Frequency coloring toggle should be in Settings")
+        // Done dismisses the sheet.
+        app.buttons["Done"].firstMatch.tap()
+        XCTAssertFalse(app.switches["Track overview"].waitForExistence(timeout: 3), "Settings sheet should dismiss after Done")
+    }
+
+    @MainActor
     func test_miniPlayerTapPresentsAndChevronDismissesNowPlaying() {
         let app = XCUIApplication()
         app.launch()
