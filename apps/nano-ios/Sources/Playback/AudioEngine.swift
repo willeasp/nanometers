@@ -1,6 +1,8 @@
 import Foundation
 import AVFoundation
+import MediaPlayer
 import Observation
+import UIKit
 
 /// The playback engine (handoff §04). `@MainActor @Observable` so SwiftUI reads `current`,
 /// `isPlaying`, `progress` directly. Owns a pure `PlaybackQueue` and an `AVAudioEngine`/
@@ -142,6 +144,7 @@ final class AudioEngine {
     func updateProgress() {
         progress = PlaybackMath.fraction(frame: currentFrame, total: totalFrames)
         elapsed = sampleRate > 0 ? Double(currentFrame) / sampleRate : 0
+        if Int(elapsed * 20) % 20 == 0 { updateNowPlayingInfo() }
     }
 
     private func startTicker() {
@@ -204,7 +207,42 @@ final class AudioEngine {
         updateNowPlayingInfo()
     }
 
-    // MARK: Temporary stubs — replaced in Task 10 (now-playing/remote)
-    private func configureRemoteCommands() {}
-    private func updateNowPlayingInfo() {}
+    // MARK: Now-playing + remote commands (Task 10)
+
+    private func configureRemoteCommands() {
+        let c = MPRemoteCommandCenter.shared()
+        c.playCommand.addTarget { [weak self] _ in self?.resume(); return .success }
+        c.pauseCommand.addTarget { [weak self] _ in self?.pausePlayback(); return .success }
+        c.togglePlayPauseCommand.addTarget { [weak self] _ in self?.toggle(); return .success }
+        c.nextTrackCommand.addTarget { [weak self] _ in self?.next(); return .success }
+        c.previousTrackCommand.addTarget { [weak self] _ in self?.prev(); return .success }
+        c.changePlaybackPositionCommand.addTarget { [weak self] event in
+            guard let self,
+                  let e = event as? MPChangePlaybackPositionCommandEvent,
+                  self.totalFrames > 0, self.sampleRate > 0 else { return .commandFailed }
+            self.seek(toFraction: e.positionTime * self.sampleRate / Double(self.totalFrames))
+            return .success
+        }
+    }
+
+    private func resume() { if !isPlaying { toggle() } }
+    private func pausePlayback() { if isPlaying { toggle() } }
+
+    private func updateNowPlayingInfo() {
+        let center = MPNowPlayingInfoCenter.default()
+        guard let t = current else { center.nowPlayingInfo = nil; return }
+        let duration = totalFrames > 0 && sampleRate > 0 ? Double(totalFrames) / sampleRate : t.durationSec
+        var info: [String: Any] = [
+            MPMediaItemPropertyTitle: t.title,
+            MPMediaItemPropertyArtist: t.artist,
+            MPMediaItemPropertyAlbumTitle: t.album,
+            MPMediaItemPropertyPlaybackDuration: duration,
+            MPNowPlayingInfoPropertyElapsedPlaybackTime: elapsed,
+            MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? 1.0 : 0.0,
+        ]
+        if let data = t.artworkData, let img = UIImage(data: data) {
+            info[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(boundsSize: img.size) { _ in img }
+        }
+        center.nowPlayingInfo = info
+    }
 }
