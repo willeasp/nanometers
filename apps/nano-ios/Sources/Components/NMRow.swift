@@ -3,11 +3,24 @@ import SwiftUI
 struct NMRow: View {
     let track: Track
     var isCurrent: Bool = false
+    var isPlaying: Bool = false
+    var onTap: () -> Void = {}
     var onEllipsis: () -> Void = {}
 
     var body: some View {
         HStack(spacing: 12) {
             NMArtwork(data: track.artworkData, size: 46, radius: Theme.Radius.albumRow)
+                .overlay {
+                    if isCurrent {
+                        ZStack {
+                            Color.black.opacity(0.45)
+                            Image(systemName: isPlaying ? "waveform" : "play.fill")
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundStyle(.white)
+                        }
+                        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.albumRow, style: .continuous))
+                    }
+                }
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(track.title)
@@ -26,7 +39,6 @@ struct NMRow: View {
             Spacer(minLength: 8)
 
             // Phase 3 fills these: a 42×20 mini-waveform and the per-track LUFS (mono, tabular).
-            // Left intentionally empty in the shell.
 
             Button(action: onEllipsis) {
                 Image(systemName: "ellipsis")
@@ -38,5 +50,6 @@ struct NMRow: View {
         }
         .frame(minHeight: Theme.Layout.rowMinHeight)
         .contentShape(Rectangle())
+        .onTapGesture { onTap() }
     }
 }

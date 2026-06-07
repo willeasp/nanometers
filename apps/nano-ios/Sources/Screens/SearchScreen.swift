@@ -15,6 +15,7 @@ enum SearchFilter {
 }
 
 struct SearchScreen: View {
+    @Environment(AudioEngine.self) private var engine
     @Query(sort: \Track.dateAdded, order: .reverse) private var tracks: [Track]
     @State private var query = ""
 
@@ -40,7 +41,12 @@ struct SearchScreen: View {
                 } else {
                     LazyVStack(spacing: 0) {
                         ForEach(results) { t in
-                            NMRow(track: t)
+                            NMRow(
+                                track: t,
+                                isCurrent: engine.current?.id == t.id,
+                                isPlaying: engine.isPlaying && engine.current?.id == t.id,
+                                onTap: { engine.play(t, in: results, context: .search) }
+                            )
                             Divider().background(Theme.hair).padding(.leading, Theme.Layout.rowSeparatorInset)
                         }
                     }
@@ -48,7 +54,7 @@ struct SearchScreen: View {
             }
             .padding(.horizontal, Theme.Layout.screenMargin)
             .padding(.top, 50)
-            .padding(.bottom, Theme.Layout.scrollBottomPadding)
+            .padding(.bottom, engine.current == nil ? Theme.Layout.scrollBottomPadding : Theme.Layout.scrollBottomPaddingPlaying)
         }
         .background(Theme.bg)
     }

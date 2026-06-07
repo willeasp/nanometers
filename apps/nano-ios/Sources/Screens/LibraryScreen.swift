@@ -3,6 +3,7 @@ import SwiftData
 
 struct LibraryScreen: View {
     @Environment(\.modelContext) private var ctx
+    @Environment(AudioEngine.self) private var engine
     @Query(sort: \Track.dateAdded, order: .reverse) private var tracks: [Track]
     @Query private var playlists: [Playlist]
     @State private var importing = false
@@ -34,14 +35,19 @@ struct LibraryScreen: View {
 
                 LazyVStack(spacing: 0) {
                     ForEach(tracks) { track in
-                        NMRow(track: track)
+                        NMRow(
+                            track: track,
+                            isCurrent: engine.current?.id == track.id,
+                            isPlaying: engine.isPlaying && engine.current?.id == track.id,
+                            onTap: { engine.play(track, in: tracks, context: .library) }
+                        )
                         Divider().background(Theme.hair).padding(.leading, Theme.Layout.rowSeparatorInset)
                     }
                 }
             }
             .padding(.horizontal, Theme.Layout.screenMargin)
             .padding(.top, 50)
-            .padding(.bottom, Theme.Layout.scrollBottomPadding)
+            .padding(.bottom, engine.current == nil ? Theme.Layout.scrollBottomPadding : Theme.Layout.scrollBottomPaddingPlaying)
         }
         .background(Theme.bg)
         .fileImporter(isPresented: $importing, allowedContentTypes: [.audio], allowsMultipleSelection: true) { result in
