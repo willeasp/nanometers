@@ -11,6 +11,7 @@ struct NanoMetersApp: App {
         } catch {
             fatalError("Failed to create ModelContainer: \(error)")
         }
+        MainActor.assumeIsolated { DemoSeed.seedIfEmpty(container.mainContext) }
     }
 
     var body: some Scene {
