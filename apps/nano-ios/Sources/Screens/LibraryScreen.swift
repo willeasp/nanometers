@@ -51,7 +51,7 @@ struct LibraryScreen: View {
             }
             .padding(.horizontal, Theme.Layout.screenMargin)
             .padding(.top, 8)   // the ScrollView already clears the status bar via the safe area
-            .padding(.bottom, engine.current == nil ? Theme.Layout.scrollBottomPadding : Theme.Layout.scrollBottomPaddingPlaying)
+            // the mini player + tab bar are a `.safeAreaInset` (RootView), so the scroll clears them automatically
         }
         .background(Theme.bg)
         .fileImporter(isPresented: $importing, allowedContentTypes: [.audio], allowsMultipleSelection: true) { result in

@@ -1,7 +1,7 @@
 name: NanoMeters
 options:
   bundleIdPrefix: com.willeasp.nanometers
-  deploymentTarget: { iOS: "17.0" }
+  deploymentTarget: { iOS: "18.0" }   # native zoom transition (.navigationTransition(.zoom)) for the Now Playing morph
   createIntermediateGroups: true
 settings:
   base:

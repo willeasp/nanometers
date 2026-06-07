@@ -2,10 +2,13 @@ import SwiftUI
 
 /// Docked mini player (handoff §02): artwork · title/artist · play-pause · next, with a 2pt
 /// accent progress bar pinned to the bottom edge. Reads the engine from the environment; only
-/// renders when a track is loaded. Body tap is reserved for Now Playing (Phase 4) via `onTapBody`.
+/// renders when a track is loaded. The artwork is the `matchedTransitionSource` for the Now Playing
+/// zoom morph; tapping the body opens the cover via `onTapBody`.
 /// The optional 56×22 mini-waveform slot (§02) appears once the track's bins are analyzed.
 struct MiniPlayer: View {
     @Environment(AudioEngine.self) private var engine
+    var artNamespace: Namespace.ID
+    var artSourceID: String
     var onTapBody: () -> Void = {}
 
     @State private var bins: [WaveBin] = []
@@ -22,9 +25,8 @@ struct MiniPlayer: View {
             // Left tap area: artwork + title. A real Button so XCTest can reliably hit-test it.
             Button(action: onTapBody) {
                 HStack(spacing: 12) {
-                    Color.clear                         // the real artwork is the single floating layer in PlayerContainer;
-                        .frame(width: 44, height: 44)   // this just reserves + measures the 44pt slot it morphs into
-                        .reportPlayerSlot("miniArt")
+                    NMArtwork(data: track.artworkData, size: 44, radius: 9)
+                        .matchedTransitionSource(id: artSourceID, in: artNamespace)   // morphs into Now Playing
 
                     VStack(alignment: .leading, spacing: 1) {
                         Text(track.title)

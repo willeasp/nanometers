@@ -36,7 +36,7 @@ struct PlaylistsScreen: View {
                 }
                 .padding(.horizontal, Theme.Layout.screenMargin)
                 .padding(.top, 8)   // the ScrollView already clears the status bar via the safe area
-                .padding(.bottom, Theme.Layout.scrollBottomPadding)
+                // the mini player + tab bar are a `.safeAreaInset` (RootView), so the scroll clears them automatically
             }
             .background(Theme.bg)
             .sheet(isPresented: $creating) { NewPlaylistSheet() }

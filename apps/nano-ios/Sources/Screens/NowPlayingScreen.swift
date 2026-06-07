@@ -1,9 +1,10 @@
 import SwiftUI
-import UIKit
 
-/// Full-screen Now Playing surface, presented as an in-tree overlay from RootView (NOT a cover —
-/// matchedGeometryEffect can't cross a cover/sheet boundary). Sections are built up across Phase 4
-/// tasks. The hero artwork morphs from the mini player's 44pt tile via the shared namespace.
+/// Full-screen Now Playing surface, presented as a `.fullScreenCover` with the native zoom transition
+/// (see RootView). As an ordinary presented view it gets a normal safe-area context, so the content
+/// respects the safe area on its own and only the gradient background bleeds — no window-inset reads.
+/// The hero artwork is a plain `NMArtwork`; the zoom transition morphs the whole surface to/from the
+/// mini-player artwork and provides the interactive swipe-to-dismiss, so there is no morph code here.
 struct NowPlayingScreen: View {
     @Environment(AudioEngine.self) private var engine
     var onClose: () -> Void
@@ -16,46 +17,29 @@ struct NowPlayingScreen: View {
     @AppStorage("spectrum") private var spectrum = false
     @State private var bins: [WaveBin] = []
 
-    /// The REAL device safe-area insets, read from the key window. RootView's `Theme.bg.ignoresSafeArea()`
-    /// makes the ZStack hand full-screen bounds to this overlay (so SwiftUI's own `safeAreaInsets` read 0
-    /// here) — we pad by the window insets directly to keep the top bar below the status bar / island.
-    private static var windowSafeAreaInsets: UIEdgeInsets {
-        UIApplication.shared.connectedScenes
-            .compactMap { $0 as? UIWindowScene }
-            .flatMap(\.windows)
-            .first(where: \.isKeyWindow)?.safeAreaInsets ?? .zero
-    }
-
     var body: some View {
-        VStack(spacing: 18) {
-            topBar
-            Spacer(minLength: 8)
-            hero
-            Spacer(minLength: 8)
-            titleRow
-            scrubber
-            timeRow
-            transportRow
-            volumeRow
-            bottomRail
+        // The zoom transition presents the sheet edge-to-edge (that's what makes the artwork morph
+        // across the boundary), so the framework insets neither end — the content owns its safe area.
+        // `GeometryReader.safeAreaInsets` is the idiomatic read (adapts to any device, not a constant):
+        // the gradient bleeds full, the chrome sits exactly within the real insets.
+        GeometryReader { geo in
+            VStack(spacing: 14) {
+                topBar
+                hero                                     // takes the leftover space, capped + shrinks to fit
+                titleRow
+                scrubber
+                timeRow
+                transportRow
+                volumeRow
+                bottomRail
+            }
+            .padding(.horizontal, 26)
+            .padding(.top, geo.safeAreaInsets.top + 8)   // +8 clears the card's rounded top below the island
+            .padding(.bottom, geo.safeAreaInsets.bottom)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .padding(.horizontal, 26)
-        .padding(.top, Self.windowSafeAreaInsets.top + 8)      // clear the status bar / dynamic island
-        .padding(.bottom, Self.windowSafeAreaInsets.bottom + 20)   // clear the home indicator
-        .frame(maxWidth: .infinity, maxHeight: .infinity)   // fill the screen; content stays within the safe area
-        .background {                                        // gradient bleeds full-screen, the content above does NOT
-            LinearGradient(stops: [.init(color: tint, location: 0),
-                                   .init(color: Theme.npGradientMid, location: 0.46),
-                                   .init(color: Theme.npGradientBottom, location: 1)],
-                           startPoint: .top, endPoint: .bottom)
-                .overlay {                                   // §03D faint glass scrim (system material per §01)
-                    ZStack {
-                        Rectangle().fill(.ultraThinMaterial).opacity(0.18)
-                        Theme.npGradientBottom.opacity(0.35)     // #111319 @ 0.35
-                    }.allowsHitTesting(false)
-                }
-                .ignoresSafeArea()
-        }
+        .background(npGradient.ignoresSafeArea())
+        .ignoresSafeArea()
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("nowPlaying")
         .task(id: engine.current?.persistentModelID) {
@@ -64,7 +48,6 @@ struct NowPlayingScreen: View {
         .task(id: engine.current?.persistentModelID) {
             if let t = engine.current { bins = await WaveformStore.shared.bins(for: t) ?? [] }
         }
-        // Drag-to-collapse is owned by PlayerContainer (continuous, finger-following) — not a threshold here.
         .sheet(isPresented: $showContext) {
             if let t = engine.current { TrackContextSheet(track: t) }
         }
@@ -74,7 +57,7 @@ struct NowPlayingScreen: View {
     @ViewBuilder private var scrubber: some View {
         if showWave {
             OverviewWaveform(bins: bins, progress: engine.progress, coloringOn: spectrum,
-                             onScrub: { engine.seek(toFraction: $0) })
+                             onScrub: { engine.seek(toFraction: $0) }, height: 46)
                 .overlay(alignment: .topTrailing) {
                     LUFSBadge(lufs: engine.current?.integratedLUFS).offset(y: -6)
                 }
@@ -164,10 +147,10 @@ struct NowPlayingScreen: View {
 
             Button { engine.toggle() } label: {
                 ZStack {
-                    Circle().fill(Theme.accent).frame(width: 76, height: 76)
-                        .shadow(color: .black.opacity(0.4), radius: 24, y: 8)
+                    Circle().fill(Theme.accent).frame(width: 64, height: 64)
+                        .shadow(color: .black.opacity(0.4), radius: 20, y: 6)
                     Image(systemName: engine.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 36)).foregroundStyle(Theme.bg)   // dark-on-amber (§03D)
+                        .font(.system(size: 30)).foregroundStyle(Theme.bg)   // dark-on-amber (§03D)
                 }
             }.buttonStyle(.plain).frame(maxWidth: .infinity)
             .accessibilityIdentifier("npPlayPause").accessibilityLabel(engine.isPlaying ? "Pause" : "Play")
@@ -204,12 +187,44 @@ struct NowPlayingScreen: View {
         }
     }
 
+    /// Full-bleed backdrop: artwork tint → mid → bottom, with the §03D faint glass scrim.
+    private var npGradient: some View {
+        LinearGradient(stops: [.init(color: tint, location: 0),
+                               .init(color: Theme.npGradientMid, location: 0.46),
+                               .init(color: Theme.npGradientBottom, location: 1)],
+                       startPoint: .top, endPoint: .bottom)
+            .overlay {                                       // §03D faint glass scrim (system material per §01)
+                ZStack {
+                    Rectangle().fill(.ultraThinMaterial).opacity(0.18)
+                    Theme.npGradientBottom.opacity(0.35)     // #111319 @ 0.35
+                }.allowsHitTesting(false)
+            }
+    }
+
+    /// Resizable hero: a square that fills the leftover vertical space, capped at the §03D 340pt limit
+    /// and shrinking on shorter screens so the transport + rail always fit. (`NMArtwork` is fixed-size.)
     @ViewBuilder private var hero: some View {
-        if engine.current != nil {
-            Color.clear                            // the real artwork floats in PlayerContainer; this measures the 340pt hero slot
-                .frame(width: 340, height: 340)    // §03D ≤340 cap
-                .reportPlayerSlot("heroArt")
+        let radius: CGFloat = 18
+        Group {
+            if let data = engine.current?.artworkData, let ui = UIImage(data: data) {
+                Image(uiImage: ui).resizable().scaledToFill()
+            } else {
+                Theme.artFallback.overlay {
+                    GeometryReader { g in
+                        Image(systemName: "waveform")
+                            .font(.system(size: g.size.width * 0.42))
+                            .foregroundStyle(.white.opacity(0.22))
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                }
+            }
         }
+        .aspectRatio(1, contentMode: .fit)
+        .frame(maxWidth: 340, maxHeight: 340)
+        .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous).strokeBorder(.white.opacity(0.06), lineWidth: 0.5))
+        .frame(maxHeight: .infinity)                  // claim the leftover space; the art centers + caps within it
+        .shadow(color: .black.opacity(0.45), radius: 30, y: 10)
     }
 
     @ViewBuilder private var bottomRail: some View {
