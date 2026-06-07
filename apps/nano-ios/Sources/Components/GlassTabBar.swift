@@ -16,7 +16,7 @@ struct GlassTabBar: View {
                     selection = tab
                 } label: {
                     VStack(spacing: 3) {
-                        Image(systemName: tab.icon).font(.system(size: 22))
+                        Image(systemName: tab.icon).font(.system(size: 24))
                         Text(tab.title)
                             .font(Theme.sans(10.5, active ? .semibold : .medium))
                     }
