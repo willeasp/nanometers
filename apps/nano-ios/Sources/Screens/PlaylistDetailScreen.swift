@@ -3,6 +3,7 @@ import SwiftData
 
 struct PlaylistDetailScreen: View {
     @Environment(\.modelContext) private var ctx
+    @Environment(AudioEngine.self) private var engine
     let playlist: Playlist
     @State private var adding = false
 
@@ -20,8 +21,19 @@ struct PlaylistDetailScreen: View {
                     Text("\(tracks.count) songs · \(totalMinutes) min")
                         .font(Theme.mono(13)).foregroundStyle(Theme.text3)
                     HStack(spacing: 12) {
-                        actionButton("play.fill", "Play", filled: true)     // Phase 2
-                        actionButton("shuffle", "Shuffle", filled: false)   // Phase 2
+                        Button {
+                            if let first = tracks.first {
+                                engine.play(first, in: tracks, context: .playlist(playlist.name))
+                            }
+                        } label: { actionButton("play.fill", "Play", filled: true) }
+                        .buttonStyle(.plain)
+                        .disabled(tracks.isEmpty)
+
+                        Button {
+                            engine.playShuffle(tracks, context: .playlist(playlist.name))
+                        } label: { actionButton("shuffle", "Shuffle", filled: false) }
+                        .buttonStyle(.plain)
+                        .disabled(tracks.isEmpty)
                     }
                     .padding(.top, 4)
                 }
@@ -31,10 +43,17 @@ struct PlaylistDetailScreen: View {
             }
 
             Section {
-                ForEach(tracks) { NMRow(track: $0) }
-                    .onMove { from, to in LibraryStore.move(in: playlist, fromOffsets: from, toOffset: to) }
-                    .onDelete { idx in LibraryStore.remove(in: playlist, atOffsets: idx) }
-                    .listRowBackground(Theme.bg)
+                ForEach(tracks) { t in
+                    NMRow(
+                        track: t,
+                        isCurrent: engine.current?.id == t.id,
+                        isPlaying: engine.isPlaying && engine.current?.id == t.id,
+                        onTap: { engine.play(t, in: tracks, context: .playlist(playlist.name)) }
+                    )
+                }
+                .onMove { from, to in LibraryStore.move(in: playlist, fromOffsets: from, toOffset: to) }
+                .onDelete { idx in LibraryStore.remove(in: playlist, atOffsets: idx) }
+                .listRowBackground(Theme.bg)
 
                 Button { adding = true } label: {
                     Label("Add Songs…", systemImage: "plus.circle").foregroundStyle(Theme.accent)
