@@ -4,18 +4,19 @@ import SwiftData
 
 @MainActor
 final class DemoSeedTests: XCTestCase {
-    func test_seedsOnceAndIncludesArtlessRows() throws {
+    private func makeContext() throws -> ModelContext {
         let config = ModelConfiguration(isStoredInMemoryOnly: true)
         let container = try ModelContainer(for: Track.self, Playlist.self, configurations: config)
-        let ctx = ModelContext(container)
+        return ModelContext(container)
+    }
 
+    func test_seedsTwoBundledTracksOnceWhenEmpty() throws {
+        let ctx = try makeContext()
         DemoSeed.seedIfEmpty(ctx)
-        let first = try LibraryStore.allTracks(ctx).count
-        XCTAssertGreaterThan(first, 0)
-        XCTAssertTrue(try LibraryStore.allTracks(ctx).contains { !$0.hasEmbeddedArt },
-                      "at least one demo track is art-less to exercise the fallback")
-
-        DemoSeed.seedIfEmpty(ctx)   // idempotent — must not duplicate
-        XCTAssertEqual(try LibraryStore.allTracks(ctx).count, first)
+        let seeded = try LibraryStore.allTracks(ctx)
+        XCTAssertEqual(seeded.count, 2)
+        XCTAssertTrue(seeded.allSatisfy { $0.bundledName != nil })
+        DemoSeed.seedIfEmpty(ctx)                              // idempotent — already populated
+        XCTAssertEqual(try LibraryStore.allTracks(ctx).count, 2)
     }
 }

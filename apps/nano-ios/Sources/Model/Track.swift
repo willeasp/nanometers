@@ -20,6 +20,7 @@ final class Track {
     var sampleRate: String
     var hasEmbeddedArt: Bool
     var artworkData: Data?        // small embedded artwork, if any
+    var bundledName: String?      // resource filename for tracks that ship in the app bundle
     var artworkTintHex: String?   // computed in Phase 4 (Now Playing gradient)
 
     // Loudness — the integrated value is analyzed in Phase 3; nil until then.
@@ -46,6 +47,7 @@ final class Track {
         sampleRate: String = "",
         hasEmbeddedArt: Bool = false,
         artworkData: Data? = nil,
+        bundledName: String? = nil,
         integratedLUFS: Double? = nil,
         isLoved: Bool = false,
         dateAdded: Date = .init(),
@@ -64,6 +66,7 @@ final class Track {
         self.sampleRate = sampleRate
         self.hasEmbeddedArt = hasEmbeddedArt
         self.artworkData = artworkData
+        self.bundledName = bundledName
         self.artworkTintHex = nil
         self.integratedLUFS = integratedLUFS
         self.isLoved = isLoved
