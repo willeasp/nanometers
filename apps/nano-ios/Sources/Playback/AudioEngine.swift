@@ -220,6 +220,11 @@ final class AudioEngine {
     }
 
     func setShuffle(_ on: Bool) { queue.isShuffle = on }   // flag only; reorder happens via playShuffle
+
+    func toggleShuffle() {
+        if queue.isShuffle { queue.isShuffle = false }
+        else { queue.reshuffleRemaining() }
+    }
     func setRepeat(_ on: Bool) { isRepeat = on }
 
     func seek(toFraction f: Double) {

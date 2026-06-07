@@ -67,6 +67,16 @@ struct PlaybackQueue {
         return current.map { .play($0) } ?? .restartCurrent
     }
 
+    /// Shuffle the tracks AFTER the current one in place (current stays at its index). Sets shuffle.
+    mutating func reshuffleRemaining() {
+        guard tracks.indices.contains(index) else { isShuffle = true; return }
+        let head = Array(tracks[...index])
+        var tail = Array(tracks[(index + 1)...])
+        tail.shuffle()
+        tracks = head + tail
+        isShuffle = true
+    }
+
     /// Jump to an explicit index; nil (and no change) if out of range.
     mutating func jump(to i: Int) -> Track? {
         guard tracks.indices.contains(i) else { return nil }

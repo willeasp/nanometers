@@ -81,4 +81,14 @@ final class PlaybackQueueTests: XCTestCase {
         XCTAssertTrue(q.isShuffle)
         XCTAssertEqual(Set(ts.map(\.id)).count, 5)        // no tracks lost
     }
+
+    func test_reshuffleKeepsCurrentAndShufflesRest() throws {
+        let ts = try tracks(6)
+        var q = PlaybackQueue(); _ = q.load(ts, startingAt: 2)
+        let current = q.current
+        q.reshuffleRemaining()
+        XCTAssertEqual(q.current?.id, current?.id, "current track stays put")
+        XCTAssertTrue(q.isShuffle)
+        XCTAssertEqual(Set(q.tracks.map(\.id)).count, 6, "no tracks lost")
+    }
 }

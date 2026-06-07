@@ -31,6 +31,7 @@ struct NowPlayingScreen: View {
                 hero
                 Spacer(minLength: 8)
                 titleRow
+                transportRow
             }
             .padding(.horizontal, 26)
             .padding(.top, 8).padding(.bottom, 28)
@@ -84,6 +85,38 @@ struct NowPlayingScreen: View {
                 }
                 .buttonStyle(.plain).accessibilityIdentifier("npHeart")
             }
+        }
+    }
+
+    @ViewBuilder private var transportRow: some View {
+        HStack {
+            Button { engine.toggleShuffle() } label: {
+                Image(systemName: "shuffle").font(.system(size: 22))
+                    .foregroundStyle(engine.isShuffle ? Theme.accent : .white.opacity(0.85))
+            }.buttonStyle(.plain).frame(maxWidth: .infinity)
+
+            Button { engine.prev() } label: {
+                Image(systemName: "backward.fill").font(.system(size: 34)).foregroundStyle(Theme.text)
+            }.buttonStyle(.plain).frame(maxWidth: .infinity)
+
+            Button { engine.toggle() } label: {
+                ZStack {
+                    Circle().fill(Theme.accent).frame(width: 76, height: 76)
+                        .shadow(color: .black.opacity(0.4), radius: 24, y: 8)
+                    Image(systemName: engine.isPlaying ? "pause.fill" : "play.fill")
+                        .font(.system(size: 36)).foregroundStyle(Theme.bg)   // dark-on-amber (§03D)
+                }
+            }.buttonStyle(.plain).frame(maxWidth: .infinity)
+            .accessibilityIdentifier("npPlayPause").accessibilityLabel(engine.isPlaying ? "Pause" : "Play")
+
+            Button { engine.next() } label: {
+                Image(systemName: "forward.fill").font(.system(size: 34)).foregroundStyle(Theme.text)
+            }.buttonStyle(.plain).frame(maxWidth: .infinity)
+
+            Button { engine.setRepeat(!engine.isRepeat) } label: {
+                Image(systemName: "repeat").font(.system(size: 22))
+                    .foregroundStyle(engine.isRepeat ? Theme.accent : .white.opacity(0.85))
+            }.buttonStyle(.plain).frame(maxWidth: .infinity)
         }
     }
 
