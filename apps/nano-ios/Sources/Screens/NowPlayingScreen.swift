@@ -10,6 +10,7 @@ struct NowPlayingScreen: View {
 
     @State private var tint: Color = Theme.bgElev2
     @State private var showContext = false
+    @State private var showQueue = false
 
     @AppStorage("showWave") private var showWave = true
     @AppStorage("spectrum") private var spectrum = false
@@ -39,6 +40,7 @@ struct NowPlayingScreen: View {
                 timeRow
                 transportRow
                 volumeRow
+                bottomRail
             }
             .padding(.horizontal, 26)
             .padding(.top, 8).padding(.bottom, 28)
@@ -56,6 +58,7 @@ struct NowPlayingScreen: View {
         .sheet(isPresented: $showContext) {
             if let t = engine.current { TrackContextSheet(track: t) }
         }
+        .sheet(isPresented: $showQueue) { QueueSheet() }
     }
 
     @ViewBuilder private var scrubber: some View {
@@ -200,7 +203,15 @@ struct NowPlayingScreen: View {
                 .animation(.spring(response: 0.5, dampingFraction: 0.86), value: engine.isPlaying)
         }
     }
-}
 
-// TEMP stub — replaced by the real TrackContextSheet in Phase 4 Task 9.
-struct TrackContextSheet: View { let track: Track; var body: some View { Text(track.title).padding() } }
+    @ViewBuilder private var bottomRail: some View {
+        HStack {
+            Image(systemName: "folder").font(.system(size: 20)).foregroundStyle(Theme.text3)
+                .frame(maxWidth: .infinity).opacity(0.4)        // Go-to-Source-Folder is v2
+            AirPlayButton().frame(width: 44, height: 44).frame(maxWidth: .infinity)
+            Button { showQueue = true } label: {
+                Image(systemName: "list.bullet.indent").font(.system(size: 20)).foregroundStyle(Theme.text2)
+            }.buttonStyle(.plain).frame(maxWidth: .infinity).accessibilityIdentifier("npQueue")
+        }
+    }
+}

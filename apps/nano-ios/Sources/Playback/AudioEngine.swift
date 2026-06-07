@@ -235,6 +235,9 @@ final class AudioEngine {
     }
     func setRepeat(_ on: Bool) { isRepeat = on }
 
+    func playNext(_ track: Track) { queue.insertNext(track) }
+    func enqueue(_ track: Track)  { queue.append(track) }
+
     func seek(toFraction f: Double) {
         guard let file, totalFrames > 0 else { return }
         let target = AVAudioFramePosition(Double(totalFrames) * min(1, max(0, f)))

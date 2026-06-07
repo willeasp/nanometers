@@ -83,4 +83,10 @@ struct PlaybackQueue {
         index = i
         return current
     }
+
+    /// Insert `t` immediately after the current index (Play Next).
+    mutating func insertNext(_ t: Track) { tracks.insert(t, at: min(index + 1, tracks.count)) }
+
+    /// Append `t` to the end of the queue (Add to Queue).
+    mutating func append(_ t: Track) { tracks.append(t) }
 }
