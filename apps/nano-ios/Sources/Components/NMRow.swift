@@ -55,6 +55,7 @@ struct NMRow: View {
                     .frame(width: 34, height: 44)
             }
             .buttonStyle(.plain)
+            .accessibilityIdentifier("rowEllipsis")
         }
         .frame(minHeight: Theme.Layout.rowMinHeight)
         .contentShape(Rectangle())
