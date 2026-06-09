@@ -84,7 +84,7 @@ In order of authority:
 - **Shared vocabulary** — [`CONTEXT.md`](CONTEXT.md). Use these terms; honor the `_Avoid_` lists.
 - **Decisions + rationale** — [`docs/adr/`](docs/adr/). Read the ADRs a task touches before starting.
 - **Per-Module build contracts** — [`docs/specs/`](docs/specs/).
-- **Priority-ordered roadmap** — the "Roadmap" section of [`README.md`](README.md).
+- **Priority-ordered roadmap** — the phase plan in [`docs/superpowers/plans/2026-05-30-module-host-and-modules.md`](docs/superpowers/plans/2026-05-30-module-host-and-modules.md) (Phases A–F).
 
 If anything in this file disagrees with those, this file is the one that's wrong — fix it here, keep
 the decision there.

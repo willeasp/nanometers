@@ -34,18 +34,30 @@ pub enum EventStatus {
 }
 
 pub trait Module {
+    /// The fixed LOGICAL width this Module wants its column pinned to; `None` (the default) flexes
+    /// (ADR 0003, amended). Read from the LIVE module at editor spawn and written over the persisted
+    /// column width (`layout::reconcile_fixed_widths`) — never trusted from persisted bytes, so a
+    /// sizing change in the module reflows old sessions instead of drawing into a stale column.
+    fn intrinsic_width(&self) -> Option<f32> {
+        None
+    }
+
     /// Phase 1 — fold this frame's new samples into GUI-side state; upload to owned GPU buffers.
     fn update(&mut self, ctx: &FrameContext, queue: &wgpu::Queue);
 
     /// Phase 2a (optional) — encode any OWN offscreen passes into `encoder` before the host's
-    /// shared single-sample pass opens (e.g. the Waveform's MSAA contour target, ADR 0007).
-    /// Default: no-op, for Modules that draw straight into the shared pass (Loudness, Oscilloscope).
+    /// shared single-sample pass opens (e.g. the Waveform's MSAA contour target, ADR 0007); also
+    /// where per-frame buffer/text uploads happen. `scale` is the display backing scale (physical
+    /// px ÷ logical px, 2.0 on Retina): the surface — and so `viewport` — is in PHYSICAL px, so a
+    /// Module sizing text or padding in logical px must multiply by it or render half-size on 2×.
+    /// Default: no-op, for Modules that draw straight into the shared pass (Oscilloscope).
     fn prepare(
         &mut self,
         _device: &wgpu::Device,
         _queue: &wgpu::Queue,
         _encoder: &mut wgpu::CommandEncoder,
         _viewport: Rect,
+        _scale: f32,
     ) {
     }
 

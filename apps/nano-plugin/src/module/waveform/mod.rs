@@ -416,6 +416,7 @@ impl Module for WaveformModule {
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         viewport: Rect,
+        _scale: f32, // contour geometry is per-physical-px column math; nothing here is in logical px
     ) {
         if !self.store.is_active() {
             self.vertex_count_l = 0;
