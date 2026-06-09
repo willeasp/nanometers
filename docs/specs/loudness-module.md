@@ -9,8 +9,10 @@ defined in `CONTEXT.md`.
 ## Purpose & display
 
 A Module showing loudness per ITU-R BS.1770 / EBU R128. It displays the three time scales —
-**Momentary, Short-term, Integrated** — as vertical bars plus numeric readouts. The numeric values
-are the first milestone; the bars and the LU scale follow.
+**Momentary, Short-term, Integrated** — as vertical bars plus numeric readouts, drawn against an
+absolute-LUFS scale: 3 dB gridlines behind the bars, numbered down the left, 0 to −40 LUFS. (All
+three milestones — numbers, bars, scale — are built. Re-expressing the scale in LU around a Target
+is later config; see Out of scope.)
 
 ## Inherited constraints (read these)
 
@@ -36,8 +38,8 @@ All measurement is GUI-side, folded online from each `FrameContext`'s new sample
   - **Momentary** = last **4 bins** (400 ms).
   - **Short-term** = last **30 bins** (3 s).
   - **Integrated** gating blocks = 400 ms windows every 100 ms (75 % overlap = 4 bins each).
-- **Integrated** — keep a **growing `Vec`** of per-bin mean-squares since the last reset (cap at a
-  24 h runaway guard). Two-stage gate, exact over the whole take: absolute gate at **−70 LUFS**, then
+- **Integrated** — keep a **growing list** of per-block (400 ms gating-block) mean-squares since the
+  last reset (cap at a 24 h runaway guard). Two-stage gate, exact over the whole take: absolute gate at **−70 LUFS**, then
   a relative gate at **(mean of the absolute-gated blocks) − 10 LU** (per BS.1770 — the relative
   threshold references the mean of blocks above −70 LUFS, not the mean of all blocks); average the
   survivors. Recompute on read (GUI thread, cheap).
@@ -69,5 +71,6 @@ Momentary / Short-term / Integrated match `ebur128` within **~0.1 LU**.
 
 ## Out of scope (for now)
 
-True Peak (dBTP) and LRA. The bar scale / Target selection (EBU +9/+18, −23 vs −14) is a later
-display milestone — Module-owned config per [0003], not part of the first numeric readout.
+True Peak (dBTP) and LRA. Target selection (EBU +9/+18, −23 vs −14) and re-expressing the bar scale
+in **LU relative to that Target** — Module-owned config per [0003]. The absolute-LUFS scale itself
+is built; only the Target-relative display remains.
