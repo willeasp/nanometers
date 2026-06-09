@@ -24,8 +24,15 @@ fn pure_pipeline_runs_with_no_platform_deps() {
     let frames = tone(SR, 1.0);
 
     let meas = Measurements::new();
-    // frame_dt was added to FrameContext after the original test; 0.0 is correct for the first frame.
-    let ctx = FrameContext { new: &frames, meas: &meas, sample_rate: SR, mono: false, frame_dt: 0.0 };
+    // frame_dt = 0.0 is the documented first-frame value — this test only exercises the
+    // sample/metadata plumbing.
+    let ctx = FrameContext {
+        new: &frames,
+        meas: &meas,
+        sample_rate: SR,
+        mono: false,
+        frame_dt: 0.0,
+    };
     assert_eq!(ctx.new.len(), frames.len());
     assert!(!ctx.mono);
 

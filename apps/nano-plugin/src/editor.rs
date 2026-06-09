@@ -22,7 +22,7 @@ use std::{
 };
 use wgpu::SurfaceTargetUnsafe;
 
-use crate::layout::{Column, default_layout, viewports};
+use crate::layout::{Column, default_layout, reconcile_fixed_widths, viewports};
 use crate::module::loudness::LoudnessModule;
 use crate::module::oscilloscope::OscilloscopeModule;
 use crate::module::waveform::WaveformModule;
@@ -228,8 +228,9 @@ struct RenderControl {
 /// per-frame work all live on the render thread (owned by `run_render_loop`).
 struct RenderWindow {
     params: Arc<NanometersParams>,
-    /// Physical surface size → the render thread, which owns the surface and reconfigures it.
-    resize_tx: Sender<(u32, u32)>,
+    /// Physical surface size + display scale → the render thread, which owns the surface and
+    /// reconfigures it. The scale rides along so px-sized text/padding survives a DPI change.
+    resize_tx: Sender<(u32, u32, f32)>,
 }
 
 #[derive(Default)]
@@ -264,9 +265,8 @@ impl FrameDebug {
 
 /// Resolve a layout `module_type` tag to a concrete Module (ADR 0003 build-time resolution).
 ///
-/// Loudness (Phase D) doesn't exist yet, so it (and any unknown tag) stands in with the
-/// Oscilloscope. Phase F will make the unknown-tag placeholder preserve the original type + config
-/// bytes for lossless re-save.
+/// An unknown tag stands in with the Oscilloscope for now; Phase F will make the unknown-tag
+/// placeholder preserve the original type + config bytes for lossless re-save.
 fn build_module(
     module_type: &str,
     device: &wgpu::Device,
@@ -293,7 +293,15 @@ impl RenderWindow {
         let _ = gui_context; // the render thread doesn't need it (no param GUI yet)
         let target = baseview_window_to_surface_target(window);
         let (width, height) = scaled_size(params.editor_state.size(), scaling_factor);
-        pollster::block_on(Self::create(target, width, height, params, shared, render_ctl))
+        pollster::block_on(Self::create(
+            target,
+            width,
+            height,
+            params,
+            shared,
+            render_ctl,
+            scaling_factor,
+        ))
     }
 
     /// Create the GPU state and hand it to a dedicated RENDER THREAD, then return the lightweight
@@ -308,6 +316,7 @@ impl RenderWindow {
         params: Arc<NanometersParams>,
         shared: Arc<Shared>,
         render_ctl: Arc<RenderControl>,
+        scale_factor: f32,
     ) -> Self {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let surface = unsafe { instance.create_surface_unsafe(target) }.unwrap();
@@ -345,13 +354,19 @@ impl RenderWindow {
         surface.configure(&device, &surface_config);
 
         // Build the Module strip from the persisted layout (ADR 0003), 1:1 with the columns.
-        let layout = params.editor_state.layout_snapshot();
+        let mut layout = params.editor_state.layout_snapshot();
         let modules: Vec<Box<dyn Module + Send>> = layout
             .iter()
             .map(|c| build_module(&c.module_type, &device, surface_config.format))
             .collect();
+        // Re-pin intrinsically-sized columns from the LIVE modules — persisted widths can be stale
+        // (a layout-knob edit since the save) or missing (legacy flex layouts); the module is the
+        // source of truth (ADR 0003, amended). Written back so re-saves carry the corrected widths.
+        let intrinsics: Vec<Option<f32>> = modules.iter().map(|m| m.intrinsic_width()).collect();
+        reconcile_fixed_widths(&mut layout, &intrinsics);
+        params.editor_state.set_layout(layout.clone());
 
-        let (resize_tx, resize_rx) = std::sync::mpsc::channel::<(u32, u32)>();
+        let (resize_tx, resize_rx) = std::sync::mpsc::channel::<(u32, u32, f32)>();
         let render_shared = Arc::clone(&shared);
         let loop_ctl = Arc::clone(&render_ctl);
         let handle = std::thread::Builder::new()
@@ -367,6 +382,7 @@ impl RenderWindow {
                     render_shared,
                     loop_ctl,
                     resize_rx,
+                    scale_factor,
                 );
             })
             .expect("spawn nanometers render thread");
@@ -390,11 +406,17 @@ fn run_render_loop(
     layout: Vec<Column>,
     shared: Arc<Shared>,
     ctl: Arc<RenderControl>,
-    resize_rx: Receiver<(u32, u32)>,
+    resize_rx: Receiver<(u32, u32, f32)>,
+    initial_scale: f32,
 ) {
     /// Frame-interval clamp handed to Modules: the first iteration and every post-occlusion-sleep
     /// iteration have a large real interval; cap it so a Module integrating `dt` can't lurch.
     const MAX_FRAME_DT: f64 = 0.1;
+
+    // Display backing scale. Seeded from the host/window scale (right for plugins, where no Resized
+    // may fire if it already matches the backing) and updated by resize events (the standalone opens
+    // claiming 1.0, then a Resized corrects it to the panel's real 2.0 once the backing settles).
+    let mut scale_factor = initial_scale;
 
     let mut new_samples: Vec<StereoFrame> = Vec::with_capacity(4096);
     // Cadence diagnostics now measure the PRESENT interval (this loop presents once per iteration),
@@ -412,10 +434,11 @@ fn run_render_loop(
         while let Ok(sz) = resize_rx.try_recv() {
             new_size = Some(sz);
         }
-        if let Some((w, h)) = new_size {
+        if let Some((w, h, scale)) = new_size {
             surface_config.width = w.max(1);
             surface_config.height = h.max(1);
             surface.configure(&device, &surface_config);
+            scale_factor = scale;
         }
 
         let now = Instant::now();
@@ -490,16 +513,19 @@ fn run_render_loop(
             label: Some("nanometers-encoder"),
         });
 
-        // Per-column viewports tiling the surface (ADR 0003), one Rect per Module in order.
+        // Per-column viewports tiling the surface (ADR 0003), one Rect per Module in order. The
+        // scale converts a column's fixed LOGICAL width into physical px (the surface is physical).
         let viewports = viewports(
             &layout,
             surface_config.width as f32,
             surface_config.height as f32,
+            scale_factor,
         );
 
-        // Phase 2a: each Module encodes its own offscreen passes before the shared pass opens.
+        // Phase 2a: each Module encodes its own offscreen passes / per-frame uploads before the
+        // shared pass opens. `scale_factor` rides along so logical-px sizing lands right on Retina.
         for (m, vp) in modules.iter_mut().zip(viewports.iter()) {
-            m.prepare(&device, &queue, &mut encoder, *vp);
+            m.prepare(&device, &queue, &mut encoder, *vp, scale_factor);
         }
 
         // Phase 2b: one shared single-sample pass; each Module draws into its column (host sets the
@@ -551,10 +577,12 @@ impl baseview::WindowHandler for RenderWindow {
                 info.logical_size().width.round() as u32,
                 info.logical_size().height.round() as u32,
             ));
-            // The render thread owns the surface; hand it the new physical size to reconfigure.
-            let _ = self
-                .resize_tx
-                .send((info.physical_size().width, info.physical_size().height));
+            // The render thread owns the surface; hand it the new physical size + display scale.
+            let _ = self.resize_tx.send((
+                info.physical_size().width,
+                info.physical_size().height,
+                info.scale() as f32,
+            ));
         }
         baseview::EventStatus::Captured
     }
@@ -683,7 +711,9 @@ mod tests {
         let original = EditorState::from_defaults((720, 420));
         original.set_layout(vec![
             column_with_config(7, module_type::WAVEFORM, 0.6, vec![9, 8, 7]),
-            column_with_config(9, module_type::LOUDNESS, 0.4, vec![]),
+            // The shape real persisted state carries since fixed columns landed — the pinned width
+            // must survive the round trip too, not just the flex fields.
+            Column::fixed(9, module_type::LOUDNESS, 151.0),
         ]);
 
         let json = serde_json::to_string(&*original).unwrap();
@@ -699,5 +729,6 @@ mod tests {
         assert_eq!(l[0].width_fraction, 0.6);
         assert_eq!(l[0].config, vec![9, 8, 7]);
         assert_eq!(l[1].module_type, module_type::LOUDNESS);
+        assert_eq!(l[1].fixed_width_px, Some(151.0));
     }
 }
