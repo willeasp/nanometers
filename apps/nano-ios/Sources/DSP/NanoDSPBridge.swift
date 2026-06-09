@@ -1,5 +1,6 @@
 import Foundation
 import NanoDSP
+import os
 
 /// The one place that calls the nano-dsp C-ABI (NanoDSP.xcframework). Encapsulates the unsafe
 /// pointer handling and converts the C `NanoBin` to Swift `WaveBin`. ADR 0010: iOS links only
@@ -26,4 +27,53 @@ enum NanoDSPBridge {
         }
         return v.isFinite ? v : nil
     }
+}
+
+/// Streaming short-term (3 s) BS.1770 meter (`nano_meter_*`). The C handle is NOT thread-safe, so
+/// every access is serialized by one `OSAllocatedUnfairLock`: `feed` runs on the audio tap thread,
+/// `requestReset` from the main actor. The handle is created/freed/used only inside the lock — no
+/// cross-thread race — and the class lives outside `@MainActor` so the tap closure calls it directly.
+/// Mirrors crates/nano-dsp/smoke/smoke.swift; the Rust side is pinned by tests/ffi_abi.rs.
+final class LiveLUFSMeter: @unchecked Sendable {
+    private struct State {
+        var handle: OpaquePointer?        // NanoMeter* (opaque)
+        var rate: Double = 0
+        var resetPending = false
+    }
+    private let lock = OSAllocatedUnfairLock(uncheckedState: State())
+
+    /// Drop the 3 s history on the next `feed` (call on track change / seek). Cheap; any thread.
+    func requestReset() { lock.withLock { $0.resetPending = true } }
+
+    /// Interleave planar L/R, push, and read short-term LUFS. Called on the audio tap thread.
+    /// Recreates the handle when the sample rate changes or a reset is pending. nil = no reading.
+    func feed(left: UnsafePointer<Float>, right: UnsafePointer<Float>, frames: Int, sampleRate: Double) -> Double? {
+        guard frames > 0 else { return nil }
+        // Interleave OUTSIDE the lock into a `let` array (Sendable): `withLock`'s body is @Sendable and
+        // cannot capture the raw L/R pointers (a warning in the project's Swift 5.10 mode, a hard error
+        // under Swift 6). The array crosses the boundary cleanly; its pointer is created and used
+        // entirely inside the lock. One small alloc per callback — fine for a ~1024-frame tap.
+        let interleaved: [Float] = {
+            var buf = [Float](repeating: 0, count: frames * 2)
+            for i in 0..<frames { buf[2 * i] = left[i]; buf[2 * i + 1] = right[i] }
+            return buf
+        }()
+        return lock.withLock { st -> Double? in
+            if st.handle == nil || st.rate != sampleRate || st.resetPending {
+                if let h = st.handle { nano_meter_free(h) }
+                st.handle = sampleRate > 0 ? nano_meter_new(sampleRate) : nil
+                st.rate = sampleRate
+                st.resetPending = false
+            }
+            guard let h = st.handle else { return nil }
+            interleaved.withUnsafeBufferPointer { nano_meter_push(h, $0.baseAddress, frames) }
+            let v = nano_meter_short_term(h)
+            return v.isFinite ? v : nil
+        }
+    }
+
+    /// Free the handle (call when playback stops entirely).
+    func stop() { lock.withLock { st in if let h = st.handle { nano_meter_free(h) }; st.handle = nil; st.rate = 0 } }
+
+    deinit { lock.withLock { st in if let h = st.handle { nano_meter_free(h) } } }
 }
