@@ -15,6 +15,7 @@ struct NowPlayingScreen: View {
 
     @AppStorage("showWave") private var showWave = true
     @AppStorage("spectrum") private var spectrum = false
+    @AppStorage("zoomWave") private var zoomWave = false        // close-up (DJ scroll); off in v1
     @State private var bins: [WaveBin] = []
 
     var body: some View {
@@ -27,6 +28,7 @@ struct NowPlayingScreen: View {
                 topBar
                 hero                                     // takes the leftover space, capped + shrinks to fit
                 titleRow
+                closeUp          // §05/§03D: close-up sits above the full-song scrubber
                 scrubber
                 timeRow
                 transportRow
@@ -54,12 +56,23 @@ struct NowPlayingScreen: View {
         .sheet(isPresented: $showQueue) { QueueSheet() }
     }
 
+    @ViewBuilder private var closeUp: some View {
+        if zoomWave, !bins.isEmpty, let dur = engine.current?.durationSec, dur > 0 {
+            CloseUpWaveform(bins: bins,
+                            currentTime: { engine.centerTime },
+                            duration: dur,
+                            coloringOn: spectrum,
+                            isPlaying: engine.isPlaying,
+                            redrawTrigger: engine.elapsed)   // observed → re-centers on scrub-while-paused
+        }
+    }
+
     @ViewBuilder private var scrubber: some View {
         if showWave {
             OverviewWaveform(bins: bins, progress: engine.progress, coloringOn: spectrum,
                              onScrub: { engine.seek(toFraction: $0) }, height: 46)
                 .overlay(alignment: .topTrailing) {
-                    LUFSBadge(lufs: engine.current?.integratedLUFS).offset(y: -6)
+                    LUFSBadge(lufs: engine.shortTermLUFS).offset(y: -6)
                 }
         } else {                                   // both/overview off → plain 6pt bar (§03D item 5)
             GeometryReader { geo in

@@ -26,4 +26,18 @@ final class WaveformUITests: XCTestCase {
         overview.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.5)).tap()  // scrub near the end
         XCTAssertEqual(app.staticTexts["npTitle"].label, before)  // same track, just seeked (not skipped)
     }
+
+    @MainActor
+    func test_closeUpAppearsWhenZoomWaveEnabled() {
+        let app = XCUIApplication()
+        // -autoplay docks a track, -expand opens Now Playing; -zoomWave YES lands in the UserDefaults
+        // argument domain so @AppStorage("zoomWave") reads true without touching app code.
+        app.launchArguments += ["-autoplay", "-expand", "-zoomWave", "YES"]
+        app.launch()
+
+        XCTAssertTrue(app.otherElements["nowPlaying"].waitForExistence(timeout: 8),
+                      "Now Playing should auto-open")
+        XCTAssertTrue(app.otherElements["closeUpWaveform"].waitForExistence(timeout: 5),
+                      "close-up should render when zoomWave is on")
+    }
 }
