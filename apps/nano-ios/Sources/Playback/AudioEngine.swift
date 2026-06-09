@@ -22,6 +22,11 @@ final class AudioEngine {
     /// RMS of the signal at the main mixer — the audio actually being rendered to the output.
     /// Non-zero only while real sound is flowing; foundation for the Phase 5 live meter (ADR 0002).
     private(set) var outputLevel: Float = 0
+    /// Live short-term (3 s) BS.1770 loudness, fed by the main-mixer tap. A reading appears within
+    /// ~100 ms of playback (one closed 100 ms bin) and stabilizes over the first ~3 s; nil only before
+    /// the first audio renders, right after a reset (until the next feed), or on true silence.
+    /// Transient — NOT persisted on Track.
+    private(set) var shortTermLUFS: Double?
     /// Player gain, 0…1. Drives `player.volume`; NOT system volume.
     private(set) var volume: Double = 1.0
     private(set) var context: PlayContext = .library
@@ -36,6 +41,8 @@ final class AudioEngine {
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
     private var file: AVAudioFile?
+    /// Streaming short-term loudness, fed from `installOutputMeter`'s tap. Off-main + lock-guarded.
+    private let liveMeter = LiveLUFSMeter()
     private var scopedURL: URL?
     private var sampleRate: Double = 44_100
     private var totalFrames: AVAudioFramePosition = 0
@@ -57,11 +64,20 @@ final class AudioEngine {
     /// Tap the main mixer and publish the rendered signal's RMS as `outputLevel` (real audio
     /// flowing ⇒ > 0). The tap lives and dies with this engine instance — no global state to clean.
     private func installOutputMeter() {
+        let meter = liveMeter        // capture the off-main, lock-guarded handle for the tap thread
         engine.mainMixerNode.installTap(onBus: 0, bufferSize: 1024, format: nil) { [weak self] buffer, _ in
             guard let data = buffer.floatChannelData, buffer.frameLength > 0 else { return }
+            let frames = Int(buffer.frameLength)
             var rms: Float = 0
-            vDSP_rmsqv(data[0], 1, &rms, vDSP_Length(buffer.frameLength))
-            Task { @MainActor in self?.outputLevel = rms }
+            vDSP_rmsqv(data[0], 1, &rms, vDSP_Length(frames))
+            let stereo = buffer.format.channelCount > 1
+            let s = meter.feed(left: data[0], right: stereo ? data[1] : data[0],
+                               frames: frames, sampleRate: buffer.format.sampleRate)
+            Task { @MainActor in
+                guard let self else { return }
+                self.outputLevel = rms
+                self.shortTermLUFS = self.isPlaying ? s : nil   // live ONLY while playing; blank otherwise
+            }
         }
     }
 
@@ -86,6 +102,7 @@ final class AudioEngine {
         } else {
             if !engine.isRunning { try? engine.start() }
             player.play(); isPlaying = true; startTicker()
+            liveMeter.requestReset()                       // fresh 3 s window on resume
         }
         updateNowPlayingInfo()
     }
@@ -103,10 +120,12 @@ final class AudioEngine {
         player.stop()
         releaseScope()
         progress = 0; elapsed = 0; seekOffsetFrames = 0
+        liveMeter.requestReset(); shortTermLUFS = nil          // drop stale 3 s window for the new track
 
         guard let url = resolveURL(track) else {
             // Unresolved file: reflect the selection, but don't fake audio.
             current = track; isPlaying = false; file = nil; totalFrames = 0
+            liveMeter.stop(); shortTermLUFS = nil
             updateNowPlayingInfo()
             NSLog("[AudioEngine] no playable file for \(track.title) — selection only")
             return
@@ -125,6 +144,7 @@ final class AudioEngine {
             updateNowPlayingInfo()
         } catch {
             current = track; isPlaying = false; file = nil; totalFrames = 0
+            liveMeter.stop(); shortTermLUFS = nil
             NSLog("[AudioEngine] load failed for \(url.lastPathComponent): \(error)")
         }
     }
@@ -174,6 +194,10 @@ final class AudioEngine {
         return seekOffsetFrames + playerTime.sampleTime
     }
 
+    /// Sample-accurate playback position in seconds — the close-up's `centerTime`. Reads the player
+    /// node clock live (handoff §05: derive from sample time, never a wall clock).
+    var centerTime: Double { sampleRate > 0 ? Double(currentFrame) / sampleRate : 0 }
+
     func updateProgress() {
         progress = PlaybackMath.fraction(frame: currentFrame, total: totalFrames)
         elapsed = sampleRate > 0 ? Double(currentFrame) / sampleRate : 0
@@ -205,6 +229,7 @@ final class AudioEngine {
         } else {                       // end of queue, repeat off → stop
             player.stop(); stopTicker(); releaseScope()
             isPlaying = false; progress = 0; elapsed = 0
+            liveMeter.stop(); shortTermLUFS = nil
             updateNowPlayingInfo()
         }
     }
@@ -240,6 +265,7 @@ final class AudioEngine {
 
     func seek(toFraction f: Double) {
         guard let file, totalFrames > 0 else { return }
+        liveMeter.requestReset(); shortTermLUFS = nil
         let target = AVAudioFramePosition(Double(totalFrames) * min(1, max(0, f)))
         let wasPlaying = isPlaying
         player.stop()

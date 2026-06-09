@@ -34,6 +34,41 @@ final class AudioEngineTests: XCTestCase {
                           "expected ~silence when paused, got \(engine.outputLevel)")
     }
 
+    func test_liveShortTermLUFSBecomesAPlausibleReadingWhilePlaying() async throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Tone_\(UUID().uuidString).wav")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try Self.writeSine(to: url, seconds: 5.0, frequency: 440)
+
+        let track = Track(title: "Tone", artist: "", album: "", bookmark: try url.bookmarkData())
+        let engine = AudioEngine()
+        engine.play(track, in: [track], context: .library)
+
+        // Let > 3 s render so the 3 s short-term window is well-populated (it reads live within ~100 ms).
+        try await Task.sleep(nanoseconds: 3_800_000_000)
+        let s = engine.shortTermLUFS
+        XCTAssertNotNil(s, "expected a live short-term reading after ~3.8 s, got nil")
+        XCTAssertTrue((s ?? 0) > -40 && (s ?? 0) < 0, "live short-term implausible: \(String(describing: s))")
+
+        engine.toggle()   // pause → blank-until-live: the badge value clears
+        try await Task.sleep(nanoseconds: 400_000_000)
+        XCTAssertNil(engine.shortTermLUFS, "live short-term should blank when paused")
+    }
+
+    func test_centerTimeAdvancesWhilePlaying() async throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Tone_\(UUID().uuidString).wav")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try Self.writeSine(to: url, seconds: 3.0, frequency: 440)
+
+        let track = Track(title: "Tone", artist: "", album: "", bookmark: try url.bookmarkData())
+        let engine = AudioEngine()
+        engine.play(track, in: [track], context: .library)
+
+        try await Task.sleep(nanoseconds: 700_000_000)
+        XCTAssertGreaterThan(engine.centerTime, 0.3, "centerTime should advance with the sample clock")
+    }
+
     func test_setVolumeClampsToUnitRange() {
         let engine = AudioEngine()
         engine.setVolume(0.5);  XCTAssertEqual(engine.volume, 0.5, accuracy: 1e-6)
