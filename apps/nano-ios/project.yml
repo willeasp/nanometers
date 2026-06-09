@@ -9,7 +9,7 @@ settings:
     MARKETING_VERSION: "0.1.0"
     CURRENT_PROJECT_VERSION: "1"
     TARGETED_DEVICE_FAMILY: "1"          # iPhone only
-    CODE_SIGNING_ALLOWED: "NO"           # simulator builds/tests need no signing
+    CODE_SIGNING_ALLOWED[sdk=iphonesimulator*]: "NO"   # headless sim builds/tests stay credential-free; device builds sign normally
 targets:
   NanoMeters:
     type: application
@@ -30,6 +30,8 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.willeasp.nanometers.ios
+        CODE_SIGN_STYLE: Automatic       # free personal team: Xcode provisions on the fly
+        DEVELOPMENT_TEAM: 9GX3Z9282P     # William Asp (Personal Team)
   NanoMetersTests:
     type: bundle.unit-test
     platform: iOS
