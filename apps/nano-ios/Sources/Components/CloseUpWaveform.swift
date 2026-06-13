@@ -1,9 +1,10 @@
 import SwiftUI
 
 /// Close-up scope (handoff §06D.1) — the flip card's signature meter. A window of the cached **stereo**
-/// bins scrolling right→left past a FIXED center playhead, drawn in the nano-plugin Waveform look: a
-/// FILLED min/max contour per channel, **L in the top half, R in the bottom half**, spectrally colored.
-/// Uniform brightness (no played/upcoming dimming), a soft edge-fade, and scrub-anywhere-to-seek. The
+/// bins scrolling right→left past a FIXED center playhead. ONE waveform around a single center line:
+/// the **upper half is the LEFT channel, the lower half is the RIGHT** (rectified peak envelope filled
+/// from the center), spectrally colored. Uniform brightness (no played/upcoming dimming), a soft
+/// edge-fade, and scrub-anywhere-to-seek. The
 /// playhead is advanced by `ScrollClock` — the plugin's "subway-sign" model: a frame-counted,
 /// reservoir-controlled step once per `TimelineView` vsync tick whose RATE slews toward the
 /// sample-accurate `centerTime`, rather than reading the clock straight into the position each frame
@@ -71,16 +72,19 @@ struct CloseUpWaveform: View {
     /// each cache bin keeps its own pre-analyzed min/max envelope and is placed at an **affine** x —
     /// `x(i) = centerX + (binTime − center)·pxPerSec`. Only `center` changes frame to frame, so every
     /// bin's x shifts by the SAME delta: the contour rigidly translates left, never re-binning (the old
-    /// per-pixel re-aggregation against a sub-pixel offset is what shimmered/"morphed"). Per channel a
-    /// single FILLED min/max contour path (L top half, R bottom half) — the plugin's filled ribbon, not
-    /// disjoint bars — shaded by a horizontal spectral gradient with the soft edge-fade baked into its
-    /// alpha. Two path fills per frame: cheap and crisp.
+    /// per-pixel re-aggregation against a sub-pixel offset is what shimmered/"morphed").
+    ///
+    /// ONE waveform on a SINGLE center line: L is the upper silhouette, R the lower — each the rectified
+    /// peak `max(|min|, |max|)` filled from the center. Color is a horizontal spectral gradient with one
+    /// stop PER BIN: each stop is anchored to its bin's pixel `x(i)`, so the color rigidly translates with
+    /// the contour. (The old ≤64-stop subsample re-bucketed which bins became stops every frame, so the
+    /// interpolated color at each fixed pixel drifted — that was the back-and-forth color flicker.)
     private func drawContour(_ ctx: GraphicsContext, w: CGFloat, h: CGFloat, centerX: CGFloat, center: Double) {
         guard bins.count > 1, duration > 0 else { return }
         let binsPerSec = Double(bins.count) / duration
         let pxPerSec = w / CGFloat(max(0.5, windowSec))
-        let chTop = h * 0.25, chBot = h * 0.75       // per-channel zero-lines (L top half, R bottom half)
-        let halfAmp = (h / 2) * 0.45                 // plugin HALF_SCALE within each half
+        let zero = h / 2                             // single center line: L above, R below
+        let halfAmp = (h / 2) * 0.45                 // plugin HALF_SCALE: sample ±1 → 0.45 of the half-lane
 
         // Visible bin window (a one-bin margin so the contour enters/leaves cleanly under the edge fade).
         func binAtX(_ x: CGFloat) -> Double { (center + Double((x - centerX) / pxPerSec)) * binsPerSec }
@@ -92,30 +96,28 @@ struct CloseUpWaveform: View {
         let x0 = x(firstBin), x1 = x(lastBin)
         let span = max(1, x1 - x0)
 
-        // Filled min/max contour per channel: forward along the maxima, back along the minima, closed.
-        func contour(zero: CGFloat, _ maxAt: (StereoWaveBin) -> Float, _ minAt: (StereoWaveBin) -> Float) -> Path {
+        // Rectified peak per channel: the upper silhouette is L, the lower is R, hinged on the center.
+        func ampL(_ b: StereoWaveBin) -> CGFloat { CGFloat(max(b.lMax, -b.lMin)) }
+        func ampR(_ b: StereoWaveBin) -> CGFloat { CGFloat(max(b.rMax, -b.rMin)) }
+        func silhouette(up: Bool, _ amp: (StereoWaveBin) -> CGFloat) -> Path {
             var p = Path()
-            p.move(to: CGPoint(x: x(firstBin), y: zero - CGFloat(maxAt(bins[firstBin])) * halfAmp))
-            for i in (firstBin + 1)...lastBin { p.addLine(to: CGPoint(x: x(i), y: zero - CGFloat(maxAt(bins[i])) * halfAmp)) }
-            for i in stride(from: lastBin, through: firstBin, by: -1) {
-                p.addLine(to: CGPoint(x: x(i), y: zero - CGFloat(minAt(bins[i])) * halfAmp))
-            }
+            let sign: CGFloat = up ? -1 : 1
+            p.move(to: CGPoint(x: x(firstBin), y: zero))
+            for i in firstBin...lastBin { p.addLine(to: CGPoint(x: x(i), y: zero + sign * amp(bins[i]) * halfAmp)) }
+            p.addLine(to: CGPoint(x: x(lastBin), y: zero))
             p.closeSubpath()
             return p
         }
-        let lPath = contour(zero: chTop, { $0.lMax }, { $0.lMin })
-        let rPath = contour(zero: chBot, { $0.rMax }, { $0.rMin })
+        let lPath = silhouette(up: true, ampL)
+        let rPath = silhouette(up: false, ampR)
 
-        // Horizontal spectral gradient (subsampled ≤64 stops; color varies slowly), edge-fade in alpha.
-        let stepCount = min(lastBin - firstBin, 64)
+        // Horizontal spectral gradient, ONE stop per visible bin (no moving subsample grid → no shimmer).
         var stops: [Gradient.Stop] = []
-        stops.reserveCapacity(stepCount + 1)
-        for s in 0...stepCount {
-            let i = firstBin + (lastBin - firstBin) * s / stepCount
-            let loc = (x(i) - x0) / span
-            let fade = edgeAlpha(loc)
+        stops.reserveCapacity(lastBin - firstBin + 1)
+        for i in firstBin...lastBin {
+            let loc = min(1, max(0, (x(i) - x0) / span))
             let base = coloringOn ? Self.scopeColor(bins[i]) : Theme.accent
-            stops.append(.init(color: base.opacity(fade), location: min(1, max(0, loc))))
+            stops.append(.init(color: base.opacity(edgeAlpha(loc)), location: loc))
         }
         let shading = GraphicsContext.Shading.linearGradient(
             Gradient(stops: stops), startPoint: CGPoint(x: x0, y: 0), endPoint: CGPoint(x: x1, y: 0))
