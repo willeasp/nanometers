@@ -58,6 +58,14 @@ amendment below.)*
 - **The persisted serde shape is a contract** the Loudness agent (and every future Module) builds
   against: `EditorState { size, layout: [Column …] }`, each column carrying a Module-owned opaque
   config. Changing it later requires a state migration for saved projects.
+  - **The config bridge is live (built 2026-06-13, Phase F1).** `save_config`/`load_config` are now
+    actually called: the host pushes each column's bytes into its module at spawn (`load_configs`)
+    and flushes live config back after each input batch (`flush_configs` → `set_layout`), both
+    render-side where the modules live (ADR 0008). Before F1 these methods had **zero call sites**, so
+    config round-tripped through serde but never reached a module — every reopen booted at defaults.
+    Each module JSON-encodes its own config into the opaque bytes (`serde_json`, the same format
+    nih-plug uses for the whole `EditorState`). The Waveform's `window_seconds` is the first such
+    field; richer per-module config and the UI to edit it follow (F2+).
 - **Modules must not reference each other or assume placement.** "To the right of" is not part of any
   Module's definition — placement is purely the user's layout. The glossary was scrubbed of spatial
   relationships to enforce this.

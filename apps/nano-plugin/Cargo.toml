@@ -54,6 +54,9 @@ pollster.workspace = true
 crossbeam.workspace = true
 atomic_float.workspace = true
 serde.workspace = true
+# Module-owned opaque config (ADR 0003) is JSON-encoded into the column's bytes. Also the format
+# nih-plug uses for the whole EditorState, so the persisted project carries one consistent encoding.
+serde_json = "1.0"
 log.workspace = true
 
 rtrb.workspace = true
@@ -69,5 +72,3 @@ wgpu_text = "29.0.3"
 # Reference BS.1770 implementation, used only as a conformance oracle in tests (ADR 0006).
 # Never linked into the shipped plugin.
 ebur128 = "0.1.10"
-# Test-only: exercise the EditorState persist round-trip (the same serde path nih-plug uses).
-serde_json = "1.0"
