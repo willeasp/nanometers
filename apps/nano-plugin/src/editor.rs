@@ -292,6 +292,49 @@ fn build_module(
     }
 }
 
+/// A runtime layout mutation from the context menu (ADR 0003 / 0004 — multi-instance, Phase F3).
+/// The render loop applies it via [`apply_edit`], which keeps `layout` and `modules` 1:1.
+// The only caller is the menu wiring in `run_render_loop` (F3b, Task 8); allow until that lands.
+#[allow(dead_code)]
+pub enum LayoutEdit {
+    /// Insert a new Module of `module_type` right after the column at `after` (clamped).
+    Insert { after: usize, module_type: String },
+    /// Remove the column (and its Module) at `index`.
+    Remove { index: usize },
+}
+
+/// Apply a [`LayoutEdit`] to the live `layout` + `modules` together, so the two never drift out of
+/// the 1:1 alignment the render loop relies on. `build` constructs the Module for an inserted column
+/// (the real loop passes `build_module`; tests pass a FakeModule factory). An inserted column
+/// reconciles its fixed width from the freshly-built Module — the Module is the size-of-truth, the
+/// same rule spawn uses — and loads its (empty) config so it boots at defaults.
+#[allow(dead_code)] // wired into run_render_loop by the menu (F3b, Task 8)
+fn apply_edit<F>(
+    layout: &mut Vec<Column>,
+    modules: &mut Vec<Box<dyn Module + Send>>,
+    edit: &LayoutEdit,
+    mut build: F,
+) where
+    F: FnMut(&str) -> Box<dyn Module + Send>,
+{
+    match edit {
+        LayoutEdit::Insert { after, module_type } => {
+            let at = crate::layout::insert_column(layout, *after, module_type);
+            let mut module = build(module_type);
+            if let Some(w) = module.intrinsic_width() {
+                layout[at].fixed_width_px = Some(w);
+            }
+            module.load_config(&layout[at].config);
+            modules.insert(at, module);
+        }
+        LayoutEdit::Remove { index } => {
+            if crate::layout::remove_column(layout, *index).is_some() {
+                modules.remove(*index);
+            }
+        }
+    }
+}
+
 /// Push each column's persisted opaque config (ADR 0003) into its freshly-built Module. Called at
 /// editor spawn AFTER `build_module` — modules + layout are 1:1 by position. A module treats
 /// unrecognized/empty bytes as defaults, so this is always safe (including the default empty config).
@@ -828,12 +871,22 @@ mod tests {
         assert_eq!(l[1].fixed_width_px, Some(151.0));
     }
 
-    /// A Module with no GPU state — `load_configs`/`flush_configs` only touch save/load_config, never
-    /// render, so this is constructible in a unit test (render/update are unreachable no-ops here).
+    /// A Module with no GPU state — the config/edit plumbing only touches save/load_config and
+    /// intrinsic_width, never render, so this is constructible in a unit test (render/update are
+    /// unreachable no-ops here). `intrinsic` lets a test stand in for a fixed-width Module (Loudness).
     struct FakeModule {
         config: Vec<u8>,
+        intrinsic: Option<f32>,
+    }
+    impl FakeModule {
+        fn flex(config: Vec<u8>) -> Self {
+            Self { config, intrinsic: None }
+        }
     }
     impl Module for FakeModule {
+        fn intrinsic_width(&self) -> Option<f32> {
+            self.intrinsic
+        }
         fn update(&mut self, _c: &FrameContext, _q: &wgpu::Queue) {}
         fn render(&mut self, _r: &mut wgpu::RenderPass, _v: Rect) {}
         fn on_event(&mut self, _e: &baseview::Event, _v: Rect) -> crate::module::EventStatus {
@@ -847,6 +900,73 @@ mod tests {
         }
     }
 
+    fn apply_edit_tests_flex_factory(_t: &str) -> Box<dyn Module + Send> {
+        Box::new(FakeModule::flex(Vec::new()))
+    }
+
+    #[test]
+    fn apply_edit_insert_adds_module_and_column_in_lockstep() {
+        let mut layout = vec![
+            Column::new(0, module_type::WAVEFORM, 1.0),
+            Column::fixed(1, module_type::LOUDNESS, 150.0),
+        ];
+        let mut modules: Vec<Box<dyn Module + Send>> =
+            vec![Box::new(FakeModule::flex(vec![])), Box::new(FakeModule::flex(vec![]))];
+        apply_edit(
+            &mut layout,
+            &mut modules,
+            &LayoutEdit::Insert { after: 0, module_type: module_type::OSCILLOSCOPE.into() },
+            apply_edit_tests_flex_factory,
+        );
+        assert_eq!(layout.len(), 3);
+        assert_eq!(modules.len(), layout.len(), "modules stay 1:1 with columns");
+        assert_eq!(layout[1].module_type, module_type::OSCILLOSCOPE, "lands right after column 0");
+        assert_eq!(layout[1].instance_id, 2, "fresh id");
+    }
+
+    #[test]
+    fn apply_edit_remove_drops_both() {
+        let mut layout = vec![
+            Column::new(0, module_type::WAVEFORM, 0.5),
+            Column::new(1, module_type::OSCILLOSCOPE, 0.5),
+            Column::new(2, module_type::WAVEFORM, 0.5),
+        ];
+        let mut modules: Vec<Box<dyn Module + Send>> = vec![
+            Box::new(FakeModule::flex(vec![])),
+            Box::new(FakeModule::flex(vec![])),
+            Box::new(FakeModule::flex(vec![])),
+        ];
+        apply_edit(&mut layout, &mut modules, &LayoutEdit::Remove { index: 1 }, apply_edit_tests_flex_factory);
+        assert_eq!(modules.len(), layout.len());
+        assert_eq!(
+            layout.iter().map(|c| c.instance_id).collect::<Vec<_>>(),
+            vec![0, 2],
+            "the right column is gone"
+        );
+    }
+
+    #[test]
+    fn apply_edit_remove_to_empty() {
+        let mut layout = vec![Column::new(0, module_type::WAVEFORM, 1.0)];
+        let mut modules: Vec<Box<dyn Module + Send>> = vec![Box::new(FakeModule::flex(vec![]))];
+        apply_edit(&mut layout, &mut modules, &LayoutEdit::Remove { index: 0 }, apply_edit_tests_flex_factory);
+        assert!(layout.is_empty() && modules.is_empty(), "the strip can go empty");
+    }
+
+    #[test]
+    fn apply_edit_insert_pins_intrinsic_width() {
+        let mut layout = vec![Column::new(0, module_type::WAVEFORM, 1.0)];
+        let mut modules: Vec<Box<dyn Module + Send>> = vec![Box::new(FakeModule::flex(vec![]))];
+        // A factory whose built module reports an intrinsic width (stands in for Loudness).
+        apply_edit(
+            &mut layout,
+            &mut modules,
+            &LayoutEdit::Insert { after: 0, module_type: module_type::LOUDNESS.into() },
+            |_t| Box::new(FakeModule { config: Vec::new(), intrinsic: Some(150.0) }),
+        );
+        assert_eq!(layout[1].fixed_width_px, Some(150.0), "inserted column pins to the module's width");
+    }
+
     #[test]
     fn configs_load_into_modules_then_flush_back_into_columns() {
         let mut layout = vec![
@@ -854,8 +974,8 @@ mod tests {
             column_with_config(9, module_type::LOUDNESS, 0.5, b"persisted-B".to_vec()),
         ];
         let mut modules: Vec<Box<dyn Module + Send>> = vec![
-            Box::new(FakeModule { config: Vec::new() }),
-            Box::new(FakeModule { config: Vec::new() }),
+            Box::new(FakeModule::flex(Vec::new())),
+            Box::new(FakeModule::flex(Vec::new())),
         ];
         // LOAD: the persisted bytes reach the modules (1:1 by position).
         load_configs(&mut modules, &layout);
