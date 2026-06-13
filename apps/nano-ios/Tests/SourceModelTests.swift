@@ -22,4 +22,15 @@ final class SourceModelTests: XCTestCase {
         XCTAssertEqual(fetched?.canonicalOrder, 2)
         XCTAssertEqual(fetched?.state, "noRoots")
     }
+
+    func test_rootFolders_filteredBySource_inAddOrder() throws {
+        let ctx = try TestDB.context()
+        let early = Date(timeIntervalSince1970: 100)
+        let later = Date(timeIntervalSince1970: 200)
+        ctx.insert(RootFolder(sourceId: "gdrive", name: "My Productions", providerFolderId: "gd-mine", dateAdded: early))
+        ctx.insert(RootFolder(sourceId: "gdrive", name: "DJ Crate", providerFolderId: "gd-crate", dateAdded: later))
+        ctx.insert(RootFolder(sourceId: "local", name: "On My iPhone", bookmark: Data([1,2]), dateAdded: early))
+        let driveRoots = try LibraryStore.rootFolders(of: "gdrive", ctx)
+        XCTAssertEqual(driveRoots.map(\.name), ["My Productions", "DJ Crate"])
+    }
 }

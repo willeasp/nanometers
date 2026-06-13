@@ -46,4 +46,10 @@ enum LibraryStore {
         d.fetchLimit = 1
         return try ctx.fetch(d).first
     }
+
+    static func rootFolders(of sourceId: String, _ ctx: ModelContext) throws -> [RootFolder] {
+        try ctx.fetch(FetchDescriptor<RootFolder>(
+            predicate: #Predicate { $0.sourceId == sourceId },
+            sortBy: [SortDescriptor(\.dateAdded)]))
+    }
 }
