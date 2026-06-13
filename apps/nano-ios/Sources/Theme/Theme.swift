@@ -13,6 +13,7 @@ enum Theme {
     static let text3 = Color(hex: 0x626A78)
     // Accent (locked)
     static let accent = Color(hex: 0xEFA869)
+    static let accentHex = "#EFA869"
     // Frequency bands (handoff §01) — used by the waveforms in Phase 3; defined now for completeness.
     static let bandBass   = Color(hex: 0xFF6B6B)
     static let bandMid    = Color(hex: 0x57D986)
