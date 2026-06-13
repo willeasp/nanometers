@@ -73,7 +73,8 @@ final class SpectrumAnalyzer {
     private let setup: FFTSetup
     private var window: [Float]
     private var smoothed = [Float](repeating: 0.04, count: binCount)
-    private let edges: [Int]            // log-spaced FFT-bin boundaries, binCount+1 of them
+    private let edges: [Double]         // log-spaced FFT-bin boundaries (FRACTIONAL), binCount+1 of them
+    private let tiltDB: [Float]         // per-band perceptual tilt (≈ +pink/oct), zero-mean across bands
 
     // Work buffers, allocated ONCE and reused every frame — `process` runs per display tick (60 Hz)
     // now that the meter animates, so per-call allocations would churn ~1 MB/s for nothing.
@@ -89,13 +90,22 @@ final class SpectrumAnalyzer {
         window = [Float](repeating: 0, count: Self.fftSize)
         vDSP_hann_window(&window, vDSP_Length(Self.fftSize), Int32(vDSP_HANN_NORM))
         let half = Self.fftSize / 2
-        var e = [Int]()
+        // FRACTIONAL log-spaced FFT-bin edges (1…half). Keeping them fractional lets the low end be
+        // linearly INTERPOLATED at the band center instead of rounding several display bins onto the
+        // same integer FFT bin — that rounding is what made the low end look like discrete bars.
+        var e = [Double]()
         for i in 0...Self.binCount {
             let f = Double(i) / Double(Self.binCount)
-            let b = 1.0 * pow(Double(half) / 1.0, f)        // log-spaced 1…half
-            e.append(min(half, max(1, Int(b.rounded()))))
+            e.append(min(Double(half), max(1.0, pow(Double(half), f))))
         }
         edges = e
+        // Perceptual tilt: raw FFT magnitude of pink noise (equal energy per octave) falls ~3 dB/oct,
+        // so without this the bass towers over the treble. Add +TILT dB/oct (by log2 of the band's
+        // center bin; f ∝ bin), zero-meaned so the overall level/calibration is unchanged.
+        let tilt: Float = 3.0
+        let centers = (0..<Self.binCount).map { (e[$0] * e[$0 + 1]).squareRoot() }   // geometric centers
+        let refLog = Float(log2(centers[Self.binCount / 2]))
+        tiltDB = centers.map { tilt * (Float(log2($0)) - refLog) }
     }
 
     deinit { vDSP_destroy_fftsetup(setup) }
@@ -125,12 +135,23 @@ final class SpectrumAnalyzer {
             }
             let scale = 1.0 / Float(Self.fftSize)
             for b in 0..<Self.binCount {
-                let lo = edges[b], hi = max(edges[b] + 1, edges[b + 1])
-                var sum: Float = 0, cnt: Float = 0
-                for k in lo..<min(half, hi) { sum += magsBuf[k]; cnt += 1 }
-                let avg = cnt > 0 ? (sum / cnt) * scale : 0
-                let db = 20 * log10(max(avg, 1e-7))           // ~ -140…0 dB
-                target[b] = max(floorV, min(1, (db + 75) / 65))   // map ≈ -75…-10 dB → 0…1 (visual)
+                let lo = edges[b], hi = edges[b + 1]
+                let mag: Float
+                if hi - lo < 1.5 {
+                    // Narrow band (low end): linearly interpolate at the center → smooth, no bin-rounding steps.
+                    let c = (lo + hi) * 0.5
+                    let k = min(half - 2, max(0, Int(c)))
+                    let frac = Float(c - Double(k))
+                    mag = magsBuf[k] * (1 - frac) + magsBuf[k + 1] * frac
+                } else {
+                    // Wide band (high end): average the covered integer FFT bins.
+                    let a = max(0, Int(lo.rounded())), z = max(a + 1, Int(hi.rounded()))
+                    var sum: Float = 0, cnt: Float = 0
+                    for k in a..<min(half, z) { sum += magsBuf[k]; cnt += 1 }
+                    mag = cnt > 0 ? sum / cnt : 0
+                }
+                let db = 20 * log10(max(mag * scale, 1e-7)) + tiltDB[b]   // raw dB + perceptual tilt
+                target[b] = max(floorV, min(1, (db + 75) / 65))           // map ≈ -75…-10 dB → 0…1 (visual)
             }
         }
         for i in 0..<Self.binCount { smoothed[i] += (target[i] - smoothed[i]) * 0.22 }
