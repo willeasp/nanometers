@@ -138,6 +138,75 @@ pub fn viewports(cols: &[Column], surface_w: f32, surface_h: f32, scale: f32) ->
     rects
 }
 
+// ──────────────────────────────────────────────────────────────────────────────────────────
+// Hit-testing / reorder helpers for the pointer-grab router (Phase E, ADR 0004). All PURE: they
+// take the laid-out `viewports` (physical px) + a physical-px cursor `x` and never touch the GPU
+// or threads — the render-side `Router` drives them.
+// ──────────────────────────────────────────────────────────────────────────────────────────
+
+/// Smallest flex fraction [`sanitize_layout`] will pin a degenerate value to — keeps a column
+/// visible and, crucially, finite-positive so it can't serialize to a load-breaking JSON `null`.
+const MIN_FLEX_FRACTION: f32 = 0.05;
+
+/// The column whose viewport contains physical-px `x` (columns are full-height, so x alone
+/// decides). `None` if x is past every rect — including a column clamped to zero width in a
+/// too-narrow window. Viewports tile gap-free, so the first containing rect is the answer.
+pub fn column_index_at(viewports: &[Rect], x: f32) -> Option<usize> {
+    viewports
+        .iter()
+        .position(|r| r.w > 0.0 && x >= r.x && x < r.x + r.w)
+}
+
+/// The draggable resize boundary under physical-px `x`, within `gutter_px` of a column seam.
+/// ONLY a seam between two FLEXING columns is draggable: a fixed column owns its width (ADR 0003
+/// amendment), so flex|fixed and fixed|fixed seams return `None`. Returns the LEFT column's index.
+/// NOTE: the shipped default layout (flex Waveform | fixed Loudness) has no such seam — resize
+/// becomes reachable only with two flex columns (Phase F multi-instance).
+pub fn resize_boundary_at(
+    cols: &[Column],
+    viewports: &[Rect],
+    x: f32,
+    gutter_px: f32,
+) -> Option<usize> {
+    (0..cols.len().saturating_sub(1)).find(|&i| {
+        let seam = viewports[i].x + viewports[i].w; // == viewports[i + 1].x (gap-free tiling)
+        (x - seam).abs() <= gutter_px
+            && cols[i].fixed_width_px.is_none()
+            && cols[i + 1].fixed_width_px.is_none()
+    })
+}
+
+/// The slot the dragged column should occupy if dropped at physical-px `cursor_x`: the count of
+/// OTHER columns whose midpoint sits left of the cursor. The index is in the post-removal array,
+/// so it pairs directly with [`apply_reorder`]`(cols, dragged, reorder_target(..))`.
+pub fn reorder_target(viewports: &[Rect], dragged: usize, cursor_x: f32) -> usize {
+    viewports
+        .iter()
+        .enumerate()
+        .filter(|&(i, r)| i != dragged && cursor_x > r.x + r.w * 0.5)
+        .count()
+}
+
+/// Move the column at `from` to index `to` (clamped), shifting the rest; returns a new Vec.
+pub fn apply_reorder(cols: &[Column], from: usize, to: usize) -> Vec<Column> {
+    let mut v = cols.to_vec();
+    let c = v.remove(from);
+    v.insert(to.min(v.len()), c);
+    v
+}
+
+/// Clamp every FLEX column's `width_fraction` to a finite, strictly-positive value. A degenerate
+/// resize/reflow can leave a NaN/0/negative fraction; serde_json writes NaN as `null` and `null`
+/// fails to deserialize into f32 — so one bad fraction would brick the next editor-state load.
+/// Fixed columns' fractions are ignored by [`viewports`], so they're left untouched.
+pub fn sanitize_layout(cols: &mut [Column]) {
+    for c in cols.iter_mut() {
+        if c.fixed_width_px.is_none() && !(c.width_fraction.is_finite() && c.width_fraction > 0.0) {
+            c.width_fraction = MIN_FLEX_FRACTION;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,5 +327,71 @@ mod tests {
         assert_eq!(l[1].module_type, module_type::LOUDNESS);
         assert!(l[0].fixed_width_px.is_none(), "Waveform flexes to fill the window");
         assert!(l[1].fixed_width_px.is_some(), "Loudness owns its (intrinsic) fixed width");
+    }
+
+    // ── E1: pure hit-testing / reorder / sanitize helpers (Phase E input routing, ADR 0004) ──
+
+    #[test]
+    fn column_index_at_maps_x_to_the_containing_rect() {
+        let vp = viewports(&cols(&[0.5, 0.5]), 800.0, 600.0, 1.0); // [0..400), [400..800)
+        assert_eq!(column_index_at(&vp, 10.0), Some(0));
+        assert_eq!(column_index_at(&vp, 399.9), Some(0));
+        assert_eq!(column_index_at(&vp, 400.0), Some(1));
+        assert_eq!(column_index_at(&vp, 799.9), Some(1));
+        assert_eq!(column_index_at(&vp, 900.0), None); // past the surface
+    }
+
+    #[test]
+    fn resize_boundary_only_between_two_flex_columns() {
+        // flex | flex: the seam IS draggable.
+        let flexflex = cols(&[0.5, 0.5]);
+        let vp = viewports(&flexflex, 800.0, 600.0, 1.0); // seam at 400
+        assert_eq!(resize_boundary_at(&flexflex, &vp, 402.0, 6.0), Some(0));
+        assert_eq!(resize_boundary_at(&flexflex, &vp, 420.0, 6.0), None, "outside gutter");
+
+        // flex | fixed: the fixed column owns its width → NOT draggable (ADR 0003 amendment).
+        let flexfixed = vec![
+            Column::new(0, module_type::WAVEFORM, 1.0),
+            Column::fixed(1, module_type::LOUDNESS, 200.0),
+        ];
+        let vp2 = viewports(&flexfixed, 800.0, 600.0, 1.0); // seam at 600
+        assert_eq!(resize_boundary_at(&flexfixed, &vp2, 600.0, 6.0), None);
+    }
+
+    #[test]
+    fn reorder_target_counts_other_midpoints_left_of_cursor() {
+        let vp = viewports(&cols(&[0.34, 0.33, 0.33]), 900.0, 600.0, 1.0);
+        // mids ≈ 153, 459, 762. Drag col 0 (A): cursor just right of B's mid → target slot 1.
+        assert_eq!(reorder_target(&vp, 0, 460.0), 1);
+        // cursor past C's mid → slot 2 (drop at the end).
+        assert_eq!(reorder_target(&vp, 0, 800.0), 2);
+        // cursor near the left edge → stays slot 0.
+        assert_eq!(reorder_target(&vp, 0, 10.0), 0);
+    }
+
+    #[test]
+    fn apply_reorder_moves_and_shifts() {
+        let c = cols(&[0.3, 0.3, 0.4]); // ids 0,1,2
+        let moved = apply_reorder(&c, 0, 2); // A to the end
+        assert_eq!(moved.iter().map(|c| c.instance_id).collect::<Vec<_>>(), vec![1, 2, 0]);
+    }
+
+    #[test]
+    fn sanitize_replaces_nonfinite_or_nonpositive_flex_fractions() {
+        let mut c = cols(&[f32::NAN, 0.0, -1.0, 0.5]);
+        sanitize_layout(&mut c);
+        assert!(c.iter().all(|c| c.width_fraction.is_finite() && c.width_fraction > 0.0));
+        assert_eq!(c[3].width_fraction, 0.5, "a good fraction is left alone");
+    }
+
+    #[test]
+    fn sanitized_layout_survives_a_serde_round_trip() {
+        // The reason sanitize exists: serde_json writes f32 NaN as `null`, and `null` FAILS to
+        // deserialize back into f32 — one NaN fraction would brick the whole editor-state load.
+        let mut c = cols(&[f32::NAN, 0.5]);
+        sanitize_layout(&mut c);
+        let json = serde_json::to_string(&c).unwrap();
+        let back: Vec<Column> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.len(), 2);
     }
 }

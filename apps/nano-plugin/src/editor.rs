@@ -26,7 +26,7 @@ use crate::layout::{Column, default_layout, reconcile_fixed_widths, viewports};
 use crate::module::loudness::LoudnessModule;
 use crate::module::oscilloscope::OscilloscopeModule;
 use crate::module::waveform::WaveformModule;
-use crate::module::{FrameContext, Module};
+use crate::module::{FrameContext, Module, Rect};
 use crate::{NanometersParams, Shared, StereoFrame};
 
 /// Background — near-black with the faintest blue tint. Will become a deliberate palette
@@ -221,16 +221,27 @@ struct RenderControl {
     join: Mutex<Option<JoinHandle<()>>>,
 }
 
+/// Main thread → render thread. Resizes coalesce (only the latest size matters); input events must
+/// NOT coalesce (every press/move/release counts), so they share one channel and the render loop
+/// splits them on drain. `baseview::Event` is plain data (no `Rc`/raw ptr), so it crosses the seam.
+enum WindowMsg {
+    /// New physical surface size + display scale; the render thread owns the surface and reconfigures.
+    /// The scale rides along so px-sized text/padding survives a DPI change.
+    Resize { w: u32, h: u32, scale: f32 },
+    /// A pointer (or other non-resize) event, forwarded verbatim for the render-side pointer-grab
+    /// router (ADR 0004, amended) — modules + layout live render-side, so the router does too.
+    Input(baseview::Event),
+}
+
 /// The baseview `WindowHandler` — but it does NOT render. Rendering runs on a dedicated thread
 /// (`run_render_loop`) paced by the swapchain's blocking acquire, so frame delivery is independent of
 /// the host pumping baseview's `on_frame` (FL Studio starves/over-pumps it). This struct only owns
-/// the main-thread side: it forwards resize events to the render thread. The GPU state, Modules, and
-/// per-frame work all live on the render thread (owned by `run_render_loop`).
+/// the main-thread side: it forwards resize + input events to the render thread. The GPU state,
+/// Modules, layout, and per-frame work all live on the render thread (owned by `run_render_loop`).
 struct RenderWindow {
     params: Arc<NanometersParams>,
-    /// Physical surface size + display scale → the render thread, which owns the surface and
-    /// reconfigures it. The scale rides along so px-sized text/padding survives a DPI change.
-    resize_tx: Sender<(u32, u32, f32)>,
+    /// Resize + input → the render thread (see [`WindowMsg`]).
+    msg_tx: Sender<WindowMsg>,
 }
 
 #[derive(Default)]
@@ -366,9 +377,12 @@ impl RenderWindow {
         reconcile_fixed_widths(&mut layout, &intrinsics);
         params.editor_state.set_layout(layout.clone());
 
-        let (resize_tx, resize_rx) = std::sync::mpsc::channel::<(u32, u32, f32)>();
+        let (msg_tx, msg_rx) = std::sync::mpsc::channel::<WindowMsg>();
         let render_shared = Arc::clone(&shared);
         let loop_ctl = Arc::clone(&render_ctl);
+        // The render-side router commits reorders straight into the persisted layout, so the loop
+        // needs the EditorState (it only had `shared` before).
+        let render_state = Arc::clone(&params.editor_state);
         let handle = std::thread::Builder::new()
             .name("nanometers-render".into())
             .spawn(move || {
@@ -380,15 +394,16 @@ impl RenderWindow {
                     modules,
                     layout,
                     render_shared,
+                    render_state,
                     loop_ctl,
-                    resize_rx,
+                    msg_rx,
                     scale_factor,
                 );
             })
             .expect("spawn nanometers render thread");
         *render_ctl.join.lock().unwrap() = Some(handle);
 
-        Self { params, resize_tx }
+        Self { params, msg_tx }
     }
 }
 
@@ -403,10 +418,11 @@ fn run_render_loop(
     surface: wgpu::Surface<'static>,
     mut surface_config: wgpu::SurfaceConfiguration,
     mut modules: Vec<Box<dyn Module + Send>>,
-    layout: Vec<Column>,
+    mut layout: Vec<Column>,
     shared: Arc<Shared>,
+    state: Arc<EditorState>,
     ctl: Arc<RenderControl>,
-    resize_rx: Receiver<(u32, u32, f32)>,
+    msg_rx: Receiver<WindowMsg>,
     initial_scale: f32,
 ) {
     /// Frame-interval clamp handed to Modules: the first iteration and every post-occlusion-sleep
@@ -426,19 +442,43 @@ fn run_render_loop(
         ..Default::default()
     };
     let mut last = Instant::now();
+    // Host-owned pointer-grab state (ADR 0004, amended: render-side). Transient — never persisted.
+    let mut router = crate::input::Router::new();
 
     while !ctl.stop.load(Ordering::Relaxed) {
-        // Apply the latest pending resize (host → main thread → here); the render thread owns the
-        // surface, so reconfiguration must happen here.
-        let mut new_size = None;
-        while let Ok(sz) = resize_rx.try_recv() {
-            new_size = Some(sz);
+        // Drain the message channel (host → main thread → here): coalesce resizes (only the latest
+        // size matters), buffer input events in order (the router can't miss a press/release). The
+        // render thread owns the surface, so resize reconfiguration happens here.
+        let mut pending_resize = None;
+        let mut inputs: Vec<baseview::Event> = Vec::new();
+        while let Ok(msg) = msg_rx.try_recv() {
+            match msg {
+                WindowMsg::Resize { w, h, scale } => pending_resize = Some((w, h, scale)),
+                WindowMsg::Input(ev) => inputs.push(ev),
+            }
         }
-        if let Some((w, h, scale)) = new_size {
+        if let Some((w, h, scale)) = pending_resize {
             surface_config.width = w.max(1);
             surface_config.height = h.max(1);
             surface.configure(&device, &surface_config);
             scale_factor = scale;
+        }
+        // Run the pointer-grab router over this batch of input (after the resize, so it hit-tests
+        // against the current surface). Hit-testing uses the STABLE committed viewports — the swap
+        // points stay put under the cursor even as the strip reflows. A reorder commit returns the
+        // new order (modules already permuted to match); adopt + persist it.
+        let committed_vps = viewports(
+            &layout,
+            surface_config.width as f32,
+            surface_config.height as f32,
+            scale_factor,
+        );
+        for ev in &inputs {
+            if let Some(new) = router.handle(ev, &layout, &committed_vps, &mut modules, scale_factor)
+            {
+                state.set_layout(new.clone());
+                layout = new;
+            }
         }
 
         let now = Instant::now();
@@ -513,14 +553,27 @@ fn run_render_loop(
             label: Some("nanometers-encoder"),
         });
 
-        // Per-column viewports tiling the surface (ADR 0003), one Rect per Module in order. The
-        // scale converts a column's fixed LOGICAL width into physical px (the surface is physical).
-        let viewports = viewports(
-            &layout,
+        // Per-column viewports tiling the surface (ADR 0003), remapped to MODULE order. While a
+        // reorder drags, the strip re-tiles from the router's provisional order (live-reflow); the
+        // modules Vec stays in committed order, so each module's viewport is looked up by its
+        // instance_id. No drag → the active order IS the committed layout, so this is identity.
+        let active: &[Column] = router.provisional().unwrap_or(&layout);
+        let active_vps = viewports(
+            active,
             surface_config.width as f32,
             surface_config.height as f32,
             scale_factor,
         );
+        let viewports: Vec<Rect> = layout
+            .iter()
+            .map(|c| {
+                let j = active
+                    .iter()
+                    .position(|a| a.instance_id == c.instance_id)
+                    .expect("every committed column has a place in the active order");
+                active_vps[j]
+            })
+            .collect();
 
         // Phase 2a: each Module encodes its own offscreen passes / per-frame uploads before the
         // shared pass opens. `scale_factor` rides along so logical-px sizing lands right on Retina.
@@ -572,19 +625,31 @@ impl baseview::WindowHandler for RenderWindow {
         _window: &mut baseview::Window,
         event: baseview::Event,
     ) -> baseview::EventStatus {
-        if let baseview::Event::Window(baseview::WindowEvent::Resized(info)) = &event {
-            self.params.editor_state.size.store((
-                info.logical_size().width.round() as u32,
-                info.logical_size().height.round() as u32,
-            ));
-            // The render thread owns the surface; hand it the new physical size + display scale.
-            let _ = self.resize_tx.send((
-                info.physical_size().width,
-                info.physical_size().height,
-                info.scale() as f32,
-            ));
+        match &event {
+            baseview::Event::Window(baseview::WindowEvent::Resized(info)) => {
+                self.params.editor_state.size.store((
+                    info.logical_size().width.round() as u32,
+                    info.logical_size().height.round() as u32,
+                ));
+                // The render thread owns the surface; hand it the new physical size + display scale.
+                let _ = self.msg_tx.send(WindowMsg::Resize {
+                    w: info.physical_size().width,
+                    h: info.physical_size().height,
+                    scale: info.scale() as f32,
+                });
+                baseview::EventStatus::Captured
+            }
+            // Pass keyboard back to the host: baseview only honors Captured/Ignored for keyboard, and
+            // a DAW expects transport shortcuts (spacebar, etc.) to work while our window is focused.
+            // We render no param GUI, so we have no keyboard use of our own.
+            baseview::Event::Keyboard(_) => baseview::EventStatus::Ignored,
+            // Pointer (and the rest): forward to the render-side router (ADR 0004, amended) and
+            // capture — these are ours to interpret (reorder, reset, hover).
+            _ => {
+                let _ = self.msg_tx.send(WindowMsg::Input(event.clone()));
+                baseview::EventStatus::Captured
+            }
         }
-        baseview::EventStatus::Captured
     }
 }
 

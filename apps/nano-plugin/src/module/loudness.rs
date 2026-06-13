@@ -106,6 +106,12 @@ pub struct LoudnessModule {
     /// re-formatting them every frame would be pure allocation churn on the render path.
     tick_labels: Vec<String>,
 
+    /// Last column-local PHYSICAL-px cursor (from forwarded `CursorMoved`); `ButtonPressed` carries
+    /// no position, so the reset hit-test reads it. The display backing scale, cached from `prepare`
+    /// (which has it; `on_event` does not), lets the hit-test rebuild the physical-px caption box.
+    last_local: Option<(f32, f32)>,
+    scale_px: f32,
+
     /// Frame counter for the optional `NANO_DEBUG_LOUDNESS` value log (dev aid, off by default).
     dbg_count: u32,
 }
@@ -190,6 +196,8 @@ impl LoudnessModule {
             verts: Vec::with_capacity(MAX_VERTS),
             smoothed: [BAR_FLOOR_LUFS; 3],
             tick_labels: SCALE_TICKS.iter().map(|t| format!("{}", *t as i32)).collect(),
+            last_local: None,
+            scale_px: 1.0,
             dbg_count: 0,
         }
     }
@@ -274,6 +282,18 @@ fn value_text(smoothed: f64, target: f64) -> String {
     }
 }
 
+/// True if a column-local PHYSICAL-px point lands on the Integrated bar's caption — the reset
+/// affordance (ADR 0004). Mirrors `prepare`'s derived layout (so the hit-box tracks the bars): the
+/// I readout's x-band (centered on the third bar, `value_w` wide), within the bottom caption strip.
+fn is_on_integrated_caption(viewport: Rect, local_x: f32, local_y: f32, scale: f32) -> bool {
+    let hl = hlayout();
+    let bar_mid_i = (hl.cluster_left + hl.value_w * 0.5 + 2.0 * hl.pitch) * scale; // k = 2
+    let half_w = hl.value_w * scale * 0.5;
+    let pad = PAD * scale;
+    let bars_bottom = (viewport.h - pad - caption_h() * scale).max(pad + 1.0);
+    (local_x - bar_mid_i).abs() <= half_w && (bars_bottom..=viewport.h - pad).contains(&local_y)
+}
+
 impl Module for LoudnessModule {
     fn intrinsic_width(&self) -> Option<f32> {
         Some(hlayout().width)
@@ -323,6 +343,10 @@ impl Module for LoudnessModule {
         viewport: Rect,
         scale: f32,
     ) {
+        // Cache the backing scale for `on_event` (which isn't handed `scale`) so the reset hit-test
+        // can rebuild the physical-px caption box.
+        self.scale_px = scale;
+
         // Re-project the brush onto the viewport when its size changes.
         let size = (viewport.w.max(1.0) as u32, viewport.h.max(1.0) as u32);
         if size != self.brush_size {
@@ -453,8 +477,29 @@ impl Module for LoudnessModule {
         self.brush.draw(rpass);
     }
 
-    fn on_event(&mut self, _event: &baseview::Event, _viewport: Rect) -> EventStatus {
-        EventStatus::Ignored // reset affordance lands in Phase E
+    fn on_event(&mut self, event: &baseview::Event, viewport: Rect) -> EventStatus {
+        use baseview::{Event, MouseButton, MouseEvent};
+        match event {
+            // Track the forwarded column-local cursor; a press has no position of its own (baseview).
+            Event::Mouse(MouseEvent::CursorMoved { position, .. }) => {
+                self.last_local = Some((position.x as f32, position.y as f32));
+                EventStatus::Ignored
+            }
+            // Left press on the Integrated caption → reset the integration; everything else stays
+            // Ignored so the host can turn a body press into a column reorder (ADR 0004).
+            Event::Mouse(MouseEvent::ButtonPressed { button: MouseButton::Left, .. }) => {
+                if let Some((lx, ly)) = self.last_local {
+                    if is_on_integrated_caption(viewport, lx, ly, self.scale_px) {
+                        if let Some(dsp) = self.dsp.as_mut() {
+                            dsp.reset();
+                        }
+                        return EventStatus::Captured;
+                    }
+                }
+                EventStatus::Ignored
+            }
+            _ => EventStatus::Ignored,
+        }
     }
 
     fn save_config(&self) -> Vec<u8> {
@@ -519,5 +564,16 @@ mod tests {
         for &t in &SCALE_TICKS {
             assert!((BAR_FLOOR_LUFS..=0.0).contains(&t), "tick {t} within [-40, 0]");
         }
+    }
+
+    #[test]
+    fn integrated_caption_hit_test_covers_the_i_column_bottom() {
+        // The reset affordance (ADR 0004): a press on the Integrated readout in the bottom caption
+        // strip hits; the bars above and the M/S readouts' x-bands miss. Geometry mirrors `prepare`
+        // at scale 1.0 — bar_mid(2) ≈ 129.6, value_w ≈ 36, bars_bottom ≈ 363.2 for h = 400.
+        let vp = Rect { x: 0.0, y: 0.0, w: 160.0, h: 400.0 };
+        assert!(is_on_integrated_caption(vp, 140.0, 390.0, 1.0), "I caption, bottom strip");
+        assert!(!is_on_integrated_caption(vp, 140.0, 20.0, 1.0), "up in the bars, not the caption");
+        assert!(!is_on_integrated_caption(vp, 60.0, 390.0, 1.0), "M/S column, not the I column");
     }
 }
