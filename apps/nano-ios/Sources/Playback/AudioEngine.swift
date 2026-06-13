@@ -47,11 +47,13 @@ final class AudioEngine {
     private var sampleRate: Double = 44_100
     private var totalFrames: AVAudioFramePosition = 0
     private var seekOffsetFrames: AVAudioFramePosition = 0
-    private var lastKnownFrame: AVAudioFramePosition = 0    // held position for reads while paused (see currentFrame)
+    @ObservationIgnored private var lastKnownFrame: AVAudioFramePosition = 0  // cache mutated on read in currentFrame; never observed
     private var scheduleToken = 0            // invalidates stale completion callbacks
     private var ticker: Timer?
-    // Written once in `configureRemoteCommands` (init), read once in `deinit` — no concurrent
-    // access, so `nonisolated(unsafe)` lets the nonisolated deinit unregister our handlers.
+    // Written once in `configureRemoteCommands` (init), read once in the nonisolated `deinit` to
+    // unregister our handlers. `nonisolated(unsafe)` is REQUIRED for that deinit access in this build
+    // (dropping it is a hard "main actor-isolated property" error — the "has no effect" warning is
+    // spurious); safe because access is single-write-in-init / single-read-in-deinit, never concurrent.
     nonisolated(unsafe) private var remoteTargets: [(MPRemoteCommand, Any)] = []
 
     init() {
@@ -211,11 +213,18 @@ final class AudioEngine {
         progress = PlaybackMath.fraction(frame: currentFrame, total: totalFrames)
         elapsed = sampleRate > 0 ? Double(currentFrame) / sampleRate : 0
         // Publish the live meter at the ticker's 20 Hz (not the tap's ~47 Hz) so the LUFS badge doesn't
-        // invalidate Now Playing every audio callback and starve the close-up's TimelineView. The ticker
-        // only runs while playing, so this is inherently "live only while playing"; pause/stop clear it.
-        let m = liveMeter.snapshot()
-        outputLevel = m.level
-        shortTermLUFS = m.shortTerm
+        // invalidate Now Playing every audio callback and starve the close-up's TimelineView. Guard on
+        // `isPlaying` so this is the single authority on "live only while playing": a tick's Task that the
+        // run loop drains AFTER a synchronous pause/stop re-establishes the cleared state instead of
+        // resurrecting a stale short-term reading (the tap keeps feeding the meter after pause).
+        if isPlaying {
+            let m = liveMeter.snapshot()
+            outputLevel = m.level
+            shortTermLUFS = m.shortTerm
+        } else {
+            outputLevel = 0
+            shortTermLUFS = nil
+        }
         // The lock-screen position is anchored at play/pause/seek/track-change (iOS extrapolates
         // from rate + elapsed), so there's no need to re-push now-playing info every tick.
     }
