@@ -35,11 +35,23 @@ enum TrackImporter {
                 artworkData: meta.artwork
             )
             ctx.insert(track)
+            attachToLocalRoot(track, in: ctx)
             // Kick analysis so the waveform/LUFS are ready by the time the row appears.
             Task { @MainActor in await WaveformStore.shared.bins(for: track) }
             count += 1
         }
         return count
+    }
+
+    /// Stamp the local source ref and append to the migration's local root node so the track is
+    /// reachable (All Songs / counts) the moment it appears.
+    @MainActor
+    private static func attachToLocalRoot(_ track: Track, in ctx: ModelContext) {
+        track.sourceId = "local"
+        track.folderId = SourcesMigration.localRootNodeId
+        if let node = try? LibraryStore.folderNode(id: SourcesMigration.localRootNodeId, ctx) {
+            node.trackIds.append(track.id)
+        }
     }
 
     private struct Meta { var title: String; var artist: String; var album: String; var duration: Double; var artwork: Data? }

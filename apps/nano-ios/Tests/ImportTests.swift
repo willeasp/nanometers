@@ -62,4 +62,28 @@ final class ImportTests: XCTestCase {
         buf.frameLength = frames
         try file.write(from: buf)
     }
+
+    /// Writes a minimal stub file and returns its URL. Not real audio; the importer falls back to
+    /// the filename for metadata, which is fine for attachment tests.
+    private func makeTempAudioURL() throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("imp-\(UUID().uuidString).wav")
+        try Data([0x52, 0x49, 0x46, 0x46]).write(to: url) // "RIFF" header stub
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
+        return url
+    }
+
+    func test_import_attachesTrackToLocalRootNode() async throws {
+        let ctx = try TestDB.context()
+        SourcesMigration.runIfNeeded(ctx)   // creates the local source + root node
+
+        let url = try makeTempAudioURL()
+        _ = await TrackImporter.importFiles([url], into: ctx)
+
+        let node = try LibraryStore.folderNode(id: SourcesMigration.localRootNodeId, ctx)
+        XCTAssertEqual(node?.trackIds.count, 1)
+        let imported = try LibraryStore.allTracks(ctx).first { $0.sourceId == "local" && $0.bundledName == nil }
+        XCTAssertEqual(imported?.folderId, SourcesMigration.localRootNodeId)
+        XCTAssertTrue(node?.trackIds.contains(imported!.id) ?? false)
+    }
 }
