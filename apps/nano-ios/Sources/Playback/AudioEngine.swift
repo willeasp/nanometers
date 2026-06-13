@@ -40,8 +40,13 @@ final class AudioEngine {
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
     private var file: AVAudioFile?
-    /// Streaming short-term loudness, fed from `installOutputMeter`'s tap. Off-main + lock-guarded.
+    /// Streaming momentary loudness, fed from `installOutputMeter`'s tap. Off-main + lock-guarded.
     private let liveMeter = LiveLUFSMeter()
+    /// Eased value behind `momentaryLUFS` — display ballistics so the badge reads calmly (see updateProgress).
+    @ObservationIgnored private var smoothedLUFS: Double?
+    /// Counts 20 Hz ticks so the visible LUFS number refreshes once per second, not every tick (see updateProgress).
+    @ObservationIgnored private var meterPublishTick = 0
+    private let meterPublishEvery = 20   // 20 Hz ticker ÷ 20 = 1 Hz readout
     private var scopedURL: URL?
     private var sampleRate: Double = 44_100
     private var totalFrames: AVAudioFramePosition = 0
@@ -219,10 +224,27 @@ final class AudioEngine {
         if isPlaying {
             let m = liveMeter.snapshot()
             outputLevel = m.level
-            momentaryLUFS = m.momentary
+            // The badge "refreshes too often" if we publish every 20 Hz tick. Two levers: ease the value
+            // (EMA, τ ≈ 0.8 s) AND refresh the visible number once per second (every `meterPublishEvery` ticks),
+            // so the digit sits still long enough to read. The EMA runs every tick (continuous smoothing);
+            // the publish samples it. Seeds immediately on the first reading after a reset, then holds.
+            if let mo = m.momentary {
+                let eased = smoothedLUFS.map { $0 + (mo - $0) * 0.06 } ?? mo
+                smoothedLUFS = eased
+                meterPublishTick += 1
+                if meterPublishTick >= meterPublishEvery || momentaryLUFS == nil {
+                    meterPublishTick = 0
+                    momentaryLUFS = (eased * 10).rounded() / 10   // 0.1 dB precision (the badge's %.1f)
+                }
+            } else {
+                smoothedLUFS = nil
+                momentaryLUFS = nil
+            }
         } else {
             outputLevel = 0
+            smoothedLUFS = nil
             momentaryLUFS = nil
+            meterPublishTick = 0
         }
         // The lock-screen position is anchored at play/pause/seek/track-change (iOS extrapolates
         // from rate + elapsed), so there's no need to re-push now-playing info every tick.
