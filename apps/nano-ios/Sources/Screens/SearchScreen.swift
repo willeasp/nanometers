@@ -24,7 +24,7 @@ struct SearchScreen: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                Text("Search").font(Theme.sans(32, .bold)).foregroundStyle(Theme.text)
+                Text("Search").font(Theme.sans(32, .bold)).tracking(-0.5).foregroundStyle(Theme.text)
 
                 HStack(spacing: 8) {
                     Image(systemName: "magnifyingglass").foregroundStyle(Theme.text3)

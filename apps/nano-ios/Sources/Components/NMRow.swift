@@ -27,6 +27,7 @@ struct NMRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(track.title)
                     .font(Theme.sans(16, .medium))
+                    .tracking(-0.2)                              // §01 row title tracking
                     .foregroundStyle(isCurrent ? Theme.accent : Theme.text)
                     .lineLimit(1)
                 HStack(spacing: 0) {

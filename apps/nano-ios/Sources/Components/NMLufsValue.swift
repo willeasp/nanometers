@@ -7,7 +7,7 @@ struct NMLufsValue: View {
     var body: some View {
         VStack(alignment: .trailing, spacing: 0) {
             Text(lufs.map { String(format: "%.1f", $0) } ?? "—")
-                .font(Theme.mono(12)).foregroundStyle(Theme.text2)
+                .font(Theme.mono(12)).monospacedDigit().foregroundStyle(Theme.text2)
             Text("LUFS")
                 .font(Theme.mono(9.5)).foregroundStyle(Theme.text3)
         }

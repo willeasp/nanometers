@@ -15,7 +15,7 @@ struct LibraryScreen: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 HStack {
-                    Text("Library").font(Theme.sans(32, .bold))
+                    Text("Library").font(Theme.sans(32, .bold)).tracking(-0.5)
                         .foregroundStyle(Theme.text)
                     Spacer()
                     GlassRoundButton(systemName: "magnifyingglass") { onSearch() }
@@ -30,7 +30,7 @@ struct LibraryScreen: View {
                 }
 
                 HStack {
-                    Text("Songs").font(Theme.sans(20, .bold)).foregroundStyle(Theme.text)
+                    Text("Songs").font(Theme.sans(20, .bold)).tracking(-0.3).foregroundStyle(Theme.text)
                     Spacer()
                     Text("\(tracks.count)").font(Theme.mono(12, .semibold)).foregroundStyle(Theme.text3)
                 }
