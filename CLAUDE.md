@@ -103,9 +103,9 @@ nanometers/
 │   │       ├── lib.rs      #   Plugin/Params/Shared — audio-thread side
 │   │       ├── editor.rs   #   Editor/RenderWindow + the render thread + WindowMsg routing
 │   │       ├── layout.rs   #   strip columns + viewport geometry + hit-testing + add/remove (0003)
-│   │       ├── input.rs    #   host PointerGrab router — reorder/reset/hover + modal menu (0004)
+│   │       ├── input.rs    #   host PointerGrab router — reorder/resize/hover + modal menu (0004)
 │   │       ├── menu.rs     #   right-click context menu: pure model + geometry (0004, F3)
-│   │       ├── overlay.rs  #   host overlay: draws the menu + empty-strip hint (0004, F3)
+│   │       ├── overlay.rs  #   host overlay: menu + empty-strip hint + seam dividers (0004, F3/F4)
 │   │       ├── module/     #   the Module trait + waveform / loudness / oscilloscope
 │   │       └── dev.rs      #   dev-player: file decode → output + ring (feature-gated)
 │   ├── nano-tui/           # terminal meter over the same core
