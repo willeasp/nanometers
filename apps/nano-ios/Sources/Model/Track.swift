@@ -33,6 +33,11 @@ final class Track {
     // Waveform cache pointer (Phase 3).
     var waveformCacheKey: String
 
+    // Folder-browser refs (Library & Sources). nil for pre-migration / unattached tracks.
+    var sourceId: String?
+    var providerFileId: String?   // cloud provider's file id (Drive fileId, etc.)
+    var folderId: String?         // leaf FolderNode id; breadcrumb path walks parentId up
+
     init(
         id: UUID = UUID(),
         title: String,
@@ -51,7 +56,10 @@ final class Track {
         integratedLUFS: Double? = nil,
         isLoved: Bool = false,
         dateAdded: Date = .init(),
-        waveformCacheKey: String = ""
+        waveformCacheKey: String = "",
+        sourceId: String? = nil,
+        providerFileId: String? = nil,
+        folderId: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -72,5 +80,8 @@ final class Track {
         self.isLoved = isLoved
         self.dateAdded = dateAdded
         self.waveformCacheKey = waveformCacheKey
+        self.sourceId = sourceId
+        self.providerFileId = providerFileId
+        self.folderId = folderId
     }
 }

@@ -33,4 +33,18 @@ final class SourceModelTests: XCTestCase {
         let driveRoots = try LibraryStore.rootFolders(of: "gdrive", ctx)
         XCTAssertEqual(driveRoots.map(\.name), ["My Productions", "DJ Crate"])
     }
+
+    func test_track_sourceRefs_defaultNil_andPersist() throws {
+        let ctx = try TestDB.context()
+        let t = Track(title: "A", artist: "", album: "")
+        XCTAssertNil(t.sourceId)
+        XCTAssertNil(t.folderId)
+        XCTAssertNil(t.providerFileId)
+        t.sourceId = "gdrive"; t.folderId = "house"; t.providerFileId = "drive-file-1"
+        ctx.insert(t)
+        let fetched = try LibraryStore.track(id: t.id, ctx)
+        XCTAssertEqual(fetched?.sourceId, "gdrive")
+        XCTAssertEqual(fetched?.folderId, "house")
+        XCTAssertEqual(fetched?.providerFileId, "drive-file-1")
+    }
 }
