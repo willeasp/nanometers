@@ -507,6 +507,8 @@ fn run_render_loop(
     let mut last = Instant::now();
     // Host-owned pointer-grab state (ADR 0004, amended: render-side). Transient — never persisted.
     let mut router = crate::input::Router::new();
+    // Host overlay (context menu + empty-strip hint) — drawn over the strip in its own load pass.
+    let mut overlay = crate::overlay::Overlay::new(&device, surface_config.format);
 
     while !ctl.stop.load(Ordering::Relaxed) {
         // Drain the message channel (host → main thread → here): coalesce resizes (only the latest
@@ -689,6 +691,20 @@ fn run_render_loop(
                 m.render(&mut rpass, *vp);
             }
         }
+
+        // Phase 2c: the host overlay (context menu + empty-strip hint) over the whole surface, in its
+        // own load pass. A no-op when no menu is open and the strip isn't empty.
+        overlay.render(
+            &device,
+            &queue,
+            &mut encoder,
+            &view,
+            sw,
+            sh,
+            scale_factor,
+            router.menu_overlay(),
+            layout.is_empty(),
+        );
 
         queue.submit(Some(encoder.finish()));
         // Async present (CAMetalLayer.presentsWithTransaction defaults false, wgpu doesn't override),

@@ -40,6 +40,9 @@ pub mod input;
 /// The right-click context menu (ADR 0004, Phase F3): pure model + geometry for add/remove Module.
 mod menu;
 
+/// The host overlay (ADR 0004, Phase F3): draws the context menu + empty-strip hint over the strip.
+mod overlay;
+
 /// Default width of the flexing Waveform, in logical pixels (its pre-meter window width). The
 /// window default is COMPUTED from this plus the Loudness column's derived intrinsic width — not
 /// hand-synced, so retuning the meter's layout knobs can't silently squeeze the default Waveform.
