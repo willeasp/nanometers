@@ -20,13 +20,14 @@ struct CloseUpWaveform: View {
     /// a re-render to re-center the held playhead (§06: a scrub re-centers the close-up even when paused).
     var redrawTrigger: Double
     var windowSec: Double = 4          // §06D.1 close-up window (3/4/5 s)
+    var active: Bool = true            // flipped && open — no scroll work behind the cover (§06B)
     var onScrub: (Double) -> Void = { _ in }
 
     @State private var clock = ScrollClock()
 
     var body: some View {
         GeometryReader { geo in
-            TimelineView(.animation(paused: !isPlaying)) { timeline in
+            TimelineView(.animation(paused: !(isPlaying && active))) { timeline in
                 Canvas { ctx, size in
                     let now = timeline.date.timeIntervalSinceReferenceDate
                     let center = clock.present(now: now, audio: currentTime(), playing: isPlaying)

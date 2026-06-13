@@ -24,6 +24,7 @@ struct NowPlayingScreen: View {
     @AppStorage("showWave") private var showWave = true
     @AppStorage("spectrum") private var spectrum = true     // frequency coloring (close-up); default on (§06E)
     @AppStorage("scopeWindow") private var scopeWindow = 4  // close-up window seconds (3/4/5; §06E)
+    @AppStorage("modules") private var modulesCSV = "scope" // selected meters (CSV, min 1; §06E)
     @State private var bins: [WaveBin] = []
     @State private var closeUpBins: [StereoWaveBin] = []
 
@@ -31,15 +32,18 @@ struct NowPlayingScreen: View {
         VStack(spacing: 14) {
             topBar
             FlipHero(artworkData: engine.current?.artworkData, flipped: $flipped) {
-                AnalysisArea(closeUpBins: closeUpBins,
+                AnalysisArea(modulesCSV: $modulesCSV,
+                             closeUpBins: closeUpBins,
                              currentTime: { engine.centerTime },
                              duration: engine.current?.durationSec ?? 0,
                              coloringOn: spectrum,
-                             isPlaying: engine.isPlaying,
-                             redrawTrigger: engine.elapsed,
                              windowSec: Double(scopeWindow),
-                             lufs: engine.momentaryLUFS,
-                             onScrub: { engine.seek(toFraction: $0) })
+                             redrawTrigger: engine.elapsed,
+                             onScrub: { engine.seek(toFraction: $0) },
+                             liveSamples: { engine.liveScope($0) },
+                             isPlaying: engine.isPlaying,
+                             active: flipped,
+                             lufs: engine.momentaryLUFS)
             }
             titleRow
             scrubber
