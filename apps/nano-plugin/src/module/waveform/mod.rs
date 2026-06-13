@@ -162,36 +162,7 @@ pub struct WaveformModule {
     last_audio_advance: Option<Instant>, // when audio last advanced — drives pause detection
     last_sample_rate: f32,
 
-    /// Peak dB under the cursor, recorded on hover (the ungrabbed-move path, ADR 0004). `None` when
-    /// the cursor isn't over the column. Drives the (deferred) on-screen dB readout.
-    hover: Option<Hover>,
-
     scroll_dbg: ScrollDbg,
-}
-
-/// Where the cursor is hovering (column-local physical px) and the peak dBFS there — the source for
-/// the on-screen dB readout (M4). The readout's RENDERING is deferred (it needs a `wgpu_text` brush
-/// in this module); Phase E only proves the routing by recording this on hover.
-#[derive(Clone, Copy, Debug)]
-struct Hover {
-    x: f32,
-    db: f32,
-}
-
-/// Peak dBFS of the display column under column-local physical-px `local_x` (one bin per physical px,
-/// the spec's column rule). The peak is the loudest sample of either channel (`max(|min|, |max|)`).
-/// `None` when there are no columns yet; a silent column reads `-inf`. Cursor past the last column
-/// clamps to it (never indexes out of bounds). Pure — the TDD seam for the hover path.
-fn peak_db_at(cols: &VecDeque<store::BaseBin>, local_x: f32) -> Option<f32> {
-    if cols.is_empty() {
-        return None;
-    }
-    let idx = (local_x.max(0.0) as usize).min(cols.len() - 1);
-    let peak = cols[idx]
-        .env
-        .iter()
-        .fold(0.0f32, |m, e| m.max(e.min.abs()).max(e.max.abs()));
-    Some(if peak > 0.0 { 20.0 * peak.log10() } else { f32::NEG_INFINITY })
 }
 
 impl WaveformModule {
@@ -350,7 +321,6 @@ impl WaveformModule {
             prev_closed: 0,
             last_audio_advance: None,
             last_sample_rate: 0.0,
-            hover: None,
             scroll_dbg: ScrollDbg {
                 on: crate::diag_enabled("NANO_DEBUG_SCROLL"),
                 ..Default::default()
@@ -600,25 +570,8 @@ impl Module for WaveformModule {
         rpass.draw(0..3, 0..1);
     }
 
-    fn on_event(&mut self, event: &baseview::Event, _viewport: Rect) -> EventStatus {
-        use baseview::{Event, MouseEvent};
-        match event {
-            // The cursor's position is already column-local PHYSICAL px (router-translated). Record
-            // the peak dB under it; one bin per physical px indexes display_cols directly.
-            Event::Mouse(MouseEvent::CursorMoved { position, .. }) => {
-                let x = position.x as f32;
-                self.hover = peak_db_at(&self.display_cols, x).map(|db| Hover { x, db });
-                if let Some(h) = self.hover {
-                    if crate::diag_enabled("NANO_DEBUG_HOVER") {
-                        eprintln!("[waveform] hover x={:.0} → {:.1} dBFS", h.x, h.db);
-                    }
-                }
-            }
-            Event::Mouse(MouseEvent::CursorLeft) => self.hover = None,
-            _ => {}
-        }
-        // Hover is internal state, never a capture — a body press must still become a reorder.
-        EventStatus::Ignored
+    fn on_event(&mut self, _event: &baseview::Event, _viewport: Rect) -> EventStatus {
+        EventStatus::Ignored // the Waveform has no interior interaction (hover-dB was cut)
     }
 
     fn save_config(&self) -> Vec<u8> {
@@ -674,36 +627,3 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::VecDeque;
-    use store::{BaseBin, ChannelEnvelope};
-
-    fn env(min: f32, max: f32) -> ChannelEnvelope {
-        ChannelEnvelope { min, max, mean_square: 0.0 }
-    }
-
-    #[test]
-    fn peak_db_reads_the_loudest_channel_under_the_cursor() {
-        let cols: VecDeque<BaseBin> = VecDeque::from(vec![
-            BaseBin { env: [env(0.0, 0.0), env(0.0, 0.0)], band_ms: [0.0; 3] }, // col 0: silence
-            BaseBin { env: [env(-0.5, 0.25), env(0.0, 0.0)], band_ms: [0.0; 3] }, // col 1: |-0.5|=0.5
-        ]);
-        // One bin per physical px: x in [1, 2) → col 1, peak 0.5 → ≈ -6.02 dBFS.
-        let db = peak_db_at(&cols, 1.5).expect("a column under the cursor");
-        assert!((db - (-6.0206)).abs() < 0.01, "got {db}");
-        // A silent column reads -inf, not a panic or 0.
-        assert_eq!(peak_db_at(&cols, 0.5), Some(f32::NEG_INFINITY));
-        // No columns yet (pre-fill) → no readout.
-        assert_eq!(peak_db_at(&VecDeque::new(), 0.5), None);
-    }
-
-    #[test]
-    fn peak_db_clamps_cursor_past_the_last_column() {
-        let cols: VecDeque<BaseBin> =
-            VecDeque::from(vec![BaseBin { env: [env(-1.0, 1.0), env(0.0, 0.0)], band_ms: [0.0; 3] }]);
-        // x beyond the single column clamps to it (full-scale → 0 dBFS), never out of bounds.
-        assert_eq!(peak_db_at(&cols, 999.0), Some(0.0));
-    }
-}
