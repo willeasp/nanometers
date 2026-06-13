@@ -34,8 +34,13 @@ final class NanoDSPLinkTests: XCTestCase {
         XCTAssertTrue(bins?.allSatisfy {
             (-1...1).contains($0.lMin) && (-1...1).contains($0.lMax)
                 && (-1...1).contains($0.rMin) && (-1...1).contains($0.rMax)
-        } ?? false, "envelopes normalized -1…1")
-        XCTAssertTrue(bins?.contains { $0.lMax > 0.5 && $0.lMin < -0.5 } ?? false, "loud tone fills the contour")
+        } ?? false, "envelopes out of the ±1 range")
+        // RAW amplitude (no per-track normalization): a 0.5-amplitude tone reaches ~±0.5…
+        XCTAssertTrue(bins?.contains { $0.lMax > 0.4 && $0.lMin < -0.4 } ?? false,
+                      "loud tone should reach ~±0.5 (raw amplitude)")
+        // …and must NOT be scaled up to ±1 — that would mean per-track normalization crept back.
+        XCTAssertTrue(bins?.allSatisfy { $0.lMax <= 0.55 && $0.lMin >= -0.55 } ?? false,
+                      "0.5 tone reached beyond ±0.55 — per-track normalization regressed")
         // L == R for identical channels.
         XCTAssertTrue(bins?.allSatisfy { abs($0.lMax - $0.rMax) < 1e-6 } ?? false, "L == R for L=R input")
     }

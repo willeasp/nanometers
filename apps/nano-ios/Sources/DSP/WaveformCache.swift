@@ -1,7 +1,7 @@
 import Foundation
 
 /// On-disk cache of a track's analyzed bins, keyed by content hash, under the purgeable Caches dir
-/// (regenerable data — never Application Support). Format (v3): a fixed header, then `monoCount` × 16
+/// (regenerable data — never Application Support). Format (v4): a fixed header, then `monoCount` × 16
 /// bytes of `WaveBin` (overview, 4× Float32 LE), then `stereoCount` × 28 bytes of `StereoWaveBin`
 /// (close-up, 7× Float32 LE). A miss, a purge, or a version mismatch returns nil so the renderer shows
 /// an "analyzing" state and re-analyzes. v1 files (mono only) fail the version check → transparent
@@ -13,8 +13,9 @@ enum WaveformCache {
         let integratedLUFS: Double?
     }
 
-    private static let magic: UInt32 = 0x334D574E   // "NMW3" LE
-    private static let version: UInt16 = 3           // bumped: denser (150/s) stereo close-up array
+    private static let magic: UInt32 = 0x344D574E   // "NMW4" LE
+    private static let version: UInt16 = 4           // bumped: close-up envelope is now RAW amplitude
+                                                     // (no per-track peak normalization) — re-analyze v3
 
     private static var dir: URL {
         let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]

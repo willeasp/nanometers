@@ -98,9 +98,9 @@ pub unsafe extern "C" fn nano_dsp_analyze(
     0
 }
 
-/// One analyzed stereo bin: per-channel min/max envelope (normalized to −1..1 by the track's global
-/// max) + continuous band color (ADR 0001). Feeds the close-up scope's filled min/max contour
-/// (L top half, R bottom half) — the plugin Waveform look.
+/// One analyzed stereo bin: per-channel raw min/max envelope (−1..1, clamped) + continuous band
+/// color (ADR 0001). Feeds the close-up scope's filled min/max contour (L top half, R bottom half)
+/// — the plugin Waveform look.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct NanoStereoBin {
@@ -114,8 +114,10 @@ pub struct NanoStereoBin {
 }
 
 /// Analyze a whole stereo track into `n_bins` per-channel `(min, max)` + color bins. `l`/`r` each
-/// point at `len` samples; `out` must point at room for `n_bins` `NanoStereoBin`. Min/max are
-/// normalized to the track's global max (max |sample| across both channels), so the contour fills.
+/// point at `len` samples; `out` must point at room for `n_bins` `NanoStereoBin`. Min/max are the
+/// RAW sample envelope per channel (clamped to ±1) — NOT normalized to the track's peak. This
+/// matches the plugin Waveform, which draws raw amplitude × HALF_SCALE: a quiet track reads small,
+/// a loud one fills the lane, exactly as in the plugin.
 /// Returns 0 on success, -1 on a null/zero-argument error.
 ///
 /// # Safety
@@ -160,20 +162,10 @@ pub unsafe extern "C" fn nano_dsp_analyze_stereo(
     let spc = closed as f64 / n_bins as f64;
     let cols = store.build_columns(n_bins, spc, n_bins as i64 - 1);
 
-    // Global max abs across both channels → normalize so the loudest excursion maps to ±1.
-    let mut global = 0.0f32;
-    for col in &cols {
-        let p = col.env[0]
-            .max
-            .max(col.env[1].max)
-            .max(-col.env[0].min)
-            .max(-col.env[1].min)
-            .max(0.0);
-        global = global.max(p);
-    }
-    let inv = if global > 0.0 { 1.0 / global } else { 0.0 };
-    // Empty columns merge to SILENCE (min/max 0); guard any non-finite just in case.
-    let norm = |v: f32| -> f32 { if v.is_finite() { (v * inv).clamp(-1.0, 1.0) } else { 0.0 } };
+    // Raw envelope, no per-track normalization — the plugin draws raw amplitude × HALF_SCALE, so a
+    // sample at ±1 reaches the lane edge and quieter material reads proportionally smaller. Clamp to
+    // ±1 (an over-unity sample would just draw past the lane) and guard any non-finite.
+    let norm = |v: f32| -> f32 { if v.is_finite() { v.clamp(-1.0, 1.0) } else { 0.0 } };
 
     for (i, b) in out_slice.iter_mut().enumerate() {
         let col = &cols[i];
