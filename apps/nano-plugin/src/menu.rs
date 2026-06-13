@@ -71,6 +71,21 @@ impl MenuModel {
             MenuAction::Remove => Some(LayoutEdit::Remove { index: self.column? }),
         }
     }
+
+    /// Resolve a click at physical-px `cursor` against this menu anchored at `anchor`: the
+    /// [`LayoutEdit`] if it landed on a row, else `None` (a click outside the panel — dismiss). The
+    /// Router calls this on a left-press, then closes the menu regardless of the outcome.
+    pub fn edit_at_cursor(
+        &self,
+        anchor: (f32, f32),
+        surface_w: f32,
+        surface_h: f32,
+        scale: f32,
+        cursor: (f32, f32),
+    ) -> Option<LayoutEdit> {
+        let rect = menu_rect(anchor, self.len(), surface_w, surface_h, scale);
+        menu_item_at(rect, self.len(), cursor).and_then(|row| self.to_edit(row))
+    }
 }
 
 /// The menu panel rectangle in PHYSICAL px for `n_items` rows anchored at `anchor` (the cursor),
@@ -147,6 +162,24 @@ mod tests {
         assert_eq!((r2.x, r2.y), (100.0, 100.0));
         assert_eq!(r2.w, ITEM_W);
         assert_eq!(r2.h, ITEM_H * 4.0);
+    }
+
+    #[test]
+    fn edit_at_cursor_selects_a_row_or_dismisses() {
+        let model = MenuModel::for_context(Some(0)); // 4 rows, anchored at (100, 100), scale 1
+        let anchor = (100.0, 100.0);
+        // Click on row 0 ("Add Waveform") → insert after column 0.
+        assert_eq!(
+            model.edit_at_cursor(anchor, 800.0, 600.0, 1.0, (120.0, 108.0)),
+            Some(LayoutEdit::Insert { after: 0, module_type: module_type::WAVEFORM.into() })
+        );
+        // Click on row 3 ("Remove") → remove column 0.
+        assert_eq!(
+            model.edit_at_cursor(anchor, 800.0, 600.0, 1.0, (120.0, 180.0)),
+            Some(LayoutEdit::Remove { index: 0 })
+        );
+        // Click outside the panel → dismiss (no edit).
+        assert_eq!(model.edit_at_cursor(anchor, 800.0, 600.0, 1.0, (500.0, 500.0)), None);
     }
 
     #[test]

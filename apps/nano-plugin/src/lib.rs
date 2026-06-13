@@ -38,8 +38,6 @@ pub mod layout;
 pub mod input;
 
 /// The right-click context menu (ADR 0004, Phase F3): pure model + geometry for add/remove Module.
-// Consumed by the Router + Overlay in F3b (Tasks 8–9); allow until that wiring lands.
-#[allow(dead_code)]
 mod menu;
 
 /// Default width of the flexing Waveform, in logical pixels (its pre-meter window width). The

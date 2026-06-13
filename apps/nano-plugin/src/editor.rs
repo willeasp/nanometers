@@ -22,6 +22,7 @@ use std::{
 };
 use wgpu::SurfaceTargetUnsafe;
 
+use crate::input::Commit;
 use crate::layout::{Column, default_layout, reconcile_fixed_widths, remap_to_layout_order, viewports};
 use crate::module::loudness::LoudnessModule;
 use crate::module::oscilloscope::OscilloscopeModule;
@@ -294,8 +295,6 @@ fn build_module(
 
 /// A runtime layout mutation from the context menu (ADR 0003 / 0004 — multi-instance, Phase F3).
 /// The render loop applies it via [`apply_edit`], which keeps `layout` and `modules` 1:1.
-// The only caller is the menu wiring in `run_render_loop` (F3b, Task 8); allow until that lands.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum LayoutEdit {
     /// Insert a new Module of `module_type` right after the column at `after` (clamped).
@@ -309,7 +308,6 @@ pub enum LayoutEdit {
 /// (the real loop passes `build_module`; tests pass a FakeModule factory). An inserted column
 /// reconciles its fixed width from the freshly-built Module — the Module is the size-of-truth, the
 /// same rule spawn uses — and loads its (empty) config so it boots at defaults.
-#[allow(dead_code)] // wired into run_render_loop by the menu (F3b, Task 8)
 fn apply_edit<F>(
     layout: &mut Vec<Column>,
     modules: &mut Vec<Box<dyn Module + Send>>,
@@ -532,18 +530,28 @@ fn run_render_loop(
         // against the current surface). Hit-testing uses the STABLE committed viewports — the swap
         // points stay put under the cursor even as the strip reflows. A reorder commit returns the
         // new order (modules already permuted to match); adopt + persist it.
-        let committed_vps = viewports(
-            &layout,
-            surface_config.width as f32,
-            surface_config.height as f32,
-            scale_factor,
-        );
+        let sw = surface_config.width as f32;
+        let sh = surface_config.height as f32;
+        // Recomputed after any layout-changing commit so every event in the batch hit-tests against
+        // the CURRENT columns — an add/remove mid-batch would otherwise leave stale viewports that
+        // index a since-removed module out of bounds.
+        let mut committed_vps = viewports(&layout, sw, sh, scale_factor);
         let mut layout_dirty = false;
         for ev in &inputs {
-            if let Some(new) = router.handle(ev, &layout, &committed_vps, &mut modules, scale_factor)
-            {
-                layout = new;
-                layout_dirty = true;
+            match router.handle(ev, &layout, &committed_vps, &mut modules, sw, sh, scale_factor) {
+                Some(Commit::Reorder(new)) => {
+                    layout = new;
+                    layout_dirty = true;
+                    committed_vps = viewports(&layout, sw, sh, scale_factor);
+                }
+                Some(Commit::Edit(edit)) => {
+                    apply_edit(&mut layout, &mut modules, &edit, |t| {
+                        build_module(t, &device, surface_config.format)
+                    });
+                    layout_dirty = true;
+                    committed_vps = viewports(&layout, sw, sh, scale_factor);
+                }
+                None => {}
             }
         }
         // Persist when something durable changed: a committed reorder, or a discrete press/release/
