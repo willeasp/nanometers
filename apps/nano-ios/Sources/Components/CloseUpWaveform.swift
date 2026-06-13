@@ -49,50 +49,14 @@ struct CloseUpWaveform: View {
     }
 
     private func draw(_ ctx: GraphicsContext, _ size: CGSize, center: Double) {
-        guard !bins.isEmpty, duration > 0 else { return }
         let w = size.width, h = size.height
         guard w > 1, h > 1 else { return }
-        let barsPerSec = Double(bins.count) / duration
-        let win = max(0.5, windowSec)
-        let pxPerSec = w / CGFloat(win)
         let centerX = w / 2
-        let chTop = h * 0.25, chBot = h * 0.75       // per-channel zero-lines (L top half, R bottom half)
-        let halfAmp = (h / 2) * 0.45                 // plugin HALF_SCALE within each half
-        let halfPx = Double(0.5 / pxPerSec)          // half a column, in seconds (for per-pixel aggregation)
 
         // whisper-faint center axis (white@5%) at the L/R divider
         ctx.fill(Path(CGRect(x: 0, y: (h / 2).rounded(), width: w, height: 1)), with: .color(.white.opacity(0.05)))
 
-        // One vertical column per device point (§06D.1 pixel-per-column). Each column aggregates the
-        // min/max over the cache bins it spans (no aliasing when the cache is denser than the screen),
-        // then fills L (top half) and R (bottom half) — the plugin's filled min/max contour look.
-        var x: CGFloat = 0
-        while x < w {
-            let tc = center + Double((x + 0.5 - centerX) / pxPerSec)
-            let t0 = tc - halfPx, t1 = tc + halfPx
-            if t1 >= 0 && t0 <= duration {
-                var i0 = Int(max(0, t0) * barsPerSec)
-                var i1 = Int(min(duration, t1) * barsPerSec)
-                i0 = max(0, min(bins.count - 1, i0)); i1 = max(0, min(bins.count - 1, i1))
-                if i1 < i0 { i1 = i0 }
-                var lMin: Float = 0, lMax: Float = 0, rMin: Float = 0, rMax: Float = 0
-                for k in i0...i1 {
-                    let b = bins[k]
-                    lMin = min(lMin, b.lMin); lMax = max(lMax, b.lMax)
-                    rMin = min(rMin, b.rMin); rMax = max(rMax, b.rMax)
-                }
-                let mid = bins[(i0 + i1) / 2]
-                let edge = min(1, Double(min(x, w - x)) / Double(w * 0.10))   // §06 edge fade; uniform otherwise
-                if edge > 0 {
-                    let col = (coloringOn ? Self.scopeColor(mid) : Theme.accent).opacity(edge)
-                    let lTop = chTop - CGFloat(lMax) * halfAmp, lBot = chTop - CGFloat(lMin) * halfAmp
-                    ctx.fill(Path(CGRect(x: x, y: lTop, width: 1.5, height: max(1, lBot - lTop))), with: .color(col))
-                    let rTop = chBot - CGFloat(rMax) * halfAmp, rBot = chBot - CGFloat(rMin) * halfAmp
-                    ctx.fill(Path(CGRect(x: x, y: rTop, width: 1.5, height: max(1, rBot - rTop))), with: .color(col))
-                }
-            }
-            x += 1
-        }
+        drawContour(ctx, w: w, h: h, centerX: centerX, center: center)
 
         // soft center playhead — vertical white gradient (transparent → 0.7 → transparent), §06D.1.
         ctx.fill(Path(CGRect(x: centerX - 1, y: 0, width: 2, height: h)),
@@ -101,6 +65,68 @@ struct CloseUpWaveform: View {
                                      .init(color: .white.opacity(0.7), location: 0.5),
                                      .init(color: .white.opacity(0), location: 1)]),
                     startPoint: CGPoint(x: centerX, y: 0), endPoint: CGPoint(x: centerX, y: h)))
+    }
+
+    /// The nano-plugin Waveform look, ported to a scrubbable cache (apps/nano-plugin/src/module/waveform):
+    /// each cache bin keeps its own pre-analyzed min/max envelope and is placed at an **affine** x —
+    /// `x(i) = centerX + (binTime − center)·pxPerSec`. Only `center` changes frame to frame, so every
+    /// bin's x shifts by the SAME delta: the contour rigidly translates left, never re-binning (the old
+    /// per-pixel re-aggregation against a sub-pixel offset is what shimmered/"morphed"). Per channel a
+    /// single FILLED min/max contour path (L top half, R bottom half) — the plugin's filled ribbon, not
+    /// disjoint bars — shaded by a horizontal spectral gradient with the soft edge-fade baked into its
+    /// alpha. Two path fills per frame: cheap and crisp.
+    private func drawContour(_ ctx: GraphicsContext, w: CGFloat, h: CGFloat, centerX: CGFloat, center: Double) {
+        guard bins.count > 1, duration > 0 else { return }
+        let binsPerSec = Double(bins.count) / duration
+        let pxPerSec = w / CGFloat(max(0.5, windowSec))
+        let chTop = h * 0.25, chBot = h * 0.75       // per-channel zero-lines (L top half, R bottom half)
+        let halfAmp = (h / 2) * 0.45                 // plugin HALF_SCALE within each half
+
+        // Visible bin window (a one-bin margin so the contour enters/leaves cleanly under the edge fade).
+        func binAtX(_ x: CGFloat) -> Double { (center + Double((x - centerX) / pxPerSec)) * binsPerSec }
+        let firstBin = max(0, Int(binAtX(0).rounded(.down)) - 1)
+        let lastBin = min(bins.count - 1, Int(binAtX(w).rounded(.up)) + 1)
+        guard lastBin > firstBin else { return }
+
+        func x(_ i: Int) -> CGFloat { centerX + CGFloat(Double(i) / binsPerSec - center) * pxPerSec }
+        let x0 = x(firstBin), x1 = x(lastBin)
+        let span = max(1, x1 - x0)
+
+        // Filled min/max contour per channel: forward along the maxima, back along the minima, closed.
+        func contour(zero: CGFloat, _ maxAt: (StereoWaveBin) -> Float, _ minAt: (StereoWaveBin) -> Float) -> Path {
+            var p = Path()
+            p.move(to: CGPoint(x: x(firstBin), y: zero - CGFloat(maxAt(bins[firstBin])) * halfAmp))
+            for i in (firstBin + 1)...lastBin { p.addLine(to: CGPoint(x: x(i), y: zero - CGFloat(maxAt(bins[i])) * halfAmp)) }
+            for i in stride(from: lastBin, through: firstBin, by: -1) {
+                p.addLine(to: CGPoint(x: x(i), y: zero - CGFloat(minAt(bins[i])) * halfAmp))
+            }
+            p.closeSubpath()
+            return p
+        }
+        let lPath = contour(zero: chTop, { $0.lMax }, { $0.lMin })
+        let rPath = contour(zero: chBot, { $0.rMax }, { $0.rMin })
+
+        // Horizontal spectral gradient (subsampled ≤64 stops; color varies slowly), edge-fade in alpha.
+        let stepCount = min(lastBin - firstBin, 64)
+        var stops: [Gradient.Stop] = []
+        stops.reserveCapacity(stepCount + 1)
+        for s in 0...stepCount {
+            let i = firstBin + (lastBin - firstBin) * s / stepCount
+            let loc = (x(i) - x0) / span
+            let fade = edgeAlpha(loc)
+            let base = coloringOn ? Self.scopeColor(bins[i]) : Theme.accent
+            stops.append(.init(color: base.opacity(fade), location: min(1, max(0, loc))))
+        }
+        let shading = GraphicsContext.Shading.linearGradient(
+            Gradient(stops: stops), startPoint: CGPoint(x: x0, y: 0), endPoint: CGPoint(x: x1, y: 0))
+        ctx.fill(lPath, with: shading)
+        ctx.fill(rPath, with: shading)
+    }
+
+    /// §06 edge fade: full brightness in the middle, easing to transparent within the outer ~10%.
+    private func edgeAlpha(_ loc: CGFloat) -> Double {
+        let e: CGFloat = 0.10
+        return Double(min(1, max(0, min(loc, 1 - loc) / e)))
     }
 
     /// Band color from the stored continuous RGB, mixed 18% toward white — the plugin's COLOR_WHITE_MIX,
@@ -144,9 +170,13 @@ final class ScrollClock {
     private let seedRate = 1.0 / 60.0  // nominal per-frame advance to start at, so motion never freezes while the
                                        // rate EMA warms up (the plugin seeds its rate to the first arrival, not 0)
     private let rateBeta = 0.05     // EMA weight for the per-frame arrival rate
-    private let gain = 0.1          // reservoir gain — slews the per-frame advance toward target ("slew, never step")
-    private let target = 0.05       // FLOOR on how far the playhead trails the rendered clock; the actual hold settles
-                                    // near target + (audio-update interval)/2, i.e. larger when `centerTime` updates coarsely
+    private let gain = 0.01         // reservoir gain — slews the per-frame advance toward target ("slew, never step").
+                                    // Deliberately tiny (cf. the plugin's 0.005): the audio clock only updates once per
+                                    // ~21 ms render block, so `reservoir = audio − pres` sawtooths every frame; a large
+                                    // gain pumps that sawtooth straight into the MOTION (visible judder). Keeping it tiny
+                                    // lets the smoothed `rate` carry the motion and the reservoir only trim slow drift.
+    private let target = 0.06       // how far the playhead trails the rendered clock; ≥ one audio block so the sawtooth
+                                    // reservoir stays positive (never starves the contour at the edge)
     private let snapGap = 0.5       // |audio − pres| beyond this ⇒ seek / discontinuity ⇒ snap
 
     /// `now` = TimelineView frame date, used ONLY to detect a new frame (so parent re-renders between vsync
