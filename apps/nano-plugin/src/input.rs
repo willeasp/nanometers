@@ -11,7 +11,9 @@
 //! draws from it; the committed layout changes only on release. Hit-testing stays against the
 //! stable COMMITTED viewports, so the swap points don't shift under the cursor mid-drag.
 
+use crate::editor::LayoutEdit;
 use crate::layout::{apply_reorder, column_index_at, reorder_target, sanitize_layout, Column};
+use crate::menu::{menu_item_at, menu_rect, MenuItem, MenuModel};
 use crate::module::{EventStatus, Module, Rect};
 
 /// Which owner holds the pointer until mouse-up (ADR 0004). `LayoutResize` is deferred to Phase F
@@ -21,6 +23,30 @@ pub enum PointerGrab {
     None,
     LayoutReorder { instance_id: u64 },
     Module { instance_id: u64 },
+}
+
+/// What a handled event commits back to the render loop. `Reorder` carries the new committed layout
+/// (the modules Vec is already permuted to match); `Edit` is an add/remove the loop applies via
+/// `apply_edit`. Both publish a durable layout change the host should persist.
+pub enum Commit {
+    Reorder(Vec<Column>),
+    Edit(LayoutEdit),
+}
+
+/// An open right-click context menu (ADR 0004, Phase F3): its content, the cursor `anchor` it's
+/// pinned at (physical px), and the row the cursor is currently over (for the hover highlight).
+struct OpenMenu {
+    model: MenuModel,
+    anchor: (f32, f32),
+    hovered: Option<usize>,
+}
+
+/// A read-only view of the open menu for the Overlay renderer (`overlay.rs`) — anchor + rows +
+/// hovered row. The Overlay re-derives the panel rect from these via `menu::menu_rect`.
+pub struct MenuOverlay<'a> {
+    pub anchor: (f32, f32),
+    pub items: &'a [MenuItem],
+    pub hovered: Option<usize>,
 }
 
 /// Decide the grab on a press at physical-px `x`. `hit(column_index, local_x)` offers the press to
@@ -59,20 +85,28 @@ pub fn reorder_preview(
 }
 
 /// Permute `modules` (1:1 with `old`) into `new`'s order, matched by `instance_id`. Called once on
-/// a reorder commit so the modules Vec stays aligned with the committed layout.
+/// a reorder commit so the modules Vec stays aligned with the committed layout. Total: if `new` isn't
+/// a clean permutation of `old` (different length, or an id `old` doesn't have), it leaves `modules`
+/// untouched instead of panicking. A reorder always preserves the id set, so this only guards a
+/// slipped invariant from crashing the render thread.
 fn reorder_modules(
     modules: &mut Vec<Box<dyn Module + Send>>,
     old: &[Column],
     new: &[Column],
 ) {
-    let order: Vec<usize> = new
-        .iter()
-        .map(|c| old.iter().position(|o| o.instance_id == c.instance_id).unwrap())
-        .collect();
-    let mut slots: Vec<Option<Box<dyn Module + Send>>> = modules.drain(..).map(Some).collect();
-    for &oi in &order {
-        modules.push(slots[oi].take().unwrap());
+    if new.len() != old.len() {
+        return;
     }
+    // Resolve each new column to its module slot; abort the whole permute if any id is unknown.
+    let Some(order) = new
+        .iter()
+        .map(|c| old.iter().position(|o| o.instance_id == c.instance_id))
+        .collect::<Option<Vec<usize>>>()
+    else {
+        return;
+    };
+    let mut slots: Vec<Option<Box<dyn Module + Send>>> = modules.drain(..).map(Some).collect();
+    *modules = order.into_iter().filter_map(|oi| slots[oi].take()).collect();
 }
 
 /// The render-side router. Owns transient drag state; the loop calls [`Router::handle`] per
@@ -84,16 +118,83 @@ pub struct Router {
     last_cursor: Option<(f32, f32)>,
     /// The live-reflow order while a `LayoutReorder` is dragging; `None` otherwise.
     provisional: Option<Vec<Column>>,
+    /// The open right-click context menu, if any. While `Some` it's MODAL — pointer input drives the
+    /// menu (hover/select/dismiss) and reaches no Module and starts no grab (Phase F3).
+    menu: Option<OpenMenu>,
 }
 
 impl Router {
     pub fn new() -> Self {
-        Self { grab: PointerGrab::None, last_cursor: None, provisional: None }
+        Self { grab: PointerGrab::None, last_cursor: None, provisional: None, menu: None }
     }
 
     /// The live-reflow order to render this frame, or `None` to render the committed layout.
     pub fn provisional(&self) -> Option<&[Column]> {
         self.provisional.as_deref()
+    }
+
+    /// Dismiss any open context menu. Called when the surface resizes: the anchor is captured in
+    /// physical px at open time, so a resize (especially a DPI/scale change) would otherwise leave the
+    /// panel pinned to stale coordinates — closing it is the clean, expected behavior. Idempotent.
+    pub fn close_menu(&mut self) {
+        self.menu = None;
+    }
+
+    /// A read-only view of the open menu for the Overlay renderer, or `None` when no menu is open.
+    pub fn menu_overlay(&self) -> Option<MenuOverlay<'_>> {
+        self.menu.as_ref().map(|m| MenuOverlay {
+            anchor: m.anchor,
+            items: &m.model.items,
+            hovered: m.hovered,
+        })
+    }
+
+    /// Open the context menu at the last cursor, with content for whatever column is under it
+    /// (`None` → empty strip / past every column: Add appends, no Remove).
+    fn open_menu(&mut self, committed_vps: &[Rect]) {
+        let Some(anchor) = self.last_cursor else {
+            return;
+        };
+        let column = column_index_at(committed_vps, anchor.0);
+        self.menu = Some(OpenMenu { model: MenuModel::for_context(column), anchor, hovered: None });
+    }
+
+    /// Drive the open menu (modal). Cursor-moves update the hovered row; a left-press selects (→
+    /// `Commit::Edit`) or dismisses; a right-press reopens at the new cursor; everything else (mouse
+    /// releases, wheel, cursor-left) is swallowed so it can't reach a Module or start a grab.
+    fn handle_menu(
+        &mut self,
+        event: &baseview::Event,
+        committed_vps: &[Rect],
+        surface_w: f32,
+        surface_h: f32,
+        scale: f32,
+    ) -> Option<Commit> {
+        use baseview::{Event, MouseButton, MouseEvent};
+        match event {
+            Event::Mouse(MouseEvent::CursorMoved { position, .. }) => {
+                let cursor = (position.x as f32 * scale, position.y as f32 * scale);
+                self.last_cursor = Some(cursor);
+                if let Some(menu) = &mut self.menu {
+                    let rect = menu_rect(menu.anchor, menu.model.len(), surface_w, surface_h, scale);
+                    menu.hovered = menu_item_at(rect, menu.model.len(), cursor);
+                }
+                None
+            }
+            Event::Mouse(MouseEvent::ButtonPressed { button: MouseButton::Left, .. }) => {
+                let cursor = self.last_cursor?;
+                let menu = self.menu.take()?; // any left-press closes the menu (select or dismiss)
+                menu.model
+                    .edit_at_cursor(menu.anchor, surface_w, surface_h, scale, cursor)
+                    .map(Commit::Edit)
+            }
+            Event::Mouse(MouseEvent::ButtonPressed { button: MouseButton::Right, .. }) => {
+                self.menu = None;
+                self.open_menu(committed_vps);
+                None
+            }
+            _ => None,
+        }
     }
 
     /// Translate a baseview event into a column-local PHYSICAL-px event for a Module: logical →
@@ -129,18 +230,34 @@ impl Router {
     }
 
     /// Handle one event against the stable `committed` layout (1:1 with `modules`) + its
-    /// `committed_vps`. Returns `Some(new_layout)` when a reorder COMMITS on release — the caller
-    /// adopts it (modules are already permuted to match); `None` otherwise.
+    /// `committed_vps`. Returns `Some(Commit)` when something durable happens — a reorder commit on
+    /// release (modules already permuted to match) or a menu add/remove selection; `None` otherwise.
+    /// `surface_w`/`surface_h` (physical px) size the context-menu geometry.
+    #[allow(clippy::too_many_arguments)]
     pub fn handle(
         &mut self,
         event: &baseview::Event,
         committed: &[Column],
         committed_vps: &[Rect],
         modules: &mut Vec<Box<dyn Module + Send>>,
+        surface_w: f32,
+        surface_h: f32,
         scale: f32,
-    ) -> Option<Vec<Column>> {
+    ) -> Option<Commit> {
         use baseview::{Event, MouseButton, MouseEvent};
+        // A right-click context menu is modal while open: it owns all pointer input.
+        if self.menu.is_some() {
+            return self.handle_menu(event, committed_vps, surface_w, surface_h, scale);
+        }
         match event {
+            // Right-press opens the menu at the cursor — but never mid-drag (a left grab owns the
+            // pointer until its release).
+            Event::Mouse(MouseEvent::ButtonPressed { button: MouseButton::Right, .. }) => {
+                if self.grab == PointerGrab::None {
+                    self.open_menu(committed_vps);
+                }
+                None
+            }
             Event::Mouse(MouseEvent::CursorMoved { position, .. }) => {
                 let x = position.x as f32 * scale;
                 self.last_cursor = Some((x, position.y as f32 * scale));
@@ -194,7 +311,7 @@ impl Router {
                 self.provisional = None;
                 if let Some(new) = committed_new {
                     reorder_modules(modules, committed, &new);
-                    return Some(new);
+                    return Some(Commit::Reorder(new));
                 }
                 None
             }
@@ -222,12 +339,63 @@ impl Router {
 mod tests {
     use super::*;
     use crate::layout::{module_type, viewports, Column};
+    use crate::module::FrameContext;
 
     fn two_flex() -> Vec<Column> {
         vec![
             Column::new(0, module_type::WAVEFORM, 0.5),
             Column::new(1, module_type::WAVEFORM, 0.5),
         ]
+    }
+
+    /// A no-GPU Module whose `save_config` byte tags which one it is, so a permute is observable.
+    /// `render`/`update` are unreachable no-ops in these pure-logic tests.
+    struct FakeMod {
+        tag: u8,
+    }
+    impl Module for FakeMod {
+        fn update(&mut self, _c: &FrameContext, _q: &wgpu::Queue) {}
+        fn render(&mut self, _r: &mut wgpu::RenderPass, _v: Rect) {}
+        fn on_event(&mut self, _e: &baseview::Event, _v: Rect) -> EventStatus {
+            EventStatus::Ignored
+        }
+        fn save_config(&self) -> Vec<u8> {
+            vec![self.tag]
+        }
+        fn load_config(&mut self, _b: &[u8]) {}
+    }
+
+    fn fakes(tags: &[u8]) -> Vec<Box<dyn Module + Send>> {
+        tags.iter().map(|&t| Box::new(FakeMod { tag: t }) as Box<dyn Module + Send>).collect()
+    }
+
+    fn tags(modules: &[Box<dyn Module + Send>]) -> Vec<u8> {
+        modules.iter().map(|m| m.save_config()[0]).collect()
+    }
+
+    #[test]
+    fn reorder_modules_permutes_by_id() {
+        let old = vec![
+            Column::new(0, module_type::WAVEFORM, 1.0),
+            Column::new(1, module_type::WAVEFORM, 1.0),
+            Column::new(2, module_type::WAVEFORM, 1.0),
+        ];
+        // new order: ids [2, 0, 1] → modules follow their columns, not their slots.
+        let new = vec![old[2].clone(), old[0].clone(), old[1].clone()];
+        let mut modules = fakes(&[0, 1, 2]);
+        reorder_modules(&mut modules, &old, &new);
+        assert_eq!(tags(&modules), vec![2, 0, 1]);
+    }
+
+    #[test]
+    fn reorder_modules_bails_on_id_mismatch() {
+        // `new` names an id (9) that isn't in `old`: not a clean permutation, so leave modules as-is
+        // rather than panic (the old code `.unwrap()`d here).
+        let old = two_flex(); // ids 0, 1
+        let new = vec![old[0].clone(), Column::new(9, module_type::WAVEFORM, 0.5)];
+        let mut modules = fakes(&[0, 1]);
+        reorder_modules(&mut modules, &old, &new);
+        assert_eq!(tags(&modules), vec![0, 1], "untouched when the permutation is invalid");
     }
 
     #[test]

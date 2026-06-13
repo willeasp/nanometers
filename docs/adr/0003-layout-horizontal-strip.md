@@ -66,6 +66,15 @@ amendment below.)*
     Each module JSON-encodes its own config into the opaque bytes (`serde_json`, the same format
     nih-plug uses for the whole `EditorState`). The Waveform's `window_seconds` is the first such
     field; richer per-module config and the UI to edit it follow (F2+).
+  - **Runtime add/remove is live (built 2026-06-13, Phase F3).** The strip is no longer fixed at
+    spawn: a right-click context menu (ADR 0004) adds a Module right after the clicked column or
+    removes one, down to an empty strip (which shows a hint). The layout-mutation primitives are pure
+    and tested — `next_instance_id` (max + 1; ids need only be unique among present columns, so no
+    persisted counter), `insert_column`/`remove_column`, and a render-side `apply_edit` that mutates
+    the `modules` Vec and `layout` Vec in lockstep (a new column reconciles its fixed width from the
+    built module, the same size-of-truth rule as spawn). Add/remove ride the existing `set_layout`
+    → serde path, so they persist for free. Multiple instances of one type are allowed — the reason
+    the instance-id-per-column shape (vs. singleton Modules) was chosen above.
 - **Modules must not reference each other or assume placement.** "To the right of" is not part of any
   Module's definition — placement is purely the user's layout. The glossary was scrubbed of spatial
   relationships to enforce this.
