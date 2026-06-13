@@ -21,11 +21,8 @@ use wgpu_text::glyph_brush::ab_glyph::FontRef;
 use wgpu_text::glyph_brush::{HorizontalAlign, Layout, Section, Text, VerticalAlign};
 use wgpu_text::{BrushBuilder, TextBrush};
 
-use super::{EventStatus, FrameContext, Module, Rect};
+use super::{EventStatus, FrameContext, Module, Rect, FONT};
 use crate::loudness::{Channels, LoudnessDsp};
-
-/// Embedded OFL font (JetBrains Mono, tabular figures — values don't jitter as digits change).
-const FONT: &[u8] = include_bytes!("../../assets/fonts/JetBrainsMono-Regular.ttf");
 
 type Brush = TextBrush<FontRef<'static>>;
 

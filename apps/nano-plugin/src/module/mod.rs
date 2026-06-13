@@ -25,6 +25,11 @@ pub mod loudness;
 pub mod oscilloscope;
 pub mod waveform;
 
+/// Embedded OFL font (JetBrains Mono, tabular figures — digits don't jitter as values change), ADR
+/// 0005. Shared by every Module and host overlay that renders text, so the ~200 KB TTF is embedded
+/// once rather than per text-drawing site.
+pub(crate) const FONT: &[u8] = include_bytes!("../../assets/fonts/JetBrainsMono-Regular.ttf");
+
 /// What a Module reports back to the host's pointer-grab state machine (ADR 0004). A Module must
 /// return `Ignored` for events it doesn't consume, so the host can turn a body-press into a reorder.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
