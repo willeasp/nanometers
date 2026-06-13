@@ -31,4 +31,15 @@ final class SourcesMigrationTests: XCTestCase {
         XCTAssertEqual(try LibraryStore.allSources(ctx).count, 1)
         XCTAssertEqual(try LibraryStore.rootFolders(of: "local", ctx).count, 1)
     }
+
+    func test_launchSequence_seedThenMigrate_attachesDemoTracks() throws {
+        let ctx = try TestDB.context()
+        DemoSeed.seedIfEmpty(ctx)            // first-run demo content
+        SourcesMigration.runIfNeeded(ctx)    // then attach to local source
+
+        let node = try LibraryStore.folderNode(id: SourcesMigration.localRootNodeId, ctx)
+        let demoTitles = try LibraryStore.tracksInFolder(id: SourcesMigration.localRootNodeId, ctx).map(\.title)
+        XCTAssertEqual(node?.sourceId, "local")
+        XCTAssertEqual(Set(demoTitles), ["Biljam", "Mercy"])
+    }
 }
