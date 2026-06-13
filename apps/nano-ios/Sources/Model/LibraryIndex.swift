@@ -28,16 +28,17 @@ final class LibraryIndex {
 
         for source in sources where SourceState(rawValue: source.state) != .disconnected {
             let roots = (try? LibraryStore.rootFolders(of: source.id, ctx)) ?? []
-            var srcCount = Counts()
+            var srcFolders = 0
+            var srcTracks = Set<UUID>()
             for root in roots {
                 guard let rootNode = rootNode(for: root, in: nodesById) else { continue }
-                let c = walk(rootNode, source: source.id, prefix: [],
-                             nodesById: nodesById,
+                var visited = Set<String>()
+                let c = walk(rootNode, source: source.id, prefix: [], nodesById: nodesById, visited: &visited,
                              reachable: &reachable, fCounts: &fCounts, paths: &paths)
-                srcCount.folders += c.folders
-                srcCount.tracks += c.tracks
+                srcFolders += c.folders
+                srcTracks.formUnion(c.trackIds)
             }
-            sCounts[source.id] = srcCount
+            sCounts[source.id] = Counts(folders: srcFolders, tracks: srcTracks.count)
         }
         reachableTrackIds = reachable
         sourceCounts = sCounts
@@ -45,34 +46,37 @@ final class LibraryIndex {
         trackPath = paths.reduce(into: [:]) { $0[$1.key] = ($1.value.0, $1.value.1) }
     }
 
-    /// A root's FolderNode: cloud roots match by `providerFolderId`; local roots use the migration's
-    /// derived node id. Falls back to any node whose id equals the root's providerFolderId.
+    /// The FolderNode backing a root: cloud roots resolve by `providerFolderId`, local roots by the
+    /// stable `nodeId` persisted on the RootFolder. Returns nil when the node isn't indexed yet
+    /// (a not-yet-enumerated root correctly contributes nothing) — no parentless-node guessing.
     private func rootNode(for root: RootFolder, in nodesById: [String: FolderNode]) -> FolderNode? {
-        if let pid = root.providerFolderId, let n = nodesById[pid] { return n }
-        // Local root: the migration created a node id "local-root" (no providerFolderId).
-        return nodesById.values.first { $0.sourceId == root.sourceId && $0.parentId == nil }
+        guard let id = root.providerFolderId ?? root.nodeId else { return nil }
+        return nodesById[id]
     }
 
-    /// Depth-first accumulate: counts this node as one folder, adds its direct tracks, recurses children.
+    /// Depth-first accumulate. `visited` guards against cycles / DAG re-entry within one root walk.
+    /// Returns the subtree's folder count (incl. self) and its DISTINCT track ids.
     private func walk(_ node: FolderNode, source: String, prefix: [String],
-                      nodesById: [String: FolderNode],
+                      nodesById: [String: FolderNode], visited: inout Set<String>,
                       reachable: inout Set<UUID>, fCounts: inout [String: Counts],
-                      paths: inout [UUID: (String, [String])]) -> Counts {
+                      paths: inout [UUID: (String, [String])]) -> (folders: Int, trackIds: Set<UUID>) {
+        guard visited.insert(node.id).inserted else { return (0, []) }   // cycle / re-visit guard
         let here = prefix + [node.id]
         var folders = 1
-        var tracks = node.trackIds.count
+        var subtree = Set<UUID>()
         for tid in node.trackIds {
             reachable.insert(tid)
-            paths[tid] = (source, here)
+            if paths[tid] == nil { paths[tid] = (source, here) }   // first-walk-wins (deterministic Go-to-Source)
+            subtree.insert(tid)
         }
         for childId in node.childFolderIds {
-            guard let child = nodesById[childId] else { continue }
-            let c = walk(child, source: source, prefix: here, nodesById: nodesById,
+            guard let child = nodesById[childId] else { continue }   // dangling child id → skip
+            let c = walk(child, source: source, prefix: here, nodesById: nodesById, visited: &visited,
                          reachable: &reachable, fCounts: &fCounts, paths: &paths)
             folders += c.folders
-            tracks += c.tracks
+            subtree.formUnion(c.trackIds)
         }
-        fCounts[node.id] = Counts(folders: folders - 1, tracks: tracks)  // exclude self from folder count
-        return Counts(folders: folders, tracks: tracks)
+        fCounts[node.id] = Counts(folders: folders - 1, tracks: subtree.count)   // folders=descendants; tracks=distinct
+        return (folders, subtree)
     }
 }
