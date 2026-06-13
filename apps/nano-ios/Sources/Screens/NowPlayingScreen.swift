@@ -1,9 +1,10 @@
 import SwiftUI
 
-/// Full-screen Now Playing surface, presented as a `.fullScreenCover` with the native zoom transition
-/// (see RootView). The hero artwork is a plain `NMArtwork`; the zoom transition morphs the whole
-/// surface to/from the mini-player artwork and provides the interactive swipe-to-dismiss, so there is
-/// no morph code here.
+/// Full-screen Now Playing surface (handoff §06), presented as a `.fullScreenCover` with the native
+/// zoom transition (see RootView). The hero is a `FlipHero`: its front is the album artwork and it
+/// flips to the analysis B-side (close-up scope · goniometer · spectrum). The cover⇄mini zoom morph
+/// (RootView) provides the interactive swipe-to-dismiss and the artwork morph — there's no morph code
+/// here, and the flip lives *inside* the cover.
 ///
 /// The zoom-presented cover hands its content a *bogus* safe area (top reads ≈0, so a `GeometryReader`
 /// read here puts the chrome behind the Dynamic Island). So we don't read our own insets — `RootView`
@@ -15,30 +16,29 @@ struct NowPlayingScreen: View {
     /// True device safe-area insets, read by `RootView` (the cover's own insets are wrong — see above).
     var safeArea: EdgeInsets = EdgeInsets()
 
-    @State private var tint: Color = Theme.bgElev2
     @State private var showContext = false
     @State private var showQueue = false
+    @State private var showSettings = false
+    @State private var flipped = false
 
     @AppStorage("showWave") private var showWave = true
-    @AppStorage("spectrum") private var spectrum = false
-    @AppStorage("zoomWave") private var zoomWave = false        // close-up (DJ scroll); off in v1
+    @AppStorage("spectrum") private var spectrum = true     // frequency coloring (close-up); default on (§06E)
     @State private var bins: [WaveBin] = []
 
     var body: some View {
-        // Full-bleed gradient; chrome positioned by the real device insets threaded in from RootView
-        // (the cover's own insets are wrong — see the type doc). +8 on top gives the island some air.
         VStack(spacing: 14) {
             topBar
-            hero                                         // takes the leftover space, capped + shrinks to fit
+            FlipHero(artworkData: engine.current?.artworkData, flipped: $flipped) {
+                AnalysisArea(lufs: engine.momentaryLUFS)
+            }
             titleRow
-            closeUp          // §05/§03D: close-up sits above the full-song scrubber
             scrubber
             timeRow
             transportRow
             volumeRow
             bottomRail
         }
-        .padding(.horizontal, 26)
+        .padding(.horizontal, 22)
         .padding(.top, safeArea.top + 8)
         .padding(.bottom, safeArea.bottom)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -47,49 +47,42 @@ struct NowPlayingScreen: View {
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("nowPlaying")
         .task(id: engine.current?.persistentModelID) {
-            if let t = engine.current { tint = await ArtworkTintStore.shared.tint(for: t) }
-        }
-        .task(id: engine.current?.persistentModelID) {
             if let t = engine.current { bins = await WaveformStore.shared.bins(for: t) ?? [] }
         }
+        .onChange(of: engine.current?.persistentModelID) { flipped = false }   // §06B reset to cover on track change
         .sheet(isPresented: $showContext) {
             if let t = engine.current { TrackContextSheet(track: t) }
         }
         .sheet(isPresented: $showQueue) { QueueSheet() }
-    }
-
-    @ViewBuilder private var closeUp: some View {
-        if zoomWave, !bins.isEmpty, let dur = engine.current?.durationSec, dur > 0 {
-            CloseUpWaveform(bins: bins,
-                            currentTime: { engine.centerTime },
-                            duration: dur,
-                            coloringOn: spectrum,
-                            isPlaying: engine.isPlaying,
-                            redrawTrigger: engine.elapsed)   // observed → re-centers on scrub-while-paused
+        .sheet(isPresented: $showSettings) { SettingsSheet() }
+        #if DEBUG
+        .onAppear {   // headless screenshot hook: `-flipAnalysis` shows the B-side without a tap
+            if ProcessInfo.processInfo.arguments.contains("-flipAnalysis") {
+                Task { @MainActor in try? await Task.sleep(for: .seconds(1.4)); flipped = true }
+            }
         }
+        #endif
     }
 
     @ViewBuilder private var scrubber: some View {
         if showWave {
             OverviewWaveform(bins: bins, progress: engine.progress, coloringOn: spectrum,
-                             onScrub: { engine.seek(toFraction: $0) }, height: 46)
-                .overlay(alignment: .topTrailing) {
-                    LUFSBadge(lufs: engine.momentaryLUFS).offset(y: -6)
-                }
-        } else {                                   // both/overview off → plain 6pt bar (§03D item 5)
+                             onScrub: { engine.seek(toFraction: $0) }, height: 30)   // §06: slim 30pt, no LUFS here
+        } else {                                   // overview off → plain slim bar with a white knob (§06)
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
-                    Capsule().fill(.white.opacity(0.16)).frame(height: 6)
-                    Capsule().fill(Theme.accent).frame(width: geo.size.width * CGFloat(engine.progress), height: 6)
-                    Circle().fill(.white).frame(width: 14, height: 14)              // §03D item 5: 14pt white knob
+                    Capsule().fill(.white.opacity(0.16)).frame(height: 5)
+                    Capsule().fill(Theme.accent).frame(width: geo.size.width * CGFloat(engine.progress), height: 5)
+                    Circle().fill(.white).frame(width: 13, height: 13)
                         .shadow(color: .black.opacity(0.4), radius: 4, y: 1)
-                        .offset(x: max(0, min(geo.size.width - 14, geo.size.width * CGFloat(engine.progress) - 7)))
+                        .offset(x: max(0, min(geo.size.width - 13, geo.size.width * CGFloat(engine.progress) - 6.5)))
                 }
                 .frame(maxHeight: .infinity, alignment: .center)
                 .contentShape(Rectangle())
                 .gesture(DragGesture(minimumDistance: 0).onChanged { engine.seek(toFraction: min(1, max(0, $0.location.x / geo.size.width))) })
             }
             .frame(height: 14)
+            .accessibilityIdentifier("overviewWaveform")
         }
     }
 
@@ -98,21 +91,16 @@ struct NowPlayingScreen: View {
         HStack {
             Text(PlaybackMath.clock(engine.elapsed))
             Spacer()
-            if !showWave {                                   // no overview → LUFS sits inline here as plain text (NOT the capsule)
-                Text((engine.current?.integratedLUFS).map { String(format: "%.1f LUFS", $0) } ?? "— LUFS")
-                    .foregroundStyle(.white.opacity(0.55))
-                Spacer()
-            }
             Text("-" + PlaybackMath.clock(max(0, dur - engine.elapsed)))
         }
-        .font(Theme.mono(12)).foregroundStyle(.white.opacity(0.5))
+        .font(Theme.mono(11.5)).foregroundStyle(.white.opacity(0.46))   // §06 elapsed left / -remaining right only
     }
 
     @ViewBuilder private var topBar: some View {
         ZStack {
             VStack(spacing: 1) {
                 Text(engine.context.kind)
-                    .font(Theme.sans(10.5, .bold)).tracking(1.4).foregroundStyle(.white.opacity(0.5))
+                    .font(Theme.mono(10, .bold)).tracking(1.6).foregroundStyle(.white.opacity(0.42))
                 Text(engine.context.name)
                     .font(Theme.sans(13, .semibold)).foregroundStyle(Theme.text)
             }
@@ -132,11 +120,15 @@ struct NowPlayingScreen: View {
 
     @ViewBuilder private var titleRow: some View {
         if let track = engine.current {
-            HStack(alignment: .top, spacing: 12) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(track.title).font(Theme.sans(22, .bold)).tracking(-0.3).foregroundStyle(Theme.text).lineLimit(1)
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(track.title).font(Theme.sans(21, .bold)).tracking(-0.3).foregroundStyle(Theme.text).lineLimit(1)
                         .accessibilityIdentifier("npTitle")
-                    Text(track.artist).font(Theme.sans(17)).foregroundStyle(.white.opacity(0.62)).lineLimit(1)
+                    HStack(spacing: 8) {
+                        Text(track.artist).font(Theme.sans(15)).foregroundStyle(.white.opacity(0.58)).lineLimit(1)
+                        Text(formatLine(track))
+                            .font(Theme.mono(10.5)).tracking(0.4).foregroundStyle(Theme.text3).lineLimit(1).layoutPriority(1)
+                    }
                 }
                 Spacer(minLength: 8)
                 Button { track.isLoved.toggle() } label: {
@@ -147,6 +139,15 @@ struct NowPlayingScreen: View {
                 .buttonStyle(.plain).accessibilityIdentifier("npHeart")
             }
         }
+    }
+
+    /// §06 title format line: "FLAC · 24/96" when a PCM bit depth is known, else "FLAC · 96 kHz"
+    /// (lossy), else just the format. Numerics are mono.
+    private func formatLine(_ t: Track) -> String {
+        guard !t.format.isEmpty else { return "" }
+        if let bits = t.bitDepth, !t.sampleRate.isEmpty { return "\(t.format) · \(bits)/\(t.sampleRate)" }
+        if !t.sampleRate.isEmpty { return "\(t.format) · \(t.sampleRate) kHz" }
+        return t.format
     }
 
     @ViewBuilder private var transportRow: some View {
@@ -162,10 +163,10 @@ struct NowPlayingScreen: View {
 
             Button { engine.toggle() } label: {
                 ZStack {
-                    Circle().fill(Theme.accent).frame(width: 64, height: 64)
-                        .shadow(color: .black.opacity(0.4), radius: 20, y: 6)
+                    Circle().fill(Theme.accent).frame(width: 70, height: 70)             // §06 70pt amber
+                        .shadow(color: Theme.accent.opacity(0.4), radius: 13, y: 6)      // §06 accent glow
                     Image(systemName: engine.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 30)).foregroundStyle(Theme.bg)   // dark-on-amber (§03D)
+                        .font(.system(size: 30)).foregroundStyle(Theme.bg)               // dark-on-amber (§01)
                 }
             }.buttonStyle(.plain).frame(maxWidth: .infinity)
             .accessibilityIdentifier("npPlayPause").accessibilityLabel(engine.isPlaying ? "Pause" : "Play")
@@ -184,7 +185,7 @@ struct NowPlayingScreen: View {
     @ViewBuilder private var volumeRow: some View {
         HStack(spacing: 12) {
             Image(systemName: "waveform").font(.system(size: 16)).foregroundStyle(.white.opacity(0.4))
-            GeometryReader { geo in                                    // custom: track white@14%, fill white@85%, white knob
+            GeometryReader { geo in                                    // track white@14%, fill white@85%, white knob
                 let w = geo.size.width
                 ZStack(alignment: .leading) {
                     Capsule().fill(.white.opacity(0.14)).frame(height: 4)
@@ -198,57 +199,36 @@ struct NowPlayingScreen: View {
                 .gesture(DragGesture(minimumDistance: 0).onChanged { engine.setVolume(min(1, max(0, $0.location.x / w))) })
             }
             .frame(height: 24).accessibilityIdentifier("npVolume")
-            Image(systemName: "waveform").font(.system(size: 22)).foregroundStyle(.white.opacity(0.4))  // asymmetric 16/22 (§ JSX)
+            Image(systemName: "waveform").font(.system(size: 22)).foregroundStyle(.white.opacity(0.4))
         }
     }
 
-    /// Full-bleed backdrop: artwork tint → mid → bottom, with the §03D faint glass scrim.
+    /// §06F neutral warm gradient (168°) + a soft accent aura at the top. No per-track album-art tint.
     private var npGradient: some View {
-        LinearGradient(stops: [.init(color: tint, location: 0),
-                               .init(color: Theme.npGradientMid, location: 0.46),
-                               .init(color: Theme.npGradientBottom, location: 1)],
+        LinearGradient(stops: [.init(color: Theme.npBgTop, location: 0),
+                               .init(color: Theme.npBgMid, location: 0.44),
+                               .init(color: Theme.npBgBottom, location: 1)],
                        startPoint: .top, endPoint: .bottom)
-            .overlay {                                       // §03D faint glass scrim (system material per §01)
-                ZStack {
-                    Rectangle().fill(.ultraThinMaterial).opacity(0.18)
-                    Theme.npGradientBottom.opacity(0.35)     // #111319 @ 0.35
-                }.allowsHitTesting(false)
+            .overlay(alignment: .top) {
+                RadialGradient(colors: [Theme.accent.opacity(0.16), .clear],
+                               center: .top, startRadius: 0, endRadius: 360)
+                    .frame(height: 300)
+                    .allowsHitTesting(false)
             }
     }
 
-    /// Resizable hero: a square that fills the leftover vertical space, capped at the §03D 340pt limit
-    /// and shrinking on shorter screens so the transport + rail always fit. (`NMArtwork` is fixed-size.)
-    @ViewBuilder private var hero: some View {
-        let radius: CGFloat = 18
-        Group {
-            if let data = engine.current?.artworkData, let ui = UIImage(data: data) {
-                Image(uiImage: ui).resizable().scaledToFill()
-            } else {
-                Theme.artFallback.overlay {
-                    GeometryReader { g in
-                        Image(systemName: "waveform")
-                            .font(.system(size: g.size.width * 0.42))
-                            .foregroundStyle(.white.opacity(0.22))
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    }
-                }
-            }
-        }
-        .aspectRatio(1, contentMode: .fit)
-        .frame(maxWidth: 340, maxHeight: 340)
-        .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous).strokeBorder(.white.opacity(0.06), lineWidth: 0.5))
-        .frame(maxHeight: .infinity)                  // claim the leftover space; the art centers + caps within it
-        .shadow(color: .black.opacity(0.45), radius: 30, y: 10)
-    }
-
+    /// §06 bottom rail: source folder (v2 placeholder) · Settings · AirPlay · queue. AirPlay kept per
+    /// the user override of the handoff's 3-icon rail.
     @ViewBuilder private var bottomRail: some View {
         HStack {
-            Image(systemName: "folder").font(.system(size: 20)).foregroundStyle(Theme.text3)
+            Image(systemName: "folder").font(.system(size: 22)).foregroundStyle(Theme.text3)
                 .frame(maxWidth: .infinity).opacity(0.4)        // Go-to-Source-Folder is v2
+            Button { showSettings = true } label: {
+                Image(systemName: "gearshape").font(.system(size: 22)).foregroundStyle(.white.opacity(0.78))
+            }.buttonStyle(.plain).frame(maxWidth: .infinity).accessibilityIdentifier("npSettings")
             AirPlayButton().frame(width: 44, height: 44).frame(maxWidth: .infinity)
             Button { showQueue = true } label: {
-                Image(systemName: "list.bullet.indent").font(.system(size: 20)).foregroundStyle(Theme.text2)
+                Image(systemName: "list.bullet.indent").font(.system(size: 24)).foregroundStyle(.white.opacity(0.78))
             }.buttonStyle(.plain).frame(maxWidth: .infinity).accessibilityIdentifier("npQueue")
         }
     }
