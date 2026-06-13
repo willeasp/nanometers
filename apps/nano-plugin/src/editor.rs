@@ -695,8 +695,10 @@ fn run_render_loop(
             }
         }
 
-        // Phase 2c: the host overlay (context menu + empty-strip hint) over the whole surface, in its
-        // own load pass. A no-op when no menu is open and the strip isn't empty.
+        // Phase 2c: the host overlay (context menu + empty-strip hint + draggable-seam hairlines) over
+        // the whole surface, in its own load pass. The seams come from the ACTIVE order/geometry, so a
+        // hairline tracks its boundary live while a column drags. A no-op when there's nothing to show.
+        let seams = crate::layout::draggable_seams(active, &active_vps);
         overlay.render(
             &device,
             &queue,
@@ -707,6 +709,7 @@ fn run_render_loop(
             scale_factor,
             router.menu_overlay(),
             layout.is_empty(),
+            &seams,
         );
 
         queue.submit(Some(encoder.finish()));

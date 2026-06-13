@@ -223,6 +223,16 @@ pub fn resize_boundary_at(
     })
 }
 
+/// The physical-px x of every DRAGGABLE seam — the boundary between two adjacent FLEX columns (the
+/// only resizable seams, [`resize_boundary_at`]). The Overlay draws a hairline at each so the resize
+/// affordance is visible; a fixed column's edge (e.g. the Loudness meter) is excluded.
+pub fn draggable_seams(cols: &[Column], viewports: &[Rect]) -> Vec<f32> {
+    (0..cols.len().saturating_sub(1))
+        .filter(|&i| cols[i].fixed_width_px.is_none() && cols[i + 1].fixed_width_px.is_none())
+        .map(|i| viewports[i].x + viewports[i].w)
+        .collect()
+}
+
 /// The slot the dragged column should occupy if dropped at physical-px `cursor_x`: the count of
 /// OTHER columns whose midpoint sits left of the cursor. The index is in the post-removal array,
 /// so it pairs directly with [`apply_reorder`]`(cols, dragged, reorder_target(..))`.
@@ -467,6 +477,31 @@ mod tests {
         ];
         let vp2 = viewports(&flexfixed, 800.0, 600.0, 1.0); // seam at 600
         assert_eq!(resize_boundary_at(&flexfixed, &vp2, 600.0, 6.0), None);
+    }
+
+    #[test]
+    fn draggable_seams_are_only_the_flex_flex_boundaries() {
+        // Three flex columns → two draggable seams at their boundaries.
+        let three = cols(&[0.25, 0.25, 0.5]);
+        let vp = viewports(&three, 800.0, 600.0, 1.0); // [0..200],[200..400],[400..800]
+        assert_eq!(draggable_seams(&three, &vp), vec![200.0, 400.0]);
+
+        // flex | fixed: no draggable seam (the fixed column owns its edge).
+        let flexfixed = vec![
+            Column::new(0, module_type::WAVEFORM, 1.0),
+            Column::fixed(1, module_type::LOUDNESS, 200.0),
+        ];
+        let vp2 = viewports(&flexfixed, 800.0, 600.0, 1.0);
+        assert!(draggable_seams(&flexfixed, &vp2).is_empty());
+
+        // flex | flex | fixed: only the first seam is draggable.
+        let mixed = vec![
+            Column::new(0, module_type::WAVEFORM, 0.5),
+            Column::new(1, module_type::WAVEFORM, 0.5),
+            Column::fixed(2, module_type::LOUDNESS, 160.0),
+        ];
+        let vp3 = viewports(&mixed, 800.0, 600.0, 1.0); // flex split 640 → [0..320],[320..640],[640..800]
+        assert_eq!(draggable_seams(&mixed, &vp3), vec![320.0]);
     }
 
     #[test]
