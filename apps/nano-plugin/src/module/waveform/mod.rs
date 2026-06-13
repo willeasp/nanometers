@@ -165,6 +165,32 @@ pub struct WaveformModule {
     scroll_dbg: ScrollDbg,
 }
 
+/// Per-instance Waveform config (ADR 0003), persisted as the column's opaque bytes (JSON). Today
+/// just the visible window; band crossovers / outline / color tuning join as they become editable
+/// (F2+). The host stores these bytes and never reads them — the Module owns the schema.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct WaveformConfig {
+    pub window_seconds: f64,
+}
+
+impl Default for WaveformConfig {
+    fn default() -> Self {
+        // Single-sourced from the const, so the knob's default stays in one place.
+        Self { window_seconds: DISPLAY_WINDOW_SECONDS }
+    }
+}
+
+impl WaveformConfig {
+    fn to_bytes(self) -> Vec<u8> {
+        serde_json::to_vec(&self).unwrap_or_default()
+    }
+    /// Unrecognized / empty / corrupt bytes leave the module at its defaults (trait contract,
+    /// `module/mod.rs`) rather than panic — a future build's richer config must not brick this one.
+    fn from_bytes(bytes: &[u8]) -> Self {
+        serde_json::from_slice(bytes).unwrap_or_default()
+    }
+}
+
 impl WaveformModule {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
         let window_bins = (STORE_WINDOW_SECONDS / store::BIN_SECONDS).round().max(1.0) as usize;
@@ -627,3 +653,17 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn waveform_config_round_trips_and_tolerates_garbage() {
+        let c = WaveformConfig { window_seconds: 3.5 };
+        assert_eq!(WaveformConfig::from_bytes(&c.to_bytes()), c);
+        // Empty (Column::new default) and unparseable bytes → defaults, never a panic (trait contract).
+        assert_eq!(WaveformConfig::from_bytes(&[]), WaveformConfig::default());
+        assert_eq!(WaveformConfig::from_bytes(b"{not json"), WaveformConfig::default());
+    }
+}
