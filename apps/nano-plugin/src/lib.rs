@@ -37,6 +37,11 @@ pub mod layout;
 /// The host-owned pointer-grab router (ADR 0004): hit-testing, reorder reflow, event dispatch.
 pub mod input;
 
+/// The right-click context menu (ADR 0004, Phase F3): pure model + geometry for add/remove Module.
+// Consumed by the Router + Overlay in F3b (Tasks 8–9); allow until that wiring lands.
+#[allow(dead_code)]
+mod menu;
+
 /// Default width of the flexing Waveform, in logical pixels (its pre-meter window width). The
 /// window default is COMPUTED from this plus the Loudness column's derived intrinsic width — not
 /// hand-synced, so retuning the meter's layout knobs can't silently squeeze the default Waveform.

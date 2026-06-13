@@ -78,7 +78,9 @@ pub fn next_instance_id(cols: &[Column]) -> u64 {
 /// same split as spawn, since layout has no view of Module widths.
 pub fn insert_column(cols: &mut Vec<Column>, after: usize, module_type: &str) -> usize {
     let id = next_instance_id(cols);
-    let at = (after + 1).min(cols.len());
+    // saturating_add so `usize::MAX` is a safe "append at the end" sentinel (the empty-strip / no-column
+    // menu case) — it clamps to len rather than overflowing.
+    let at = after.saturating_add(1).min(cols.len());
     cols.insert(at, Column::new(id, module_type, 1.0));
     at
 }
@@ -292,6 +294,16 @@ mod tests {
         let at = insert_column(&mut v, 99, module_type::WAVEFORM);
         assert_eq!(at, 2, "an out-of-range `after` appends at the end");
         assert_eq!(v.len(), 3);
+    }
+
+    #[test]
+    fn insert_column_max_after_appends_without_overflow() {
+        // usize::MAX is the empty-strip / no-column "append" sentinel — saturating_add must not panic.
+        let mut empty: Vec<Column> = Vec::new();
+        assert_eq!(insert_column(&mut empty, usize::MAX, module_type::WAVEFORM), 0);
+        assert_eq!(empty.len(), 1);
+        let mut two = cols(&[0.5, 0.5]);
+        assert_eq!(insert_column(&mut two, usize::MAX, module_type::WAVEFORM), 2, "appends at the end");
     }
 
     #[test]

@@ -296,6 +296,7 @@ fn build_module(
 /// The render loop applies it via [`apply_edit`], which keeps `layout` and `modules` 1:1.
 // The only caller is the menu wiring in `run_render_loop` (F3b, Task 8); allow until that lands.
 #[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum LayoutEdit {
     /// Insert a new Module of `module_type` right after the column at `after` (clamped).
     Insert { after: usize, module_type: String },
