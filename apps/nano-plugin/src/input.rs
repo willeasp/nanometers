@@ -59,20 +59,28 @@ pub fn reorder_preview(
 }
 
 /// Permute `modules` (1:1 with `old`) into `new`'s order, matched by `instance_id`. Called once on
-/// a reorder commit so the modules Vec stays aligned with the committed layout.
+/// a reorder commit so the modules Vec stays aligned with the committed layout. Total: if `new` isn't
+/// a clean permutation of `old` (different length, or an id `old` doesn't have), it leaves `modules`
+/// untouched instead of panicking. A reorder always preserves the id set, so this only guards a
+/// slipped invariant from crashing the render thread.
 fn reorder_modules(
     modules: &mut Vec<Box<dyn Module + Send>>,
     old: &[Column],
     new: &[Column],
 ) {
-    let order: Vec<usize> = new
-        .iter()
-        .map(|c| old.iter().position(|o| o.instance_id == c.instance_id).unwrap())
-        .collect();
-    let mut slots: Vec<Option<Box<dyn Module + Send>>> = modules.drain(..).map(Some).collect();
-    for &oi in &order {
-        modules.push(slots[oi].take().unwrap());
+    if new.len() != old.len() {
+        return;
     }
+    // Resolve each new column to its module slot; abort the whole permute if any id is unknown.
+    let Some(order) = new
+        .iter()
+        .map(|c| old.iter().position(|o| o.instance_id == c.instance_id))
+        .collect::<Option<Vec<usize>>>()
+    else {
+        return;
+    };
+    let mut slots: Vec<Option<Box<dyn Module + Send>>> = modules.drain(..).map(Some).collect();
+    *modules = order.into_iter().filter_map(|oi| slots[oi].take()).collect();
 }
 
 /// The render-side router. Owns transient drag state; the loop calls [`Router::handle`] per
@@ -222,12 +230,63 @@ impl Router {
 mod tests {
     use super::*;
     use crate::layout::{module_type, viewports, Column};
+    use crate::module::FrameContext;
 
     fn two_flex() -> Vec<Column> {
         vec![
             Column::new(0, module_type::WAVEFORM, 0.5),
             Column::new(1, module_type::WAVEFORM, 0.5),
         ]
+    }
+
+    /// A no-GPU Module whose `save_config` byte tags which one it is, so a permute is observable.
+    /// `render`/`update` are unreachable no-ops in these pure-logic tests.
+    struct FakeMod {
+        tag: u8,
+    }
+    impl Module for FakeMod {
+        fn update(&mut self, _c: &FrameContext, _q: &wgpu::Queue) {}
+        fn render(&mut self, _r: &mut wgpu::RenderPass, _v: Rect) {}
+        fn on_event(&mut self, _e: &baseview::Event, _v: Rect) -> EventStatus {
+            EventStatus::Ignored
+        }
+        fn save_config(&self) -> Vec<u8> {
+            vec![self.tag]
+        }
+        fn load_config(&mut self, _b: &[u8]) {}
+    }
+
+    fn fakes(tags: &[u8]) -> Vec<Box<dyn Module + Send>> {
+        tags.iter().map(|&t| Box::new(FakeMod { tag: t }) as Box<dyn Module + Send>).collect()
+    }
+
+    fn tags(modules: &[Box<dyn Module + Send>]) -> Vec<u8> {
+        modules.iter().map(|m| m.save_config()[0]).collect()
+    }
+
+    #[test]
+    fn reorder_modules_permutes_by_id() {
+        let old = vec![
+            Column::new(0, module_type::WAVEFORM, 1.0),
+            Column::new(1, module_type::WAVEFORM, 1.0),
+            Column::new(2, module_type::WAVEFORM, 1.0),
+        ];
+        // new order: ids [2, 0, 1] → modules follow their columns, not their slots.
+        let new = vec![old[2].clone(), old[0].clone(), old[1].clone()];
+        let mut modules = fakes(&[0, 1, 2]);
+        reorder_modules(&mut modules, &old, &new);
+        assert_eq!(tags(&modules), vec![2, 0, 1]);
+    }
+
+    #[test]
+    fn reorder_modules_bails_on_id_mismatch() {
+        // `new` names an id (9) that isn't in `old`: not a clean permutation, so leave modules as-is
+        // rather than panic (the old code `.unwrap()`d here).
+        let old = two_flex(); // ids 0, 1
+        let new = vec![old[0].clone(), Column::new(9, module_type::WAVEFORM, 0.5)];
+        let mut modules = fakes(&[0, 1]);
+        reorder_modules(&mut modules, &old, &new);
+        assert_eq!(tags(&modules), vec![0, 1], "untouched when the permutation is invalid");
     }
 
     #[test]
