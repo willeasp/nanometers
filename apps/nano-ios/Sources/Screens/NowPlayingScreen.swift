@@ -23,6 +23,7 @@ struct NowPlayingScreen: View {
     @AppStorage("spectrum") private var spectrum = false
     @AppStorage("zoomWave") private var zoomWave = false        // close-up (DJ scroll); off in v1
     @State private var bins: [WaveBin] = []
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion   // gates the motion flourishes (§01)
 
     var body: some View {
         // Full-bleed gradient; chrome positioned by the real device insets threaded in from RootView
@@ -154,11 +155,12 @@ struct NowPlayingScreen: View {
             Button { engine.toggleShuffle() } label: {
                 Image(systemName: "shuffle").font(.system(size: 22))
                     .foregroundStyle(engine.isShuffle ? Theme.accent : .white.opacity(0.85))
-            }.buttonStyle(.plain).frame(maxWidth: .infinity)
+            }.buttonStyle(PressableButtonStyle()).frame(maxWidth: .infinity)
+            .sensoryFeedback(.selection, trigger: engine.isShuffle)
 
             Button { engine.prev() } label: {
                 Image(systemName: "backward.fill").font(.system(size: 34)).foregroundStyle(Theme.text)
-            }.buttonStyle(.plain).frame(maxWidth: .infinity)
+            }.buttonStyle(PressableButtonStyle()).frame(maxWidth: .infinity)
 
             Button { engine.toggle() } label: {
                 ZStack {
@@ -166,18 +168,21 @@ struct NowPlayingScreen: View {
                         .shadow(color: .black.opacity(0.4), radius: 20, y: 6)
                     Image(systemName: engine.isPlaying ? "pause.fill" : "play.fill")
                         .font(.system(size: 30)).foregroundStyle(Theme.bg)   // dark-on-amber (§03D)
+                        .contentTransition(.symbolEffect(.replace))          // snappy glyph swap, not a crossfade
                 }
-            }.buttonStyle(.plain).frame(maxWidth: .infinity)
+            }.buttonStyle(PressableButtonStyle()).frame(maxWidth: .infinity)
             .accessibilityIdentifier("npPlayPause").accessibilityLabel(engine.isPlaying ? "Pause" : "Play")
+            .sensoryFeedback(.impact(weight: .light), trigger: engine.isPlaying)
 
             Button { engine.next() } label: {
                 Image(systemName: "forward.fill").font(.system(size: 34)).foregroundStyle(Theme.text)
-            }.buttonStyle(.plain).frame(maxWidth: .infinity)
+            }.buttonStyle(PressableButtonStyle()).frame(maxWidth: .infinity)
 
             Button { engine.setRepeat(!engine.isRepeat) } label: {
                 Image(systemName: "repeat").font(.system(size: 22))
                     .foregroundStyle(engine.isRepeat ? Theme.accent : .white.opacity(0.85))
-            }.buttonStyle(.plain).frame(maxWidth: .infinity)
+            }.buttonStyle(PressableButtonStyle()).frame(maxWidth: .infinity)
+            .sensoryFeedback(.selection, trigger: engine.isRepeat)
         }
     }
 
@@ -238,6 +243,8 @@ struct NowPlayingScreen: View {
         .frame(maxWidth: 340, maxHeight: 340)
         .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous).strokeBorder(.white.opacity(0.06), lineWidth: 0.5))
+        .scaleEffect(reduceMotion ? 1 : (engine.isPlaying ? 1 : 0.86))   // §motion: paused artwork shrinks to 0.86
+        .animation(reduceMotion ? nil : .spring(response: 0.5, dampingFraction: 0.86), value: engine.isPlaying)
         .frame(maxHeight: .infinity)                  // claim the leftover space; the art centers + caps within it
         .shadow(color: .black.opacity(0.45), radius: 30, y: 10)
     }

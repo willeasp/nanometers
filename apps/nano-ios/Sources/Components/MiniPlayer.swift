@@ -53,18 +53,20 @@ struct MiniPlayer: View {
             Button { engine.toggle() } label: {
                 Image(systemName: engine.isPlaying ? "pause.fill" : "play.fill")
                     .font(.system(size: 18)).foregroundStyle(Theme.text)
+                    .contentTransition(.symbolEffect(.replace))           // snappy glyph swap, not a crossfade
                     .frame(width: 40, height: 40).contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(PressableButtonStyle())
             .accessibilityIdentifier("miniPlayerPlayPause")
             .accessibilityLabel(engine.isPlaying ? "Pause" : "Play")
+            .sensoryFeedback(.impact(weight: .light), trigger: engine.isPlaying)
 
             Button { engine.next() } label: {
                 Image(systemName: "forward.fill")
                     .font(.system(size: 16)).foregroundStyle(Theme.text)
                     .frame(width: 40, height: 40).contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(PressableButtonStyle())
             .accessibilityIdentifier("miniPlayerNext")
             .accessibilityLabel("Next")
         }
