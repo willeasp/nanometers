@@ -3,8 +3,8 @@
 #![cfg(feature = "ffi")]
 
 use nano_dsp::ffi::{
-    nano_dsp_analyze, nano_dsp_integrated_lufs, nano_meter_free, nano_meter_new,
-    nano_meter_push, nano_meter_short_term, NanoBin,
+    nano_dsp_analyze, nano_dsp_integrated_lufs, nano_meter_free, nano_meter_momentary,
+    nano_meter_new, nano_meter_push, nano_meter_short_term, NanoBin,
 };
 
 fn tone(sr: f32, secs: f32) -> Vec<f32> {
@@ -55,6 +55,8 @@ fn streaming_meter_roundtrips() {
     unsafe { nano_meter_push(m, interleaved.as_ptr(), mono.len()) };
     let s = unsafe { nano_meter_short_term(m) };
     assert!(s > -30.0 && s < 0.0, "short-term LUFS plausible: {s}");
+    let mo = unsafe { nano_meter_momentary(m) };
+    assert!(mo > -30.0 && mo < 0.0, "momentary LUFS plausible: {mo}");
     unsafe { nano_meter_free(m) };
 }
 

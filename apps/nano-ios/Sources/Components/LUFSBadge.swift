@@ -1,12 +1,12 @@
 import SwiftUI
 
-/// Glass-capsule LUFS badge that floats over the overview (handoff §02 NMLufs). Phase 4 shows the
-/// per-track INTEGRATED value; Phase 5 swaps in the live short-term meter (same capsule/placement).
+/// Glass-capsule LUFS badge that floats over the overview (handoff §02 NMLufs). Shows the live
+/// momentary (M, 400 ms) meter — the `M` prefix marks it as momentary loudness (same capsule/placement).
 struct LUFSBadge: View {
     var lufs: Double?
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 5) {        // §02 NMLufs badge: [S][value][LUFS]
-            Text("S").font(Theme.mono(9.5, .semibold)).tracking(1.2).foregroundStyle(Theme.text3)
+        HStack(alignment: .firstTextBaseline, spacing: 5) {        // §02 NMLufs badge: [M][value][LUFS]
+            Text("M").font(Theme.mono(9.5, .semibold)).tracking(1.2).foregroundStyle(Theme.text3)
             Text(lufs.map { String(format: "%.1f", $0) } ?? "—")
                 .font(Theme.mono(13, .semibold)).tracking(-0.2).monospacedDigit().foregroundStyle(Theme.text)
             Text("LUFS").font(Theme.mono(9, .semibold)).tracking(0.8).foregroundStyle(Theme.text3)

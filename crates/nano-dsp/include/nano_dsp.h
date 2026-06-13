@@ -17,7 +17,7 @@ typedef struct NanoBin {
     float b;
 } NanoBin;
 
-/* Opaque streaming short-term loudness meter handle. */
+/* Opaque streaming loudness meter handle. */
 typedef struct NanoMeter NanoMeter;
 
 /* Analyze `len` mono samples into `n_bins` (peak, color) bins; `out` holds `n_bins` NanoBin.
@@ -27,9 +27,11 @@ int32_t nano_dsp_analyze(const float *pcm, size_t len, float sample_rate, size_t
 /* Integrated BS.1770 LUFS over stereo `l`/`r` (`len` samples each). Returns -inf on bad arguments. */
 double nano_dsp_integrated_lufs(const float *l, const float *r, size_t len, double sample_rate);
 
-/* Streaming short-term (3 s) meter: create, feed interleaved stereo, read ~10 Hz, free. */
+/* Streaming loudness meter: create, feed interleaved stereo, read ~10 Hz (momentary 400 ms or
+ * short-term 3 s), free. */
 NanoMeter *nano_meter_new(double sample_rate);
 void nano_meter_push(NanoMeter *meter, const float *interleaved, size_t frames);
+double nano_meter_momentary(const NanoMeter *meter);
 double nano_meter_short_term(const NanoMeter *meter);
 void nano_meter_free(NanoMeter *meter);
 

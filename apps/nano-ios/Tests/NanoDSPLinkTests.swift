@@ -19,9 +19,9 @@ final class NanoDSPLinkTests: XCTestCase {
         XCTAssertTrue((lufs ?? 0) > -30 && (lufs ?? 0) < 0, "integrated LUFS implausible: \(String(describing: lufs))")
     }
 
-    func test_liveMeterReadsShortTermFromATone() {
+    func test_liveMeterReadsMomentaryFromATone() {
         let sr = 48_000.0
-        let n = Int(sr * 4.0)                                   // ~4 s → the 3 s short-term window fills
+        let n = Int(sr * 4.0)                                   // ~4 s → the 400 ms momentary window fills
         var tone = [Float](repeating: 0, count: n)
         for i in 0..<n { tone[i] = 0.5 * sinf(2.0 * .pi * 1000.0 * Float(i) / Float(sr)) }
 
@@ -37,8 +37,8 @@ final class NanoDSPLinkTests: XCTestCase {
             }
             off += f
         }
-        XCTAssertNotNil(last, "no short-term reading after ~4 s of tone (link or wiring failure)")
+        XCTAssertNotNil(last, "no momentary reading after ~4 s of tone (link or wiring failure)")
         XCTAssertTrue((last ?? 0) > -40 && (last ?? 0) < 0,
-                      "short-term implausible: \(String(describing: last))")
+                      "momentary implausible: \(String(describing: last))")
     }
 }

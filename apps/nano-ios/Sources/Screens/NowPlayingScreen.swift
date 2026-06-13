@@ -74,7 +74,7 @@ struct NowPlayingScreen: View {
             OverviewWaveform(bins: bins, progress: engine.progress, coloringOn: spectrum,
                              onScrub: { engine.seek(toFraction: $0) }, height: 46)
                 .overlay(alignment: .topTrailing) {
-                    LUFSBadge(lufs: engine.shortTermLUFS).offset(y: -6)
+                    LUFSBadge(lufs: engine.momentaryLUFS).offset(y: -6)
                 }
         } else {                                   // both/overview off → plain 6pt bar (§03D item 5)
             GeometryReader { geo in

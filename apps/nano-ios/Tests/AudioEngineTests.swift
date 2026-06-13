@@ -34,7 +34,7 @@ final class AudioEngineTests: XCTestCase {
                           "expected ~silence when paused, got \(engine.outputLevel)")
     }
 
-    func test_liveShortTermLUFSBecomesAPlausibleReadingWhilePlaying() async throws {
+    func test_liveMomentaryLUFSBecomesAPlausibleReadingWhilePlaying() async throws {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("Tone_\(UUID().uuidString).wav")
         defer { try? FileManager.default.removeItem(at: url) }
@@ -44,15 +44,15 @@ final class AudioEngineTests: XCTestCase {
         let engine = AudioEngine()
         engine.play(track, in: [track], context: .library)
 
-        // Let > 3 s render so the 3 s short-term window is well-populated (it reads live within ~100 ms).
-        try await Task.sleep(nanoseconds: 3_800_000_000)
-        let s = engine.shortTermLUFS
-        XCTAssertNotNil(s, "expected a live short-term reading after ~3.8 s, got nil")
-        XCTAssertTrue((s ?? 0) > -40 && (s ?? 0) < 0, "live short-term implausible: \(String(describing: s))")
+        // Momentary fills in ~400 ms; let a bit more than that render so the reading is well-populated.
+        try await Task.sleep(nanoseconds: 1_500_000_000)
+        let m = engine.momentaryLUFS
+        XCTAssertNotNil(m, "expected a live momentary reading after ~1.5 s, got nil")
+        XCTAssertTrue((m ?? 0) > -40 && (m ?? 0) < 0, "live momentary implausible: \(String(describing: m))")
 
         engine.toggle()   // pause → blank-until-live: the badge value clears
         try await Task.sleep(nanoseconds: 400_000_000)
-        XCTAssertNil(engine.shortTermLUFS, "live short-term should blank when paused")
+        XCTAssertNil(engine.momentaryLUFS, "live momentary should blank when paused")
     }
 
     func test_centerTimeAdvancesWhilePlaying() async throws {

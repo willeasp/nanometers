@@ -122,8 +122,9 @@ pub unsafe extern "C" fn nano_dsp_integrated_lufs(
     dsp.integrated_lufs()
 }
 
-/// Opaque streaming short-term meter. Create with `nano_meter_new`, feed interleaved stereo with
-/// `nano_meter_push`, read `nano_meter_short_term` (~10 Hz from a tap), `nano_meter_free` when done.
+/// Opaque streaming loudness meter. Create with `nano_meter_new`, feed interleaved stereo with
+/// `nano_meter_push`, read `nano_meter_momentary` (400 ms) or `nano_meter_short_term` (3 s) (~10 Hz
+/// from a tap), `nano_meter_free` when done.
 pub struct NanoMeter {
     dsp: LoudnessDsp,
 }
@@ -175,6 +176,20 @@ pub unsafe extern "C" fn nano_meter_short_term(meter: *const NanoMeter) -> f64 {
         return f64::NEG_INFINITY;
     }
     unsafe { (*meter).dsp.short_term_lufs() }
+}
+
+/// Current momentary (400 ms) LUFS — faster / more reactive than short-term. `f64::NEG_INFINITY` on null.
+///
+/// # Safety
+/// `meter` must be a live handle from `nano_meter_new`.
+/// The handle must not be accessed concurrently from multiple threads — callers must externally
+/// synchronize `nano_meter_push` against any concurrent reader.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nano_meter_momentary(meter: *const NanoMeter) -> f64 {
+    if meter.is_null() {
+        return f64::NEG_INFINITY;
+    }
+    unsafe { (*meter).dsp.momentary_lufs() }
 }
 
 /// Free a meter handle. Null is a no-op.
