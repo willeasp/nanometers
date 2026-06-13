@@ -24,12 +24,14 @@ struct SettingsSheet: View {
                 } footer: {
                     Text("Close-up is a zoomed, scrolling waveform that scrolls past a fixed playhead; Track overview is the full-song scrubber.")
                 }
+                .listRowBackground(Color.clear)          // let the sheet's glass material show through
             }
             .tint(Theme.accent)
-            .scrollContentBackground(.hidden).background(Theme.bg)
+            .scrollContentBackground(.hidden)
             .navigationTitle("Settings").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
         }
+        .nmSheetGlass()
         .preferredColorScheme(.dark)
     }
 

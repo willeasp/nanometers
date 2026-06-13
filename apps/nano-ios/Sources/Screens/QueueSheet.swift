@@ -27,12 +27,12 @@ struct QueueSheet: View {
                         Spacer()
                         if !bins.isEmpty { NMMiniWave(bins: bins, bars: 22).frame(width: 48, height: 20) }
                     }
-                    .listRowBackground(Theme.bg)
-                    Divider().background(Theme.hair).listRowBackground(Theme.bg)
+                    .listRowBackground(Color.clear)
+                    Divider().background(Theme.hair).listRowBackground(Color.clear)
                 }
                 if upcoming.isEmpty {
                     Text("End of queue").font(Theme.sans(14)).foregroundStyle(Theme.text3)
-                        .frame(maxWidth: .infinity).padding(.vertical, 24).listRowBackground(Theme.bg)
+                        .frame(maxWidth: .infinity).padding(.vertical, 24).listRowBackground(Color.clear)
                 } else {
                     ForEach(upcoming, id: \.offset) { item in   // positional id: a track may legitimately appear twice in the queue
                         Button { engine.jump(to: item.offset); dismiss() } label: {
@@ -44,11 +44,11 @@ struct QueueSheet: View {
                                 }
                                 Spacer()
                             }
-                        }.listRowBackground(Theme.bg)
+                        }.listRowBackground(Color.clear)
                     }
                 }
             }
-            .listStyle(.plain).background(Theme.bg)
+            .listStyle(.plain).scrollContentBackground(.hidden)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .principal) {
@@ -63,6 +63,7 @@ struct QueueSheet: View {
                 if let c = engine.current { bins = await WaveformStore.shared.bins(for: c) ?? [] }
             }
         }
+        .nmSheetGlass()
         .preferredColorScheme(.dark)
     }
 }

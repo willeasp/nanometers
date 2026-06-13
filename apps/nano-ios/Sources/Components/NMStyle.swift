@@ -20,3 +20,23 @@ struct PressableButtonStyle: ButtonStyle {
         }
     }
 }
+
+extension View {
+    /// Elevated "liquid glass" treatment for bottom sheets (§01 Materials): the system `.regularMaterial`
+    /// behind the sheet, 28pt rounded top corners, and the 1px white@14% inner-top sheen — matching the
+    /// glass tab bar. The sheet's own content must stay transparent (`.scrollContentBackground(.hidden)`
+    /// + clear row backgrounds) for the material to show through.
+    func nmSheetGlass() -> some View {
+        presentationCornerRadius(28)
+            .presentationBackground {
+                Rectangle().fill(.regularMaterial)
+                    .overlay(alignment: .top) {                       // 1px inner-top sheen (mirrors GlassTabBar)
+                        RoundedRectangle(cornerRadius: 28, style: .continuous)
+                            .stroke(Theme.glassSheen, lineWidth: 1)
+                            .blur(radius: 0.5)
+                            .mask(LinearGradient(colors: [.white, .clear], startPoint: .top, endPoint: .center))
+                    }
+                    .ignoresSafeArea()
+            }
+    }
+}

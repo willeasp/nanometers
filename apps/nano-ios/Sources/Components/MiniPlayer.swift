@@ -76,6 +76,12 @@ struct MiniPlayer: View {
             RoundedRectangle(cornerRadius: 20, style: .continuous)
                 .strokeBorder(Theme.glassBorder, lineWidth: 0.5)
         )
+        .overlay(alignment: .top) {                       // 1px inner-top sheen (matches the glass tab bar)
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(Theme.glassSheen, lineWidth: 1)
+                .blur(radius: 0.5)
+                .mask(LinearGradient(colors: [.white, .clear], startPoint: .top, endPoint: .center))
+        }
         .overlay(alignment: .bottom) { progressBar }
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .shadow(color: .black.opacity(0.4), radius: 18, y: 8)

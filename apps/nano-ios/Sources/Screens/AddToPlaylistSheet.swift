@@ -21,7 +21,7 @@ struct AddToPlaylistSheet: View {
                         Text("New Playlist").font(Theme.sans(16.5, .semibold)).foregroundStyle(Theme.accent)
                         Spacer()
                     }
-                }.listRowBackground(Theme.bg)
+                }.listRowBackground(Color.clear)
 
                 ForEach(playlists) { pl in
                     let inList = pl.itemIDs.contains(track.id)
@@ -34,14 +34,15 @@ struct AddToPlaylistSheet: View {
                             Spacer()
                             Image(systemName: inList ? "checkmark" : "plus").foregroundStyle(Theme.accent)
                         }
-                    }.listRowBackground(Theme.bg)
+                    }.listRowBackground(Color.clear)
                 }
             }
-            .listStyle(.plain).background(Theme.bg)
+            .listStyle(.plain).scrollContentBackground(.hidden)
             .navigationTitle("Add to Playlist").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
             .sheet(isPresented: $newPlaylist) { NewPlaylistSheet() }
         }
+        .nmSheetGlass()
         .preferredColorScheme(.dark)
     }
 }
