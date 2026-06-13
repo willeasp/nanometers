@@ -26,9 +26,10 @@ actor WaveformAnalyzer {
     enum AnalyzeError: Error { case noFile, emptyAudio, ffiFailed }
 
     static let binsPerSecond = 10.0
-    /// Denser stereo pass for the close-up scope so transients read crisply (the plugin folds at
-    /// 2000 bins/s; 50/s is the cache-size/fidelity trade for a phone). Tunable.
-    static let closeUpBinsPerSecond = 50.0
+    /// Denser stereo pass for the close-up scope so the filled min/max contour reads crisply at the
+    /// 3–5 s window (≈ pixel-per-column on a phone). The plugin folds at 2000 bins/s; 150/s is the
+    /// cache-size/fidelity trade. Tunable.
+    static let closeUpBinsPerSecond = 150.0
 
     func analyze(_ ref: TrackRef) throws -> AnalysisResult {
         let (url, scoped) = try Self.resolve(ref)
@@ -64,7 +65,7 @@ actor WaveformAnalyzer {
         guard let bins = NanoDSPBridge.analyze(mono: mono, sampleRate: sr, binCount: binCount) else {
             throw AnalyzeError.ffiFailed
         }
-        let closeUpCount = max(450, Int((durationSec * Self.closeUpBinsPerSecond).rounded()))
+        let closeUpCount = max(900, Int((durationSec * Self.closeUpBinsPerSecond).rounded()))
         guard let closeUpBins = NanoDSPBridge.analyzeStereo(l: left, r: right, sampleRate: sr, binCount: closeUpCount) else {
             throw AnalyzeError.ffiFailed
         }

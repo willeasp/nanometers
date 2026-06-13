@@ -23,13 +23,23 @@ struct NowPlayingScreen: View {
 
     @AppStorage("showWave") private var showWave = true
     @AppStorage("spectrum") private var spectrum = true     // frequency coloring (close-up); default on (§06E)
+    @AppStorage("scopeWindow") private var scopeWindow = 4  // close-up window seconds (3/4/5; §06E)
     @State private var bins: [WaveBin] = []
+    @State private var closeUpBins: [StereoWaveBin] = []
 
     var body: some View {
         VStack(spacing: 14) {
             topBar
             FlipHero(artworkData: engine.current?.artworkData, flipped: $flipped) {
-                AnalysisArea(lufs: engine.momentaryLUFS)
+                AnalysisArea(closeUpBins: closeUpBins,
+                             currentTime: { engine.centerTime },
+                             duration: engine.current?.durationSec ?? 0,
+                             coloringOn: spectrum,
+                             isPlaying: engine.isPlaying,
+                             redrawTrigger: engine.elapsed,
+                             windowSec: Double(scopeWindow),
+                             lufs: engine.momentaryLUFS,
+                             onScrub: { engine.seek(toFraction: $0) })
             }
             titleRow
             scrubber
@@ -47,7 +57,9 @@ struct NowPlayingScreen: View {
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("nowPlaying")
         .task(id: engine.current?.persistentModelID) {
-            if let t = engine.current { bins = await WaveformStore.shared.bins(for: t) ?? [] }
+            guard let t = engine.current else { return }
+            bins = await WaveformStore.shared.bins(for: t) ?? []
+            closeUpBins = await WaveformStore.shared.closeUpBins(for: t) ?? []
         }
         .onChange(of: engine.current?.persistentModelID) { flipped = false }   // §06B reset to cover on track change
         .sheet(isPresented: $showContext) {

@@ -13,8 +13,8 @@ enum WaveformCache {
         let integratedLUFS: Double?
     }
 
-    private static let magic: UInt32 = 0x324D574E   // "NMW2" LE
-    private static let version: UInt16 = 2
+    private static let magic: UInt32 = 0x334D574E   // "NMW3" LE
+    private static let version: UInt16 = 3           // bumped: denser (150/s) stereo close-up array
 
     private static var dir: URL {
         let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]

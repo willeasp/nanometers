@@ -15,8 +15,8 @@ final class WaveformAnalyzerTests: XCTestCase {
         XCTAssertEqual(result.bins.count, max(150, Int((3.0 * 10).rounded())))  // 10 bins/sec (overview)
         XCTAssertTrue(result.bins.allSatisfy { $0.peak >= 0 && $0.peak <= 1 }, "peaks normalized")
         XCTAssertTrue(result.bins.contains { $0.peak > 0.5 }, "tone should produce a loud bin")
-        // Close-up: denser stereo pass (50/sec), min/max normalized to -1…1.
-        XCTAssertEqual(result.closeUpBins.count, max(450, Int((3.0 * 50).rounded())))
+        // Close-up: denser stereo pass (150/sec), min/max normalized to -1…1.
+        XCTAssertEqual(result.closeUpBins.count, max(900, Int((3.0 * 150).rounded())))
         XCTAssertTrue(result.closeUpBins.allSatisfy {
             (-1...1).contains($0.lMin) && (-1...1).contains($0.lMax)
                 && (-1...1).contains($0.rMin) && (-1...1).contains($0.rMax)
