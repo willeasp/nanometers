@@ -65,6 +65,31 @@ impl Column {
     }
 }
 
+/// The next free instance id for a runtime-added column: one past the current max (0 when empty).
+/// Ids need only be unique among present columns (the router and reorder match by id), so reusing a
+/// freed id is harmless — they aren't durable handles, and this needs no persisted counter.
+pub fn next_instance_id(cols: &[Column]) -> u64 {
+    cols.iter().map(|c| c.instance_id).max().map_or(0, |m| m.saturating_add(1))
+}
+
+/// Insert a fresh FLEX column of `module_type` right after index `after` (clamped to the end), with a
+/// newly-allocated id. Returns the insertion index so the caller can drop the matching Module into
+/// the same slot. Intrinsic (fixed) sizing is reconciled by the caller from the built module — the
+/// same split as spawn, since layout has no view of Module widths.
+pub fn insert_column(cols: &mut Vec<Column>, after: usize, module_type: &str) -> usize {
+    let id = next_instance_id(cols);
+    let at = (after + 1).min(cols.len());
+    cols.insert(at, Column::new(id, module_type, 1.0));
+    at
+}
+
+/// Remove the column at `index`, returning its instance_id; `None` if out of range. No minimum count —
+/// an empty strip is a valid state (it shows the right-click hint), so the caller drops the matching
+/// Module at the same index without a floor check.
+pub fn remove_column(cols: &mut Vec<Column>, index: usize) -> Option<u64> {
+    (index < cols.len()).then(|| cols.remove(index).instance_id)
+}
+
 /// The app-default layout for a fresh instance with no persisted state (ADR 0003): the Waveform
 /// flexes to fill the window, with the Loudness meter pinned to a fixed width on the right.
 pub fn default_layout() -> Vec<Column> {
@@ -211,12 +236,66 @@ pub fn sanitize_layout(cols: &mut [Column]) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn next_instance_id_is_one_past_the_max() {
+        assert_eq!(next_instance_id(&[]), 0, "empty strip starts at 0");
+        assert_eq!(next_instance_id(&cols(&[0.5, 0.5])), 2, "ids 0,1 → 2");
+        let with_gap = vec![Column::new(5, module_type::WAVEFORM, 1.0)];
+        assert_eq!(next_instance_id(&with_gap), 6, "single id 5 → 6");
+        let unsorted = vec![
+            Column::new(2, module_type::WAVEFORM, 1.0),
+            Column::new(0, module_type::WAVEFORM, 1.0),
+            Column::new(9, module_type::WAVEFORM, 1.0),
+            Column::new(3, module_type::WAVEFORM, 1.0),
+        ];
+        assert_eq!(next_instance_id(&unsorted), 10, "one past the max regardless of order");
+    }
+
     fn cols(fracs: &[f32]) -> Vec<Column> {
         fracs
             .iter()
             .enumerate()
             .map(|(i, &f)| Column::new(i as u64, module_type::WAVEFORM, f))
             .collect()
+    }
+
+    #[test]
+    fn insert_column_lands_right_after_and_allocates_id() {
+        let mut v = cols(&[0.5, 0.5]); // ids 0, 1
+        let at = insert_column(&mut v, 0, module_type::OSCILLOSCOPE);
+        assert_eq!(at, 1, "lands right after the clicked column");
+        assert_eq!(v.iter().map(|c| c.instance_id).collect::<Vec<_>>(), vec![0, 2, 1]);
+        assert_eq!(v[1].module_type, module_type::OSCILLOSCOPE);
+        assert!(v[1].fixed_width_px.is_none(), "inserts as flex; the caller reconciles intrinsic width");
+    }
+
+    #[test]
+    fn insert_column_clamps_after_past_end() {
+        let mut v = cols(&[0.5, 0.5]);
+        let at = insert_column(&mut v, 99, module_type::WAVEFORM);
+        assert_eq!(at, 2, "an out-of-range `after` appends at the end");
+        assert_eq!(v.len(), 3);
+    }
+
+    #[test]
+    fn remove_column_drops_at_index_and_returns_id() {
+        let mut v = cols(&[0.3, 0.3, 0.4]); // ids 0, 1, 2
+        assert_eq!(remove_column(&mut v, 1), Some(1));
+        assert_eq!(v.iter().map(|c| c.instance_id).collect::<Vec<_>>(), vec![0, 2]);
+    }
+
+    #[test]
+    fn remove_column_out_of_range_is_none() {
+        let mut v = cols(&[0.5, 0.5]);
+        assert_eq!(remove_column(&mut v, 9), None);
+        assert_eq!(v.len(), 2, "nothing removed");
+    }
+
+    #[test]
+    fn remove_to_empty_is_allowed() {
+        let mut v = cols(&[1.0]);
+        assert_eq!(remove_column(&mut v, 0), Some(0));
+        assert!(v.is_empty(), "an empty strip is a valid state (shows the right-click hint)");
     }
 
     #[test]
