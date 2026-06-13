@@ -1,13 +1,19 @@
 import SwiftUI
 
 /// Full-screen Now Playing surface, presented as a `.fullScreenCover` with the native zoom transition
-/// (see RootView). As an ordinary presented view it gets a normal safe-area context, so the content
-/// respects the safe area on its own and only the gradient background bleeds — no window-inset reads.
-/// The hero artwork is a plain `NMArtwork`; the zoom transition morphs the whole surface to/from the
-/// mini-player artwork and provides the interactive swipe-to-dismiss, so there is no morph code here.
+/// (see RootView). The hero artwork is a plain `NMArtwork`; the zoom transition morphs the whole
+/// surface to/from the mini-player artwork and provides the interactive swipe-to-dismiss, so there is
+/// no morph code here.
+///
+/// The zoom-presented cover hands its content a *bogus* safe area (top reads ≈0, so a `GeometryReader`
+/// read here puts the chrome behind the Dynamic Island). So we don't read our own insets — `RootView`
+/// reads the real device insets where the hierarchy reports them correctly and threads them in via
+/// `safeArea`. The gradient bleeds full (`.ignoresSafeArea`); the chrome pads by `safeArea`.
 struct NowPlayingScreen: View {
     @Environment(AudioEngine.self) private var engine
     var onClose: () -> Void
+    /// True device safe-area insets, read by `RootView` (the cover's own insets are wrong — see above).
+    var safeArea: EdgeInsets = EdgeInsets()
 
     @State private var tint: Color = Theme.bgElev2
     @State private var showContext = false
@@ -19,27 +25,23 @@ struct NowPlayingScreen: View {
     @State private var bins: [WaveBin] = []
 
     var body: some View {
-        // The zoom transition presents the sheet edge-to-edge (that's what makes the artwork morph
-        // across the boundary), so the framework insets neither end — the content owns its safe area.
-        // `GeometryReader.safeAreaInsets` is the idiomatic read (adapts to any device, not a constant):
-        // the gradient bleeds full, the chrome sits exactly within the real insets.
-        GeometryReader { geo in
-            VStack(spacing: 14) {
-                topBar
-                hero                                     // takes the leftover space, capped + shrinks to fit
-                titleRow
-                closeUp          // §05/§03D: close-up sits above the full-song scrubber
-                scrubber
-                timeRow
-                transportRow
-                volumeRow
-                bottomRail
-            }
-            .padding(.horizontal, 26)
-            .padding(.top, geo.safeAreaInsets.top + 8)   // +8 clears the card's rounded top below the island
-            .padding(.bottom, geo.safeAreaInsets.bottom)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // Full-bleed gradient; chrome positioned by the real device insets threaded in from RootView
+        // (the cover's own insets are wrong — see the type doc). +8 on top gives the island some air.
+        VStack(spacing: 14) {
+            topBar
+            hero                                         // takes the leftover space, capped + shrinks to fit
+            titleRow
+            closeUp          // §05/§03D: close-up sits above the full-song scrubber
+            scrubber
+            timeRow
+            transportRow
+            volumeRow
+            bottomRail
         }
+        .padding(.horizontal, 26)
+        .padding(.top, safeArea.top + 8)
+        .padding(.bottom, safeArea.bottom)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(npGradient.ignoresSafeArea())
         .ignoresSafeArea()
         .accessibilityElement(children: .contain)

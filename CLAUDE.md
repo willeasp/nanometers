@@ -84,19 +84,30 @@ In order of authority:
 - **Shared vocabulary** — [`CONTEXT.md`](CONTEXT.md). Use these terms; honor the `_Avoid_` lists.
 - **Decisions + rationale** — [`docs/adr/`](docs/adr/). Read the ADRs a task touches before starting.
 - **Per-Module build contracts** — [`docs/specs/`](docs/specs/).
-- **Priority-ordered roadmap** — the "Roadmap" section of [`README.md`](README.md).
+- **Priority-ordered roadmap** — the phase plan in [`docs/superpowers/plans/2026-05-30-module-host-and-modules.md`](docs/superpowers/plans/2026-05-30-module-host-and-modules.md) (Phases A–F).
 
 If anything in this file disagrees with those, this file is the one that's wrong — fix it here, keep
 the decision there.
 
 ## File layout
 
+Cargo workspace (ADR 0009): a platform-free domain core feeds the plugin, TUI, and iOS app.
+
 ```
 nanometers/
-├── nanometers/             # plugin crate
-│   ├── src/lib.rs          # Plugin/Params/Shared — audio-thread side
-│   ├── src/editor.rs       # Editor/RenderWindow/WaveformRenderer — GUI-thread side
-│   └── src/dev.rs          # dev-player: file decode → output + waveform ring (feature-gated)
+├── crates/nano-dsp/        # platform-free domain core: loudness, waveform store/color/scroll,
+│                           #   FrameContext/Measurements value types, the C FFI for iOS
+├── apps/
+│   ├── nano-plugin/        # the CLAP/AU plugin crate
+│   │   └── src/
+│   │       ├── lib.rs      #   Plugin/Params/Shared — audio-thread side
+│   │       ├── editor.rs   #   Editor/RenderWindow + the render thread + WindowMsg routing
+│   │       ├── layout.rs   #   horizontal-strip columns + viewport geometry + hit-testing (0003)
+│   │       ├── input.rs    #   host-owned PointerGrab router — reorder/reset/hover (0004)
+│   │       ├── module/     #   the Module trait + waveform / loudness / oscilloscope
+│   │       └── dev.rs      #   dev-player: file decode → output + ring (feature-gated)
+│   ├── nano-tui/           # terminal meter over the same core
+│   └── nano-ios/           # SwiftUI app over the core via FFI (0010)
 ├── xtask/                  # `cargo xtask bundle ...` shim around nih_plug_xtask
 ├── auv2/CMakeLists.txt     # clap-wrapper invocation that emits the AU bundle
 └── build.sh                # cargo bundle → cmake → install

@@ -34,9 +34,20 @@ pub mod module;
 /// The horizontal-strip layout (ADR 0003): persisted `Column`s and the viewport geometry.
 pub mod layout;
 
-/// Window default, in logical pixels.
-pub const INITIAL_WIDTH: u32 = 720;
+/// The host-owned pointer-grab router (ADR 0004): hit-testing, reorder reflow, event dispatch.
+pub mod input;
+
+/// Default width of the flexing Waveform, in logical pixels (its pre-meter window width). The
+/// window default is COMPUTED from this plus the Loudness column's derived intrinsic width — not
+/// hand-synced, so retuning the meter's layout knobs can't silently squeeze the default Waveform.
+pub const WAVEFORM_DEFAULT_WIDTH: u32 = 668;
 pub const INITIAL_HEIGHT: u32 = 420;
+
+/// Default window size (logical px) for a fresh instance with no persisted state.
+pub(crate) fn initial_size() -> (u32, u32) {
+    let meter = module::loudness::intrinsic_width().ceil() as u32;
+    (WAVEFORM_DEFAULT_WIDTH + meter, INITIAL_HEIGHT)
+}
 
 /// Diagnostics gate: on when `NANO_DEBUG_FRAMES`/`NANO_DEBUG_SCROLL` is set (standalone), OR a
 /// `~/.nano-debug` marker file exists — the latter lets us capture frame/scroll timing from inside a
@@ -125,7 +136,7 @@ impl Default for Nanometers {
 impl Default for NanometersParams {
     fn default() -> Self {
         Self {
-            editor_state: EditorState::from_defaults((INITIAL_WIDTH, INITIAL_HEIGHT)),
+            editor_state: EditorState::from_defaults(initial_size()),
         }
     }
 }

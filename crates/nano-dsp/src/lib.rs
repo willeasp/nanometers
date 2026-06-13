@@ -88,6 +88,9 @@ pub struct FrameContext<'a> {
     /// Seconds since the previous frame. The editor renders on a dedicated thread paced by the
     /// swapchain at vblank (ADR 0008), so this is the steady inter-frame interval; currently
     /// informational (logged via `NANO_DEBUG_FRAMES`). 0.0 on the first frame.
+    ///
+    /// Display-side state (e.g. the backing scale) deliberately does NOT ride here: this crate is
+    /// platform-free (ADR 0008), and the plugin's `Module::prepare` seam carries it instead.
     pub frame_dt: f64,
 }
 

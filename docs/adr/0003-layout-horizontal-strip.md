@@ -50,7 +50,8 @@ migration the moment multi-instance is wanted. Rejected; the cost of carrying an
 blob per column is small.
 
 **Pixel widths instead of fractions.** Would need recompute and could orphan/clip Modules on resize.
-Fractions survive resize for free.
+Fractions survive resize for free. *(Superseded for intrinsically-sized Modules — see the
+amendment below.)*
 
 ## Consequences
 
@@ -64,4 +65,31 @@ Fractions survive resize for free.
   resize maps to the boundary grabbed between two columns. This simplicity is a reason the flat strip
   was chosen.
 - **Geometry feeds the viewport per [0002]:** each column's `width_fraction` × surface width is the
-  `viewport: Rect` handed to that Module's `render`.
+  `viewport: Rect` handed to that Module's `render`. *(Amended below: a fixed column's viewport is
+  `fixed_width_px` × display scale instead; flex columns split what remains.)*
+
+## Amendment (2026-06-09): fixed-width columns for intrinsically-sized Modules
+
+The "pixel widths instead of fractions — rejected" verdict above is superseded for one case: a
+Module whose content has an **intrinsic size** — the Loudness meter's scale gutter + three readouts —
+now owns a fixed LOGICAL width (`Column.fixed_width_px: Option<f32>`), converted to physical px at
+tiling time. Flex columns (`fixed_width_px: None`) split the remaining width by `width_fraction`
+exactly as before. Building the meter showed why: a readout column must not reflow with the window,
+and fractions forced hand-retuning per window size — the meter was squeezed or padded at every width
+except the one the fraction was tuned for.
+
+The original rejection's concern ("could orphan/clip Modules on resize") is handled at the two
+seams where it actually bites:
+
+- **`viewports()` clamps every rect to the surface.** An over-constrained window (narrower than the
+  fixed sum) clips the rightmost columns instead of emitting an out-of-attachment rect — an
+  out-of-bounds `set_viewport`/`set_scissor_rect` is a wgpu validation error that would kill the
+  render thread.
+- **The persisted width is a cache, never the source of truth.** At editor spawn the host re-pins
+  each column from its live Module (`Module::intrinsic_width()`, via
+  `layout::reconcile_fixed_widths`), so a sizing change in a Module reflows old sessions, and
+  pre-amendment layouts (Loudness as a flex fraction) migrate automatically.
+
+The persisted serde shape stays backward-compatible: `fixed_width_px` is `#[serde(default)]`, so
+old states deserialize as all-flex and are corrected by the spawn-time reconcile. Drag-resize
+(Phase E/F) adjusts flex fractions only; fixed widths are Module-owned, not user-draggable.

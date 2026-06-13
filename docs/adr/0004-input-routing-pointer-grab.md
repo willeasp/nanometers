@@ -73,3 +73,43 @@ hand the event to the wrong Module. The host grab is what makes drags stick to t
   **not persisted** — only the committed `layout` lands in `EditorState`.
 - `EventStatus::Ignored` from a Module is meaningful: it's the fallback signal that lets a body press
   become a reorder. Modules must return `Ignored` for events they don't consume, not blanket-capture.
+
+## Amendment (2026-06-13): the router lives on the RENDER thread, not the main thread
+
+This ADR predates ADR 0008's dedicated render thread. It says "`RenderWindow::on_event` becomes the
+router" — but since 0008, the `modules`, the live `layout`, the per-frame `viewports`, and the
+display `scale_factor` ALL live inside `run_render_loop` on the render thread; `RenderWindow` (main
+thread) owns only `params` + a resize channel. So the router **moves render-side**, where everything
+it needs already lives:
+
+- **`on_event` is a thin forwarder.** Window resize stays handled inline (it owns the persisted
+  size); every other event is sent over a unified `WindowMsg` channel (mirroring the old `resize_tx`)
+  to the render thread. The `PointerGrab` machine drains and runs there, once per frame, over the
+  buffered events — resizes coalesce, input stays ordered. The spirit of "host owns the grab; Modules
+  only capture/ignore in column-local coords" is unchanged; only the *thread* the host code runs on
+  moved.
+- **Column-local coords are PHYSICAL px.** The surface (and so every `viewport`) is physical px;
+  baseview pointer positions are LOGICAL, so the router multiplies by `scale_factor` before
+  hit-testing and before translating an event to column-local. (Matches the `Module::prepare` seam,
+  which already carries `scale` for the same reason.)
+- **Ungrabbed `CursorMoved` forwards to the hovered column.** The original model only spelled out
+  press/grab/release; hover (a Waveform showing the dB under the cursor) needs the *ungrabbed* move
+  routed to the column under the cursor. That Module mutates internal hover state and returns
+  `Ignored` (hover is not a capture). This also supplies the press point: `ButtonPressed` carries no
+  position in baseview, so a Module self-hit-tests a press using the last column-local `CursorMoved`
+  the router forwarded.
+- **Reorder preview is provisional `Column`s, not bare fractions.** Since fixed-width columns landed
+  (ADR 0003 amendment), live-reflow recomputes a provisional `Vec<Column>` (fixed columns keep their
+  px; flex columns keep fractions) and the render path draws from it until release. A degenerate
+  reflow can leave a NaN/0 flex fraction — which serializes to JSON `null` and **fails the whole
+  editor-state load** — so the provisional layout is sanitized (every flex fraction finite-positive)
+  before it is ever committed via `set_layout`.
+
+**Scope deferred to Phase F.** `LayoutResize` (dragging a divider) is only meaningful between two
+*flex* columns — and the shipped default (flex Waveform + fixed Loudness) has none until multi-
+instance (Phase F) can add a second flex column. The pure boundary helper (`resize_boundary_at`,
+flex|flex only) is built now; the `LayoutResize` grab arm waits until it is GUI-reachable.
+
+**Platform note.** Keyboard events return `Ignored` so DAW transport shortcuts pass through (baseview
+only honors `Captured`/`Ignored` for keyboard). `set_mouse_cursor` is `todo!()` on macOS in vendored
+baseview — calling it panics — so there is no resize/grab cursor feedback this phase.

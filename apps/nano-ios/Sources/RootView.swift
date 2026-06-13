@@ -10,11 +10,15 @@ import SwiftData
 /// Now Playing is a `.fullScreenCover` presented with the native **zoom transition**: the mini-player
 /// artwork is a `matchedTransitionSource`, and the cover uses `.navigationTransition(.zoom(...))`.
 /// That gives the real artwork morph AND the interactive, finger-following swipe-to-dismiss for free
-/// (iOS 18+) — no matchedGeometryEffect, no hand-rolled progress/lerp, no coordinate math.
+/// (iOS 18+) — no matchedGeometryEffect, no hand-rolled progress/lerp, no coordinate math. The cover
+/// covers the whole screen (no card-stack peeking the library), but the zoom transition hands its
+/// content a bogus safe area (top ≈0), so we read the real device insets here — where the hierarchy
+/// reports them correctly — and thread them into NowPlayingScreen.
 struct RootView: View {
     @State private var tab: Tab = .library
     @State private var engine = AudioEngine()
     @State private var npOpen = false
+    @State private var deviceInsets = EdgeInsets()
     @Namespace private var heroNS
     #if DEBUG
     @Environment(\.modelContext) private var ctx
@@ -41,12 +45,13 @@ struct RootView: View {
                 GlassTabBar(selection: $tab)
             }
         }
-        .sheet(isPresented: $npOpen) {
-            NowPlayingScreen(onClose: { npOpen = false })
+        .fullScreenCover(isPresented: $npOpen) {
+            NowPlayingScreen(onClose: { npOpen = false }, safeArea: deviceInsets)
                 .navigationTransition(.zoom(sourceID: Self.artID, in: heroNS))
-                .presentationDetents([.large])
-                .presentationDragIndicator(.hidden)   // we have our own chevron-down
         }
+        // Read the real device insets at the root (the cover's own insets are wrong — see type doc).
+        // Outermost, so `.safeAreaInset(.bottom)` above doesn't shrink the bottom we capture.
+        .onGeometryChange(for: EdgeInsets.self, of: { $0.safeAreaInsets }, action: { deviceInsets = $0 })
         .environment(engine)
         .preferredColorScheme(.dark)
         .tint(Theme.accent)

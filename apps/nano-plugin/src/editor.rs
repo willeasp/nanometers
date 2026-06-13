@@ -22,11 +22,11 @@ use std::{
 };
 use wgpu::SurfaceTargetUnsafe;
 
-use crate::layout::{Column, default_layout, viewports};
+use crate::layout::{Column, default_layout, reconcile_fixed_widths, viewports};
 use crate::module::loudness::LoudnessModule;
 use crate::module::oscilloscope::OscilloscopeModule;
 use crate::module::waveform::WaveformModule;
-use crate::module::{FrameContext, Module};
+use crate::module::{FrameContext, Module, Rect};
 use crate::{NanometersParams, Shared, StereoFrame};
 
 /// Background — near-black with the faintest blue tint. Will become a deliberate palette
@@ -221,15 +221,27 @@ struct RenderControl {
     join: Mutex<Option<JoinHandle<()>>>,
 }
 
+/// Main thread → render thread. Resizes coalesce (only the latest size matters); input events must
+/// NOT coalesce (every press/move/release counts), so they share one channel and the render loop
+/// splits them on drain. `baseview::Event` is plain data (no `Rc`/raw ptr), so it crosses the seam.
+enum WindowMsg {
+    /// New physical surface size + display scale; the render thread owns the surface and reconfigures.
+    /// The scale rides along so px-sized text/padding survives a DPI change.
+    Resize { w: u32, h: u32, scale: f32 },
+    /// A pointer (or other non-resize) event, forwarded verbatim for the render-side pointer-grab
+    /// router (ADR 0004, amended) — modules + layout live render-side, so the router does too.
+    Input(baseview::Event),
+}
+
 /// The baseview `WindowHandler` — but it does NOT render. Rendering runs on a dedicated thread
 /// (`run_render_loop`) paced by the swapchain's blocking acquire, so frame delivery is independent of
 /// the host pumping baseview's `on_frame` (FL Studio starves/over-pumps it). This struct only owns
-/// the main-thread side: it forwards resize events to the render thread. The GPU state, Modules, and
-/// per-frame work all live on the render thread (owned by `run_render_loop`).
+/// the main-thread side: it forwards resize + input events to the render thread. The GPU state,
+/// Modules, layout, and per-frame work all live on the render thread (owned by `run_render_loop`).
 struct RenderWindow {
     params: Arc<NanometersParams>,
-    /// Physical surface size → the render thread, which owns the surface and reconfigures it.
-    resize_tx: Sender<(u32, u32)>,
+    /// Resize + input → the render thread (see [`WindowMsg`]).
+    msg_tx: Sender<WindowMsg>,
 }
 
 #[derive(Default)]
@@ -264,9 +276,8 @@ impl FrameDebug {
 
 /// Resolve a layout `module_type` tag to a concrete Module (ADR 0003 build-time resolution).
 ///
-/// Loudness (Phase D) doesn't exist yet, so it (and any unknown tag) stands in with the
-/// Oscilloscope. Phase F will make the unknown-tag placeholder preserve the original type + config
-/// bytes for lossless re-save.
+/// An unknown tag stands in with the Oscilloscope for now; Phase F will make the unknown-tag
+/// placeholder preserve the original type + config bytes for lossless re-save.
 fn build_module(
     module_type: &str,
     device: &wgpu::Device,
@@ -293,7 +304,15 @@ impl RenderWindow {
         let _ = gui_context; // the render thread doesn't need it (no param GUI yet)
         let target = baseview_window_to_surface_target(window);
         let (width, height) = scaled_size(params.editor_state.size(), scaling_factor);
-        pollster::block_on(Self::create(target, width, height, params, shared, render_ctl))
+        pollster::block_on(Self::create(
+            target,
+            width,
+            height,
+            params,
+            shared,
+            render_ctl,
+            scaling_factor,
+        ))
     }
 
     /// Create the GPU state and hand it to a dedicated RENDER THREAD, then return the lightweight
@@ -308,6 +327,7 @@ impl RenderWindow {
         params: Arc<NanometersParams>,
         shared: Arc<Shared>,
         render_ctl: Arc<RenderControl>,
+        scale_factor: f32,
     ) -> Self {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let surface = unsafe { instance.create_surface_unsafe(target) }.unwrap();
@@ -345,15 +365,24 @@ impl RenderWindow {
         surface.configure(&device, &surface_config);
 
         // Build the Module strip from the persisted layout (ADR 0003), 1:1 with the columns.
-        let layout = params.editor_state.layout_snapshot();
+        let mut layout = params.editor_state.layout_snapshot();
         let modules: Vec<Box<dyn Module + Send>> = layout
             .iter()
             .map(|c| build_module(&c.module_type, &device, surface_config.format))
             .collect();
+        // Re-pin intrinsically-sized columns from the LIVE modules — persisted widths can be stale
+        // (a layout-knob edit since the save) or missing (legacy flex layouts); the module is the
+        // source of truth (ADR 0003, amended). Written back so re-saves carry the corrected widths.
+        let intrinsics: Vec<Option<f32>> = modules.iter().map(|m| m.intrinsic_width()).collect();
+        reconcile_fixed_widths(&mut layout, &intrinsics);
+        params.editor_state.set_layout(layout.clone());
 
-        let (resize_tx, resize_rx) = std::sync::mpsc::channel::<(u32, u32)>();
+        let (msg_tx, msg_rx) = std::sync::mpsc::channel::<WindowMsg>();
         let render_shared = Arc::clone(&shared);
         let loop_ctl = Arc::clone(&render_ctl);
+        // The render-side router commits reorders straight into the persisted layout, so the loop
+        // needs the EditorState (it only had `shared` before).
+        let render_state = Arc::clone(&params.editor_state);
         let handle = std::thread::Builder::new()
             .name("nanometers-render".into())
             .spawn(move || {
@@ -365,14 +394,16 @@ impl RenderWindow {
                     modules,
                     layout,
                     render_shared,
+                    render_state,
                     loop_ctl,
-                    resize_rx,
+                    msg_rx,
+                    scale_factor,
                 );
             })
             .expect("spawn nanometers render thread");
         *render_ctl.join.lock().unwrap() = Some(handle);
 
-        Self { params, resize_tx }
+        Self { params, msg_tx }
     }
 }
 
@@ -387,14 +418,21 @@ fn run_render_loop(
     surface: wgpu::Surface<'static>,
     mut surface_config: wgpu::SurfaceConfiguration,
     mut modules: Vec<Box<dyn Module + Send>>,
-    layout: Vec<Column>,
+    mut layout: Vec<Column>,
     shared: Arc<Shared>,
+    state: Arc<EditorState>,
     ctl: Arc<RenderControl>,
-    resize_rx: Receiver<(u32, u32)>,
+    msg_rx: Receiver<WindowMsg>,
+    initial_scale: f32,
 ) {
     /// Frame-interval clamp handed to Modules: the first iteration and every post-occlusion-sleep
     /// iteration have a large real interval; cap it so a Module integrating `dt` can't lurch.
     const MAX_FRAME_DT: f64 = 0.1;
+
+    // Display backing scale. Seeded from the host/window scale (right for plugins, where no Resized
+    // may fire if it already matches the backing) and updated by resize events (the standalone opens
+    // claiming 1.0, then a Resized corrects it to the panel's real 2.0 once the backing settles).
+    let mut scale_factor = initial_scale;
 
     let mut new_samples: Vec<StereoFrame> = Vec::with_capacity(4096);
     // Cadence diagnostics now measure the PRESENT interval (this loop presents once per iteration),
@@ -404,18 +442,43 @@ fn run_render_loop(
         ..Default::default()
     };
     let mut last = Instant::now();
+    // Host-owned pointer-grab state (ADR 0004, amended: render-side). Transient — never persisted.
+    let mut router = crate::input::Router::new();
 
     while !ctl.stop.load(Ordering::Relaxed) {
-        // Apply the latest pending resize (host → main thread → here); the render thread owns the
-        // surface, so reconfiguration must happen here.
-        let mut new_size = None;
-        while let Ok(sz) = resize_rx.try_recv() {
-            new_size = Some(sz);
+        // Drain the message channel (host → main thread → here): coalesce resizes (only the latest
+        // size matters), buffer input events in order (the router can't miss a press/release). The
+        // render thread owns the surface, so resize reconfiguration happens here.
+        let mut pending_resize = None;
+        let mut inputs: Vec<baseview::Event> = Vec::new();
+        while let Ok(msg) = msg_rx.try_recv() {
+            match msg {
+                WindowMsg::Resize { w, h, scale } => pending_resize = Some((w, h, scale)),
+                WindowMsg::Input(ev) => inputs.push(ev),
+            }
         }
-        if let Some((w, h)) = new_size {
+        if let Some((w, h, scale)) = pending_resize {
             surface_config.width = w.max(1);
             surface_config.height = h.max(1);
             surface.configure(&device, &surface_config);
+            scale_factor = scale;
+        }
+        // Run the pointer-grab router over this batch of input (after the resize, so it hit-tests
+        // against the current surface). Hit-testing uses the STABLE committed viewports — the swap
+        // points stay put under the cursor even as the strip reflows. A reorder commit returns the
+        // new order (modules already permuted to match); adopt + persist it.
+        let committed_vps = viewports(
+            &layout,
+            surface_config.width as f32,
+            surface_config.height as f32,
+            scale_factor,
+        );
+        for ev in &inputs {
+            if let Some(new) = router.handle(ev, &layout, &committed_vps, &mut modules, scale_factor)
+            {
+                state.set_layout(new.clone());
+                layout = new;
+            }
         }
 
         let now = Instant::now();
@@ -490,16 +553,32 @@ fn run_render_loop(
             label: Some("nanometers-encoder"),
         });
 
-        // Per-column viewports tiling the surface (ADR 0003), one Rect per Module in order.
-        let viewports = viewports(
-            &layout,
+        // Per-column viewports tiling the surface (ADR 0003), remapped to MODULE order. While a
+        // reorder drags, the strip re-tiles from the router's provisional order (live-reflow); the
+        // modules Vec stays in committed order, so each module's viewport is looked up by its
+        // instance_id. No drag → the active order IS the committed layout, so this is identity.
+        let active: &[Column] = router.provisional().unwrap_or(&layout);
+        let active_vps = viewports(
+            active,
             surface_config.width as f32,
             surface_config.height as f32,
+            scale_factor,
         );
+        let viewports: Vec<Rect> = layout
+            .iter()
+            .map(|c| {
+                let j = active
+                    .iter()
+                    .position(|a| a.instance_id == c.instance_id)
+                    .expect("every committed column has a place in the active order");
+                active_vps[j]
+            })
+            .collect();
 
-        // Phase 2a: each Module encodes its own offscreen passes before the shared pass opens.
+        // Phase 2a: each Module encodes its own offscreen passes / per-frame uploads before the
+        // shared pass opens. `scale_factor` rides along so logical-px sizing lands right on Retina.
         for (m, vp) in modules.iter_mut().zip(viewports.iter()) {
-            m.prepare(&device, &queue, &mut encoder, *vp);
+            m.prepare(&device, &queue, &mut encoder, *vp, scale_factor);
         }
 
         // Phase 2b: one shared single-sample pass; each Module draws into its column (host sets the
@@ -546,17 +625,31 @@ impl baseview::WindowHandler for RenderWindow {
         _window: &mut baseview::Window,
         event: baseview::Event,
     ) -> baseview::EventStatus {
-        if let baseview::Event::Window(baseview::WindowEvent::Resized(info)) = &event {
-            self.params.editor_state.size.store((
-                info.logical_size().width.round() as u32,
-                info.logical_size().height.round() as u32,
-            ));
-            // The render thread owns the surface; hand it the new physical size to reconfigure.
-            let _ = self
-                .resize_tx
-                .send((info.physical_size().width, info.physical_size().height));
+        match &event {
+            baseview::Event::Window(baseview::WindowEvent::Resized(info)) => {
+                self.params.editor_state.size.store((
+                    info.logical_size().width.round() as u32,
+                    info.logical_size().height.round() as u32,
+                ));
+                // The render thread owns the surface; hand it the new physical size + display scale.
+                let _ = self.msg_tx.send(WindowMsg::Resize {
+                    w: info.physical_size().width,
+                    h: info.physical_size().height,
+                    scale: info.scale() as f32,
+                });
+                baseview::EventStatus::Captured
+            }
+            // Pass keyboard back to the host: baseview only honors Captured/Ignored for keyboard, and
+            // a DAW expects transport shortcuts (spacebar, etc.) to work while our window is focused.
+            // We render no param GUI, so we have no keyboard use of our own.
+            baseview::Event::Keyboard(_) => baseview::EventStatus::Ignored,
+            // Pointer (and the rest): forward to the render-side router (ADR 0004, amended) and
+            // capture — these are ours to interpret (reorder, reset, hover).
+            _ => {
+                let _ = self.msg_tx.send(WindowMsg::Input(event.clone()));
+                baseview::EventStatus::Captured
+            }
         }
-        baseview::EventStatus::Captured
     }
 }
 
@@ -683,7 +776,9 @@ mod tests {
         let original = EditorState::from_defaults((720, 420));
         original.set_layout(vec![
             column_with_config(7, module_type::WAVEFORM, 0.6, vec![9, 8, 7]),
-            column_with_config(9, module_type::LOUDNESS, 0.4, vec![]),
+            // The shape real persisted state carries since fixed columns landed — the pinned width
+            // must survive the round trip too, not just the flex fields.
+            Column::fixed(9, module_type::LOUDNESS, 151.0),
         ]);
 
         let json = serde_json::to_string(&*original).unwrap();
@@ -699,5 +794,6 @@ mod tests {
         assert_eq!(l[0].width_fraction, 0.6);
         assert_eq!(l[0].config, vec![9, 8, 7]);
         assert_eq!(l[1].module_type, module_type::LOUDNESS);
+        assert_eq!(l[1].fixed_width_px, Some(151.0));
     }
 }
