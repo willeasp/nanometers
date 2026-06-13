@@ -292,6 +292,24 @@ fn build_module(
     }
 }
 
+/// Push each column's persisted opaque config (ADR 0003) into its freshly-built Module. Called at
+/// editor spawn AFTER `build_module` — modules + layout are 1:1 by position. A module treats
+/// unrecognized/empty bytes as defaults, so this is always safe (including the default empty config).
+fn load_configs(modules: &mut [Box<dyn Module + Send>], layout: &[Column]) {
+    for (m, c) in modules.iter_mut().zip(layout.iter()) {
+        m.load_config(&c.config);
+    }
+}
+
+/// Flush each live Module's config back into its column's opaque bytes. Called after an input batch
+/// (the only time config can change), so a host-triggered persist — whenever it lands — sees fresh
+/// bytes instead of the stale empty default. Without this, config never round-trips (the F1 bug).
+fn flush_configs(modules: &[Box<dyn Module + Send>], layout: &mut [Column]) {
+    for (m, c) in modules.iter().zip(layout.iter_mut()) {
+        c.config = m.save_config();
+    }
+}
+
 impl RenderWindow {
     fn new(
         window: &mut baseview::Window<'_>,
@@ -366,10 +384,13 @@ impl RenderWindow {
 
         // Build the Module strip from the persisted layout (ADR 0003), 1:1 with the columns.
         let mut layout = params.editor_state.layout_snapshot();
-        let modules: Vec<Box<dyn Module + Send>> = layout
+        let mut modules: Vec<Box<dyn Module + Send>> = layout
             .iter()
             .map(|c| build_module(&c.module_type, &device, surface_config.format))
             .collect();
+        // Restore each module's persisted per-instance config from its column bytes (ADR 0003).
+        // Without this the bytes round-trip through serde but never reach the module — config lost.
+        load_configs(&mut modules, &layout);
         // Re-pin intrinsically-sized columns from the LIVE modules — persisted widths can be stale
         // (a layout-knob edit since the save) or missing (legacy flex layouts); the module is the
         // source of truth (ADR 0003, amended). Written back so re-saves carry the corrected widths.
@@ -473,12 +494,31 @@ fn run_render_loop(
             surface_config.height as f32,
             scale_factor,
         );
+        let mut layout_dirty = false;
         for ev in &inputs {
             if let Some(new) = router.handle(ev, &layout, &committed_vps, &mut modules, scale_factor)
             {
-                state.set_layout(new.clone());
                 layout = new;
+                layout_dirty = true;
             }
+        }
+        // Persist when something durable changed: a committed reorder, or a discrete press/release/
+        // scroll that a module may have turned into a config change (the only way config mutates).
+        // Pure cursor-move batches (hover / drag-tracking) publish nothing — no lock on the idle/
+        // hover path. The single publish carries both the reorder AND the flushed config (ADR 0003).
+        let discrete = inputs.iter().any(|e| {
+            matches!(
+                e,
+                baseview::Event::Mouse(
+                    baseview::MouseEvent::ButtonPressed { .. }
+                        | baseview::MouseEvent::ButtonReleased { .. }
+                        | baseview::MouseEvent::WheelScrolled { .. }
+                )
+            )
+        });
+        if layout_dirty || discrete {
+            flush_configs(&modules, &mut layout);
+            state.set_layout(layout.clone());
         }
 
         let now = Instant::now();
@@ -795,5 +835,45 @@ mod tests {
         assert_eq!(l[0].config, vec![9, 8, 7]);
         assert_eq!(l[1].module_type, module_type::LOUDNESS);
         assert_eq!(l[1].fixed_width_px, Some(151.0));
+    }
+
+    /// A Module with no GPU state — `load_configs`/`flush_configs` only touch save/load_config, never
+    /// render, so this is constructible in a unit test (render/update are unreachable no-ops here).
+    struct FakeModule {
+        config: Vec<u8>,
+    }
+    impl Module for FakeModule {
+        fn update(&mut self, _c: &FrameContext, _q: &wgpu::Queue) {}
+        fn render(&mut self, _r: &mut wgpu::RenderPass, _v: Rect) {}
+        fn on_event(&mut self, _e: &baseview::Event, _v: Rect) -> crate::module::EventStatus {
+            crate::module::EventStatus::Ignored
+        }
+        fn save_config(&self) -> Vec<u8> {
+            self.config.clone()
+        }
+        fn load_config(&mut self, bytes: &[u8]) {
+            self.config = bytes.to_vec();
+        }
+    }
+
+    #[test]
+    fn configs_load_into_modules_then_flush_back_into_columns() {
+        let mut layout = vec![
+            column_with_config(7, module_type::WAVEFORM, 0.5, b"persisted-A".to_vec()),
+            column_with_config(9, module_type::LOUDNESS, 0.5, b"persisted-B".to_vec()),
+        ];
+        let mut modules: Vec<Box<dyn Module + Send>> = vec![
+            Box::new(FakeModule { config: Vec::new() }),
+            Box::new(FakeModule { config: Vec::new() }),
+        ];
+        // LOAD: the persisted bytes reach the modules (1:1 by position).
+        load_configs(&mut modules, &layout);
+        assert_eq!(modules[0].save_config(), b"persisted-A");
+        assert_eq!(modules[1].save_config(), b"persisted-B");
+        // A live config change, then FLUSH: the new bytes land back in the columns.
+        modules[0].load_config(b"changed-A");
+        flush_configs(&modules, &mut layout);
+        assert_eq!(layout[0].config, b"changed-A");
+        assert_eq!(layout[1].config, b"persisted-B");
     }
 }
