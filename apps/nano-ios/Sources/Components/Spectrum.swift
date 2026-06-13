@@ -75,6 +75,14 @@ final class SpectrumAnalyzer {
     private var smoothed = [Float](repeating: 0.04, count: binCount)
     private let edges: [Int]            // log-spaced FFT-bin boundaries, binCount+1 of them
 
+    // Work buffers, allocated ONCE and reused every frame — `process` runs per display tick (60 Hz)
+    // now that the meter animates, so per-call allocations would churn ~1 MB/s for nothing.
+    private var monoBuf = [Float](repeating: 0, count: fftSize)
+    private var realBuf = [Float](repeating: 0, count: fftSize / 2)
+    private var imagBuf = [Float](repeating: 0, count: fftSize / 2)
+    private var magsBuf = [Float](repeating: 0, count: fftSize / 2)
+    private var target  = [Float](repeating: 0.04, count: binCount)
+
     init() {
         log2n = vDSP_Length(log2(Double(Self.fftSize)))
         setup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2))!
@@ -95,34 +103,31 @@ final class SpectrumAnalyzer {
     /// 72 smoothed magnitudes (0…1). Not live / too few samples → decays toward the floor.
     func process(l: [Float], r: [Float], live: Bool) -> [Float] {
         let floorV: Float = 0.04
-        var target = [Float](repeating: floorV, count: Self.binCount)
+        for i in 0..<Self.binCount { target[i] = floorV }
         let n = min(l.count, r.count)
         if live && n >= Self.fftSize {
             let half = Self.fftSize / 2
-            var mono = [Float](repeating: 0, count: Self.fftSize)
             let start = n - Self.fftSize
-            for i in 0..<Self.fftSize { mono[i] = (l[start + i] + r[start + i]) * 0.5 }
-            vDSP_vmul(mono, 1, window, 1, &mono, 1, vDSP_Length(Self.fftSize))
+            // (L+R)/2 with the Hann window folded into the same pass (avoids an in-place vDSP_vmul on
+            // the reused buffer — same result as multiplying afterwards).
+            for i in 0..<Self.fftSize { monoBuf[i] = (l[start + i] + r[start + i]) * 0.5 * window[i] }
 
-            var real = [Float](repeating: 0, count: half)
-            var imag = [Float](repeating: 0, count: half)
-            var mags = [Float](repeating: 0, count: half)
-            real.withUnsafeMutableBufferPointer { rp in
-                imag.withUnsafeMutableBufferPointer { ip in
+            realBuf.withUnsafeMutableBufferPointer { rp in
+                imagBuf.withUnsafeMutableBufferPointer { ip in
                     var split = DSPSplitComplex(realp: rp.baseAddress!, imagp: ip.baseAddress!)
-                    mono.withUnsafeBytes { raw in
+                    monoBuf.withUnsafeBytes { raw in
                         let cplx = raw.bindMemory(to: DSPComplex.self)
                         vDSP_ctoz(cplx.baseAddress!, 2, &split, 1, vDSP_Length(half))
                     }
                     vDSP_fft_zrip(setup, &split, 1, log2n, FFTDirection(FFT_FORWARD))
-                    vDSP_zvabs(&split, 1, &mags, 1, vDSP_Length(half))
+                    vDSP_zvabs(&split, 1, &magsBuf, 1, vDSP_Length(half))
                 }
             }
             let scale = 1.0 / Float(Self.fftSize)
             for b in 0..<Self.binCount {
                 let lo = edges[b], hi = max(edges[b] + 1, edges[b + 1])
                 var sum: Float = 0, cnt: Float = 0
-                for k in lo..<min(half, hi) { sum += mags[k]; cnt += 1 }
+                for k in lo..<min(half, hi) { sum += magsBuf[k]; cnt += 1 }
                 let avg = cnt > 0 ? (sum / cnt) * scale : 0
                 let db = 20 * log10(max(avg, 1e-7))           // ~ -140…0 dB
                 target[b] = max(floorV, min(1, (db + 75) / 65))   // map ≈ -75…-10 dB → 0…1 (visual)
