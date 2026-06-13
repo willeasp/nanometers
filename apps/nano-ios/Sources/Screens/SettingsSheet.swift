@@ -1,28 +1,27 @@
 import SwiftUI
 
-/// App settings (handoff §03 §6 / §02). The "Waveform Display" toggles are the SINGLE source of
-/// truth for what Now Playing renders — there are no equivalent controls on the player. Persisted
-/// app-wide via @AppStorage. Frequency coloring is disabled when both waveforms are off.
+/// Now Playing → ⚙ → Settings → Analysis (handoff §06E). These controls are the single source of
+/// truth for the close-up coloring, its window, and whether the overview scrubber shows. Persisted
+/// app-wide via @AppStorage; the module selection itself lives on the player's icon switcher.
 struct SettingsSheet: View {
-    @AppStorage("zoomWave") private var zoomWave = false      // Close-up (Phase 5 surface; off in v1)
-    @AppStorage("showWave") private var showWave = true       // Track overview
-    @AppStorage("spectrum") private var spectrum = false      // Frequency coloring
+    @AppStorage("spectrum") private var spectrum = true        // frequency coloring (close-up only)
+    @AppStorage("scopeWindow") private var scopeWindow = 4     // close-up window seconds (3/4/5)
+    @AppStorage("showWave") private var showWave = true        // track overview scrubber vs plain bar
     @Environment(\.dismiss) private var dismiss
-
-    private var bothOff: Bool { !zoomWave && !showWave }
 
     var body: some View {
         NavigationStack {
             Form {
                 Section {
-                    settingsToggle("waveform.path", "Close-up (DJ scroll)", "Zoomed, scrolling waveform", $zoomWave)
-                    settingsToggle("waveform", "Track overview", "Full-song scrubber", $showWave)
-                    settingsToggle("paintpalette", "Frequency coloring", "Red bass · green mids · blue treble", $spectrum)
-                        .disabled(bothOff).opacity(bothOff ? 0.4 : 1)
+                    settingsToggle("paintpalette", "Frequency coloring",
+                                   "Close-up: red bass · green mids · blue treble", $spectrum)
+                    windowRow
+                    settingsToggle("waveform", "Track overview scrubber",
+                                   "Whole-song waveform seek bar", $showWave)
                 } header: {
-                    Text("Waveform Display")
+                    Text("Analysis")
                 } footer: {
-                    Text("Close-up is a zoomed, scrolling waveform that scrolls past a fixed playhead; Track overview is the full-song scrubber.")
+                    Text("Tap the meter icons in the player to switch between close-up, goniometer and spectrum — show one or several at once.")
                 }
             }
             .tint(Theme.accent)
@@ -31,6 +30,25 @@ struct SettingsSheet: View {
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
         }
         .preferredColorScheme(.dark)
+    }
+
+    /// Close-up window: title/sub + a segmented 3s/4s/5s control (mono labels), §06E.
+    private var windowRow: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 12) {
+                Image(systemName: "timer").font(.system(size: 20)).foregroundStyle(Theme.accent).frame(width: 24)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Close-up window").font(Theme.sans(16, .medium)).foregroundStyle(Theme.text)
+                    Text("Seconds across the scope").font(Theme.sans(12.5)).foregroundStyle(Theme.text3)
+                }
+            }
+            Picker("Close-up window", selection: $scopeWindow) {
+                Text("3s").tag(3); Text("4s").tag(4); Text("5s").tag(5)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .accessibilityIdentifier("scopeWindowPicker")
+        }
     }
 
     /// SettingsRow (§02): [accent icon 20] [title 16/500 + sub 12.5/text3] [iOS switch].

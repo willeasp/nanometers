@@ -72,9 +72,13 @@ struct NowPlayingScreen: View {
         .sheet(isPresented: $showQueue) { QueueSheet() }
         .sheet(isPresented: $showSettings) { SettingsSheet() }
         #if DEBUG
-        .onAppear {   // headless screenshot hook: `-flipAnalysis` shows the B-side without a tap
-            if ProcessInfo.processInfo.arguments.contains("-flipAnalysis") {
+        .onAppear {   // headless screenshot hooks (no tap): -flipAnalysis shows the B-side, -openSettings the sheet
+            let args = ProcessInfo.processInfo.arguments
+            if args.contains("-flipAnalysis") {
                 Task { @MainActor in try? await Task.sleep(for: .seconds(1.4)); flipped = true }
+            }
+            if args.contains("-openSettings") {
+                Task { @MainActor in try? await Task.sleep(for: .seconds(1.4)); showSettings = true }
             }
         }
         #endif
