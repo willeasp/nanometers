@@ -246,7 +246,8 @@ struct NowPlayingScreen: View {
         .scaleEffect(reduceMotion ? 1 : (engine.isPlaying ? 1 : 0.86))   // §motion: paused artwork shrinks to 0.86
         .animation(reduceMotion ? nil : .spring(response: 0.5, dampingFraction: 0.86), value: engine.isPlaying)
         .frame(maxHeight: .infinity)                  // claim the leftover space; the art centers + caps within it
-        .shadow(color: .black.opacity(0.45), radius: 30, y: 10)
+        .shadow(color: .black.opacity(0.45), radius: 15, y: 10)   // §01: 0 10 30 @.45 (radius ≈ CSS blur/2)
+        .shadow(color: .black.opacity(0.3), radius: 4, y: 2)      // + the tight contact shadow (0 2 8 @.3)
     }
 
     @ViewBuilder private var bottomRail: some View {

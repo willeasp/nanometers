@@ -84,7 +84,7 @@ struct MiniPlayer: View {
         }
         .overlay(alignment: .bottom) { progressBar }
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .shadow(color: .black.opacity(0.4), radius: 18, y: 8)
+        .shadow(color: .black.opacity(0.4), radius: 12, y: 6)   // §01: 0 6 24 @.4 (radius ≈ CSS blur/2)
         .task(id: track.persistentModelID) {
             bins = await WaveformStore.shared.bins(for: track) ?? []
         }
