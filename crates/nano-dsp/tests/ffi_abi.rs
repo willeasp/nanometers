@@ -68,6 +68,27 @@ fn analyze_stereo_fills_normalized_envelopes() {
 }
 
 #[test]
+fn analyze_stereo_survives_non_finite_input() {
+    const SR: f32 = 48_000.0;
+    let mut l = tone(SR, 1.0);
+    let mut r = tone(SR, 1.0);
+    l[100] = f32::NAN;
+    r[200] = f32::INFINITY;
+    l[300] = f32::NEG_INFINITY;
+    let n_bins = 100usize;
+    let mut out =
+        vec![NanoStereoBin { l_min: 9.0, l_max: 9.0, r_min: 9.0, r_max: 9.0, r: -1.0, g: -1.0, b: -1.0 }; n_bins];
+    let rc =
+        unsafe { nano_dsp_analyze_stereo(l.as_ptr(), r.as_ptr(), l.len(), SR, n_bins, out.as_mut_ptr()) };
+    assert_eq!(rc, 0, "non-finite input must be sanitized, not rejected or panicked");
+    assert!(
+        out.iter().all(|b| b.l_min.is_finite() && b.l_max.is_finite() && b.r_min.is_finite()
+            && b.r_max.is_finite() && b.r.is_finite() && b.g.is_finite() && b.b.is_finite()),
+        "all fields finite"
+    );
+}
+
+#[test]
 fn analyze_stereo_rejects_null_and_zero_args() {
     let mut out = vec![NanoStereoBin { l_min: 0.0, l_max: 0.0, r_min: 0.0, r_max: 0.0, r: 0.0, g: 0.0, b: 0.0 }; 4];
     assert_eq!(

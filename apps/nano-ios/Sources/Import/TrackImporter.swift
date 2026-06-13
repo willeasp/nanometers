@@ -1,6 +1,7 @@
 import Foundation
 import SwiftData
 import AVFoundation
+import AudioToolbox
 import UniformTypeIdentifiers
 
 /// Turns picked file URLs into `Track` rows: resolves a security-scoped bookmark, reads best-effort
@@ -46,13 +47,33 @@ enum TrackImporter {
 
     private struct Meta { var title: String; var artist: String; var album: String; var duration: Double; var artwork: Data? }
 
-    /// Real sample rate (as a kHz string, e.g. "96" / "44.1") + PCM bit depth from the decoder.
-    /// Best-effort: a non-audio file (tests) yields ("", nil); lossy files report 0 bits → nil.
+    /// Real sample rate (as a kHz string, e.g. "96" / "44.1") + source PCM bit depth.
+    /// Best-effort: a non-audio file (tests) yields ("", nil); lossy files (MP3/AAC) have no source
+    /// bit depth → nil. The on-disk ASBD reports `mBitsPerChannel` only for linear PCM (WAV/AIFF); for
+    /// compressed-lossless (FLAC/ALAC) it's 0, so we query `kAudioFilePropertySourceBitDepth` via the
+    /// AudioFile API — that's where the FLAC "24" actually lives (Phase A review finding).
     private static func audioFormat(_ url: URL) -> (rate: String, bits: Int?) {
         guard let af = try? AVAudioFile(forReading: url) else { return ("", nil) }
         let asbd = af.fileFormat.streamDescription.pointee
-        let bits = Int(asbd.mBitsPerChannel)
-        return (khz(asbd.mSampleRate), bits > 0 ? bits : nil)
+        let rate = khz(asbd.mSampleRate)
+        let pcmBits = Int(asbd.mBitsPerChannel)
+        if pcmBits > 0 { return (rate, pcmBits) }     // linear PCM (WAV/AIFF)
+        return (rate, sourceBitDepth(url))            // compressed: FLAC/ALAC source depth, else nil
+    }
+
+    /// `kAudioFilePropertySourceBitDepth` (AudioFile API): the source bit depth even for compressed
+    /// containers. Positive = integer PCM bits; negative = floating-point (report its magnitude); the
+    /// property is absent for truly lossy sources → nil.
+    private static func sourceBitDepth(_ url: URL) -> Int? {
+        var fileID: AudioFileID?
+        guard AudioFileOpenURL(url as CFURL, .readPermission, 0, &fileID) == noErr, let fid = fileID else { return nil }
+        defer { AudioFileClose(fid) }
+        var depth: Int32 = 0
+        var size = UInt32(MemoryLayout<Int32>.size)
+        guard AudioFileGetProperty(fid, kAudioFilePropertySourceBitDepth, &size, &depth) == noErr, depth != 0 else {
+            return nil
+        }
+        return Int(abs(depth))
     }
 
     private static func khz(_ sr: Double) -> String {
