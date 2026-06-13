@@ -39,15 +39,21 @@ final class LiveLUFSMeter: @unchecked Sendable {
         var handle: OpaquePointer?        // NanoMeter* (opaque)
         var rate: Double = 0
         var resetPending = false
+        var shortTerm: Double?            // latest short-term LUFS, stashed for the 20 Hz UI ticker
+        var level: Float = 0              // latest tap RMS, same stash — decouples the UI from the audio rate
     }
     private let lock = OSAllocatedUnfairLock(uncheckedState: State())
 
     /// Drop the 3 s history on the next `feed` (call on track change / seek). Cheap; any thread.
-    func requestReset() { lock.withLock { $0.resetPending = true } }
+    func requestReset() { lock.withLock { $0.resetPending = true; $0.shortTerm = nil; $0.level = 0 } }
 
-    /// Interleave planar L/R, push, and read short-term LUFS. Called on the audio tap thread.
-    /// Recreates the handle when the sample rate changes or a reset is pending. nil = no reading.
-    func feed(left: UnsafePointer<Float>, right: UnsafePointer<Float>, frames: Int, sampleRate: Double) -> Double? {
+    /// Interleave planar L/R, push, read short-term LUFS, and stash it (plus the tap `level`) for the UI
+    /// ticker. Called on the audio tap thread, so it must NOT hop to the main actor — it only updates the
+    /// lock-guarded stash; `snapshot()` is how the main actor reads it. Recreates the handle when the
+    /// sample rate changes or a reset is pending. Returns / stashes nil = no reading.
+    @discardableResult
+    func feed(left: UnsafePointer<Float>, right: UnsafePointer<Float>, frames: Int, sampleRate: Double,
+              level: Float = 0) -> Double? {
         guard frames > 0 else { return nil }
         // Interleave OUTSIDE the lock into a `let` array (Sendable): `withLock`'s body is @Sendable and
         // cannot capture the raw L/R pointers (a warning in the project's Swift 5.10 mode, a hard error
@@ -65,15 +71,23 @@ final class LiveLUFSMeter: @unchecked Sendable {
                 st.rate = sampleRate
                 st.resetPending = false
             }
-            guard let h = st.handle else { return nil }
+            guard let h = st.handle else { st.shortTerm = nil; st.level = level; return nil }
             interleaved.withUnsafeBufferPointer { nano_meter_push(h, $0.baseAddress, frames) }
             let v = nano_meter_short_term(h)
-            return v.isFinite ? v : nil
+            let s = v.isFinite ? v : nil
+            st.shortTerm = s
+            st.level = level
+            return s
         }
     }
 
+    /// Latest stashed readings for the main-actor UI ticker (RMS `level` + short-term `shortTerm`).
+    /// Decouples the badge/meter from the audio-callback rate: the tap stashes ~47×/s, the ticker reads
+    /// this at 20 Hz, so Now Playing invalidates at 20 Hz instead of starving the close-up's TimelineView.
+    func snapshot() -> (level: Float, shortTerm: Double?) { lock.withLock { ($0.level, $0.shortTerm) } }
+
     /// Free the handle (call when playback stops entirely).
-    func stop() { lock.withLock { st in if let h = st.handle { nano_meter_free(h) }; st.handle = nil; st.rate = 0 } }
+    func stop() { lock.withLock { st in if let h = st.handle { nano_meter_free(h) }; st.handle = nil; st.rate = 0; st.shortTerm = nil; st.level = 0 } }
 
     deinit { lock.withLock { st in if let h = st.handle { nano_meter_free(h) } } }
 }

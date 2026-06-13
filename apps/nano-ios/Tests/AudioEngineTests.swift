@@ -69,6 +69,30 @@ final class AudioEngineTests: XCTestCase {
         XCTAssertGreaterThan(engine.centerTime, 0.3, "centerTime should advance with the sample clock")
     }
 
+    /// Regression: pausing must NOT snap `centerTime` back to the last segment start. The close-up
+    /// reads `centerTime` live each frame; before the fix, a paused read fell back to `seekOffsetFrames`
+    /// (the scrub point ⇒ ~0 here) and the waveform jumped. It must hold at the play position.
+    func test_centerTimeHoldsAcrossPause() async throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Tone_\(UUID().uuidString).wav")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try Self.writeSine(to: url, seconds: 5.0, frequency: 440)
+
+        let track = Track(title: "Tone", artist: "", album: "", bookmark: try url.bookmarkData())
+        let engine = AudioEngine()
+        engine.play(track, in: [track], context: .library)
+
+        try await Task.sleep(nanoseconds: 800_000_000)
+        let playing = engine.centerTime
+        XCTAssertGreaterThan(playing, 0.3, "centerTime should advance while playing, got \(playing)")
+
+        engine.toggle()                                   // pause
+        try await Task.sleep(nanoseconds: 300_000_000)
+        let paused = engine.centerTime
+        XCTAssertEqual(paused, playing, accuracy: 0.1,
+                       "centerTime should hold across pause, not snap back (paused \(paused) vs playing \(playing))")
+    }
+
     func test_setVolumeClampsToUnitRange() {
         let engine = AudioEngine()
         engine.setVolume(0.5);  XCTAssertEqual(engine.volume, 0.5, accuracy: 1e-6)

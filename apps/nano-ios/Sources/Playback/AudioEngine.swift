@@ -47,6 +47,7 @@ final class AudioEngine {
     private var sampleRate: Double = 44_100
     private var totalFrames: AVAudioFramePosition = 0
     private var seekOffsetFrames: AVAudioFramePosition = 0
+    private var lastKnownFrame: AVAudioFramePosition = 0    // held position for reads while paused (see currentFrame)
     private var scheduleToken = 0            // invalidates stale completion callbacks
     private var ticker: Timer?
     // Written once in `configureRemoteCommands` (init), read once in `deinit` — no concurrent
@@ -61,23 +62,22 @@ final class AudioEngine {
         configureRemoteCommands()            // Task 10
     }
 
-    /// Tap the main mixer and publish the rendered signal's RMS as `outputLevel` (real audio
-    /// flowing ⇒ > 0). The tap lives and dies with this engine instance — no global state to clean.
+    /// Tap the main mixer and feed the live meter (RMS level + short-term LUFS). The tap runs on the
+    /// audio render thread, so it must not allocate a `Task` or touch the main actor per callback — it
+    /// only stashes the readings into `liveMeter` (lock-guarded). The 20 Hz `updateProgress` ticker
+    /// publishes them to the observable `outputLevel` / `shortTermLUFS`, so the UI invalidates at 20 Hz,
+    /// not the tap's ~47 Hz — which is what was starving the close-up's TimelineView. The tap lives and
+    /// dies with this engine instance (no self capture, no global state to clean).
     private func installOutputMeter() {
         let meter = liveMeter        // capture the off-main, lock-guarded handle for the tap thread
-        engine.mainMixerNode.installTap(onBus: 0, bufferSize: 1024, format: nil) { [weak self] buffer, _ in
+        engine.mainMixerNode.installTap(onBus: 0, bufferSize: 1024, format: nil) { buffer, _ in
             guard let data = buffer.floatChannelData, buffer.frameLength > 0 else { return }
             let frames = Int(buffer.frameLength)
             var rms: Float = 0
             vDSP_rmsqv(data[0], 1, &rms, vDSP_Length(frames))
             let stereo = buffer.format.channelCount > 1
-            let s = meter.feed(left: data[0], right: stereo ? data[1] : data[0],
-                               frames: frames, sampleRate: buffer.format.sampleRate)
-            Task { @MainActor in
-                guard let self else { return }
-                self.outputLevel = rms
-                self.shortTermLUFS = self.isPlaying ? s : nil   // live ONLY while playing; blank otherwise
-            }
+            meter.feed(left: data[0], right: stereo ? data[1] : data[0],
+                       frames: frames, sampleRate: buffer.format.sampleRate, level: rms)
         }
     }
 
@@ -99,6 +99,7 @@ final class AudioEngine {
         guard current != nil, file != nil else { return }   // nothing loaded / unresolved file
         if isPlaying {
             player.pause(); isPlaying = false; stopTicker()
+            outputLevel = 0; shortTermLUFS = nil          // ticker stopped → clear the live meter explicitly
         } else {
             if !engine.isRunning { try? engine.start() }
             player.play(); isPlaying = true; startTicker()
@@ -119,7 +120,7 @@ final class AudioEngine {
         stopTicker()
         player.stop()
         releaseScope()
-        progress = 0; elapsed = 0; seekOffsetFrames = 0
+        progress = 0; elapsed = 0; seekOffsetFrames = 0; lastKnownFrame = 0; outputLevel = 0
         liveMeter.requestReset(); shortTermLUFS = nil          // drop stale 3 s window for the new track
 
         guard let url = resolveURL(track) else {
@@ -155,6 +156,7 @@ final class AudioEngine {
         scheduleToken &+= 1
         let token = scheduleToken
         seekOffsetFrames = startFrame
+        lastKnownFrame = startFrame          // hold this position if read while paused (no node clock yet)
         let remaining = AVAudioFrameCount(max(0, totalFrames - startFrame))
         guard remaining > 0 else { handlePlaybackEnded(token: token); return }
         player.scheduleSegment(f, startingFrame: startFrame, frameCount: remaining, at: nil,
@@ -188,10 +190,17 @@ final class AudioEngine {
 
     // MARK: Progress (sample time)
 
+    /// Best-known sample position, held across pause. The node clock is only readable while the player
+    /// is actually rendering; the instant we pause, `playerTime(forNodeTime:)` returns nil. Falling back
+    /// to `seekOffsetFrames` (the last segment start) snapped the position back to the last scrub point —
+    /// which the close-up, reading `centerTime` live each frame, showed as a jump on pause. So cache every
+    /// valid read and return it when the clock is gone. `lastKnownFrame` is also set wherever we set a
+    /// known position (load / seek / end-of-queue) so a paused scrub still reads correctly.
     private var currentFrame: AVAudioFramePosition {
         guard let nodeTime = player.lastRenderTime,
-              let playerTime = player.playerTime(forNodeTime: nodeTime) else { return seekOffsetFrames }
-        return seekOffsetFrames + playerTime.sampleTime
+              let playerTime = player.playerTime(forNodeTime: nodeTime) else { return lastKnownFrame }
+        lastKnownFrame = seekOffsetFrames + playerTime.sampleTime
+        return lastKnownFrame
     }
 
     /// Sample-accurate playback position in seconds — the close-up's `centerTime`. Reads the player
@@ -201,6 +210,12 @@ final class AudioEngine {
     func updateProgress() {
         progress = PlaybackMath.fraction(frame: currentFrame, total: totalFrames)
         elapsed = sampleRate > 0 ? Double(currentFrame) / sampleRate : 0
+        // Publish the live meter at the ticker's 20 Hz (not the tap's ~47 Hz) so the LUFS badge doesn't
+        // invalidate Now Playing every audio callback and starve the close-up's TimelineView. The ticker
+        // only runs while playing, so this is inherently "live only while playing"; pause/stop clear it.
+        let m = liveMeter.snapshot()
+        outputLevel = m.level
+        shortTermLUFS = m.shortTerm
         // The lock-screen position is anchored at play/pause/seek/track-change (iOS extrapolates
         // from rate + elapsed), so there's no need to re-push now-playing info every tick.
     }
@@ -228,7 +243,7 @@ final class AudioEngine {
             loadAndStart(t)
         } else {                       // end of queue, repeat off → stop
             player.stop(); stopTicker(); releaseScope()
-            isPlaying = false; progress = 0; elapsed = 0
+            isPlaying = false; progress = 0; elapsed = 0; lastKnownFrame = 0; outputLevel = 0
             liveMeter.stop(); shortTermLUFS = nil
             updateNowPlayingInfo()
         }
