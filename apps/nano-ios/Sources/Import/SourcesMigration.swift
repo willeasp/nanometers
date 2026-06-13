@@ -15,11 +15,11 @@ enum SourcesMigration {
 
         let source = Source(id: "local", kind: .local, state: .connected)
         ctx.insert(source)
-        let root = RootFolder(sourceId: "local", name: SourceKind.local.label)
+        let root = RootFolder(sourceId: "local", name: SourceKind.local.label, nodeId: localRootNodeId)
         ctx.insert(root)
 
         let existing = (try? LibraryStore.allTracks(ctx)) ?? []
-        let localTracks = existing.filter { $0.sourceKind == SourceKind.local.rawValue || $0.sourceId == nil }
+        let localTracks = existing.filter { $0.sourceKind == SourceKind.local.rawValue }
         for t in localTracks {
             t.sourceId = "local"
             t.folderId = localRootNodeId

@@ -9,15 +9,20 @@ final class RootFolder {
     var sourceId: String
     var name: String
     var providerFolderId: String?
+    /// The id of this root's browse `FolderNode`. Set for local roots (e.g. "local-root"); nil for
+    /// cloud roots that resolve via `providerFolderId` instead.
+    var nodeId: String?
     var bookmark: Data?
     var dateAdded: Date
 
     init(id: UUID = UUID(), sourceId: String, name: String,
-         providerFolderId: String? = nil, bookmark: Data? = nil, dateAdded: Date = .init()) {
+         providerFolderId: String? = nil, nodeId: String? = nil,
+         bookmark: Data? = nil, dateAdded: Date = .init()) {
         self.id = id
         self.sourceId = sourceId
         self.name = name
         self.providerFolderId = providerFolderId
+        self.nodeId = nodeId
         self.bookmark = bookmark
         self.dateAdded = dateAdded
     }
