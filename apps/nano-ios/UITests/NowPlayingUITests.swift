@@ -4,20 +4,53 @@ final class NowPlayingUITests: XCTestCase {
     override func setUp() { super.setUp(); continueAfterFailure = false }
 
     @MainActor
-    func test_settingsTrackOverviewTogglesScrubber() {
+    func test_settingsAnalysisGroupPresent() {
         let app = XCUIApplication()
         app.launch()
-        // Open Settings via the gear button.
+        // Open Settings via the Library gear.
         let gear = app.buttons["settingsButton"].firstMatch
         XCTAssertTrue(gear.waitForExistence(timeout: 5), "Settings gear button should exist")
         gear.tap()
-        // Assert all three toggle rows are present.
-        XCTAssertTrue(app.switches["Close-up (DJ scroll)"].waitForExistence(timeout: 5), "Close-up toggle should be in Settings")
-        XCTAssertTrue(app.switches["Track overview"].exists, "Track overview toggle should be in Settings")
-        XCTAssertTrue(app.switches["Frequency coloring"].exists, "Frequency coloring toggle should be in Settings")
+        // The Analysis group: two toggles + the close-up window segmented control.
+        XCTAssertTrue(app.switches["Frequency coloring"].waitForExistence(timeout: 5), "Frequency coloring toggle")
+        XCTAssertTrue(app.switches["Track overview scrubber"].exists, "Track overview scrubber toggle")
+        XCTAssertTrue(app.buttons["4s"].exists, "close-up window segmented control present")
         // Done dismisses the sheet.
         app.buttons["Done"].firstMatch.tap()
-        XCTAssertFalse(app.switches["Track overview"].waitForExistence(timeout: 3), "Settings sheet should dismiss after Done")
+        XCTAssertFalse(app.switches["Frequency coloring"].waitForExistence(timeout: 3), "Settings should dismiss after Done")
+    }
+
+    @MainActor
+    func test_nowPlayingGearOpensSettings() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-autoplay", "-expand"]
+        app.launch()
+        XCTAssertTrue(app.otherElements["nowPlaying"].waitForExistence(timeout: 8), "Now Playing should auto-open")
+        app.buttons["npSettings"].tap()
+        XCTAssertTrue(app.switches["Frequency coloring"].waitForExistence(timeout: 5),
+                      "the Now Playing gear opens the Analysis settings")
+        app.buttons["Done"].firstMatch.tap()
+    }
+
+    @MainActor
+    func test_moduleSwitcherTogglesAndKeepsOne() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-autoplay", "-expand", "-modules", "scope"]
+        app.launch()
+        XCTAssertTrue(app.otherElements["nowPlaying"].waitForExistence(timeout: 8), "Now Playing should auto-open")
+        app.descendants(matching: .any)["npArtwork"].tap()             // flip to the analysis B-side
+        XCTAssertTrue(app.otherElements["closeUpWaveform"].waitForExistence(timeout: 5), "scope is on by default")
+
+        let modScope = app.buttons["modScope"]
+        XCTAssertTrue(modScope.waitForExistence(timeout: 5), "module switcher should be present on the B-side")
+
+        // Min-one: tapping the only-on module is a no-op — the scope stays.
+        modScope.tap()
+        XCTAssertTrue(app.otherElements["closeUpWaveform"].exists, "min-one: the last module can't be turned off")
+
+        // Enabling the goniometer adds it.
+        app.buttons["modGonio"].tap()
+        XCTAssertTrue(app.otherElements["goniometer"].waitForExistence(timeout: 5), "goniometer appears when enabled")
     }
 
     @MainActor

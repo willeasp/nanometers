@@ -29,7 +29,8 @@ struct ModSwitch: View {
         .background(.ultraThinMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(.white.opacity(0.12), lineWidth: 0.5))
-        .accessibilityIdentifier("modSwitch")
+        // NB: no container accessibilityIdentifier here — it would propagate down and clobber the
+        // per-button modScope/modGonio/modSpectrum ids the UI tests rely on.
     }
 }
 
