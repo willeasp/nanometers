@@ -22,8 +22,12 @@ struct AnalysisArea: View {
     var redrawTrigger: Double
     var onScrub: (Double) -> Void
 
-    // Live meters (goniometer + spectrum)
+    // Live meters. Spectrum reads the newest chunk (it eases per frame); the goniometer scans the ring
+    // smoothly at display rate via these three (see `ScopeCursor`).
     var liveSamples: (Int) -> (l: [Float], r: [Float], sampleRate: Double)
+    var scopeWritten: () -> Int
+    var scopeRate: () -> Double
+    var scopeWindow: (_ endingAt: Int, _ count: Int) -> (l: [Float], r: [Float], sampleRate: Double)
 
     // Shared
     var isPlaying: Bool
@@ -85,7 +89,8 @@ struct AnalysisArea: View {
                             coloringOn: coloringOn, isPlaying: isPlaying, redrawTrigger: redrawTrigger,
                             windowSec: windowSec, active: active, onScrub: onScrub)
         case .gonio:
-            Goniometer(samples: liveSamples, isPlaying: isPlaying, active: active)
+            Goniometer(scopeWritten: scopeWritten, scopeRate: scopeRate, scopeWindow: scopeWindow,
+                       isPlaying: isPlaying, active: active)
         case .spectrum:
             Spectrum(samples: liveSamples, isPlaying: isPlaying, active: active)
         }

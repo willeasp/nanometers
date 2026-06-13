@@ -41,6 +41,9 @@ struct NowPlayingScreen: View {
                              redrawTrigger: engine.elapsed,
                              onScrub: { engine.seek(toFraction: $0) },
                              liveSamples: { engine.liveScope($0) },
+                             scopeWritten: { engine.scopeWritten },
+                             scopeRate: { engine.scopeRate },
+                             scopeWindow: { engine.scopeWindow(endingAt: $0, count: $1) },
                              isPlaying: engine.isPlaying,
                              active: flipped,
                              lufs: engine.momentaryLUFS)

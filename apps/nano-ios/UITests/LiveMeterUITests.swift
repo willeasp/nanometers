@@ -2,17 +2,17 @@ import XCTest
 import UIKit
 
 /// Regression guard for the live-meter freeze: a `Canvas` inside a `TimelineView(.animation)` only
-/// re-renders per tick if its renderer actually READS the schedule date. The goniometer/spectrum had
+/// re-renders per tick if its renderer actually READS the schedule date. The spectrum had
 /// `{ _ in Canvas {…} }` (date ignored) → SwiftUI treated the Canvas as unchanged and never re-ran it,
-/// so they sat frozen during playback and only updated on discrete state changes. These tests crop the
-/// meter's on-screen region across ~1 s of playback and assert it is NOT pixel-identical the whole time.
+/// so it sat frozen during playback. This crops the meter across ~1 s of playback and asserts it is NOT
+/// pixel-identical the whole time.
+///
+/// NOTE: only the spectrum is checked this way. The goniometer's smooth-scan rate can't be measured by
+/// screenshots — XCUITest throttles captures below 10 Hz and doesn't render audio at real wall-clock,
+/// so the cursor (which trails the audio head in real time) stalls under the harness even though it runs
+/// at the full display rate on device. That path is covered deterministically by `ScopeScanTests`.
 final class LiveMeterUITests: XCTestCase {
     override func setUp() { super.setUp(); continueAfterFailure = false }
-
-    @MainActor
-    func test_goniometerAnimatesDuringPlayback() throws {
-        try assertMeterAnimates(id: "goniometer")
-    }
 
     @MainActor
     func test_spectrumAnimatesDuringPlayback() throws {

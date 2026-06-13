@@ -97,6 +97,16 @@ final class AudioEngine {
     /// the first audio renders / after a reset. Read on the main actor from the meters' `TimelineView`.
     func liveScope(_ count: Int) -> (l: [Float], r: [Float], sampleRate: Double) { scopeTap.snapshot(count) }
 
+    /// Smooth-scan accessors for the goniometer (which plots raw samples, so it'd stutter at the tap's
+    /// ~10 Hz delivery if it only read the newest chunk). `scopeWritten` is the monotonic frame clock;
+    /// `scopeWindow` reads a window ending at an absolute frame the meter's `ScopeCursor` advances at
+    /// display rate. See `LiveScopeTap`.
+    var scopeWritten: Int { scopeTap.written }
+    var scopeRate: Double { scopeTap.sampleRate }
+    func scopeWindow(endingAt end: Int, count: Int) -> (l: [Float], r: [Float], sampleRate: Double) {
+        scopeTap.window(endingAt: end, count: count)
+    }
+
     deinit {
         // Remove our handlers from the process-global command center so a re-instantiated engine
         // (SwiftUI previews, tests) doesn't stack duplicate remote-command handlers.
