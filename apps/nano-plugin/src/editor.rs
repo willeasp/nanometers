@@ -26,7 +26,7 @@ use crate::layout::{Column, default_layout, reconcile_fixed_widths, viewports};
 use crate::module::loudness::LoudnessModule;
 use crate::module::oscilloscope::OscilloscopeModule;
 use crate::module::waveform::WaveformModule;
-use crate::module::{FrameContext, Module};
+use crate::module::{FrameContext, Module, Rect};
 use crate::{NanometersParams, Shared, StereoFrame};
 
 /// Background — near-black with the faintest blue tint. Will become a deliberate palette
@@ -418,9 +418,9 @@ fn run_render_loop(
     surface: wgpu::Surface<'static>,
     mut surface_config: wgpu::SurfaceConfiguration,
     mut modules: Vec<Box<dyn Module + Send>>,
-    layout: Vec<Column>,
+    mut layout: Vec<Column>,
     shared: Arc<Shared>,
-    _state: Arc<EditorState>, // used by the router in E2 (drag-commit); threaded here in E0
+    state: Arc<EditorState>,
     ctl: Arc<RenderControl>,
     msg_rx: Receiver<WindowMsg>,
     initial_scale: f32,
@@ -442,6 +442,8 @@ fn run_render_loop(
         ..Default::default()
     };
     let mut last = Instant::now();
+    // Host-owned pointer-grab state (ADR 0004, amended: render-side). Transient — never persisted.
+    let mut router = crate::input::Router::new();
 
     while !ctl.stop.load(Ordering::Relaxed) {
         // Drain the message channel (host → main thread → here): coalesce resizes (only the latest
@@ -461,8 +463,23 @@ fn run_render_loop(
             surface.configure(&device, &surface_config);
             scale_factor = scale;
         }
-        // E2 runs the pointer-grab router over `inputs` here (after the resize, before viewports).
-        let _ = &inputs;
+        // Run the pointer-grab router over this batch of input (after the resize, so it hit-tests
+        // against the current surface). Hit-testing uses the STABLE committed viewports — the swap
+        // points stay put under the cursor even as the strip reflows. A reorder commit returns the
+        // new order (modules already permuted to match); adopt + persist it.
+        let committed_vps = viewports(
+            &layout,
+            surface_config.width as f32,
+            surface_config.height as f32,
+            scale_factor,
+        );
+        for ev in &inputs {
+            if let Some(new) = router.handle(ev, &layout, &committed_vps, &mut modules, scale_factor)
+            {
+                state.set_layout(new.clone());
+                layout = new;
+            }
+        }
 
         let now = Instant::now();
         let frame_dt = (now - last).as_secs_f64().min(MAX_FRAME_DT);
@@ -536,14 +553,27 @@ fn run_render_loop(
             label: Some("nanometers-encoder"),
         });
 
-        // Per-column viewports tiling the surface (ADR 0003), one Rect per Module in order. The
-        // scale converts a column's fixed LOGICAL width into physical px (the surface is physical).
-        let viewports = viewports(
-            &layout,
+        // Per-column viewports tiling the surface (ADR 0003), remapped to MODULE order. While a
+        // reorder drags, the strip re-tiles from the router's provisional order (live-reflow); the
+        // modules Vec stays in committed order, so each module's viewport is looked up by its
+        // instance_id. No drag → the active order IS the committed layout, so this is identity.
+        let active: &[Column] = router.provisional().unwrap_or(&layout);
+        let active_vps = viewports(
+            active,
             surface_config.width as f32,
             surface_config.height as f32,
             scale_factor,
         );
+        let viewports: Vec<Rect> = layout
+            .iter()
+            .map(|c| {
+                let j = active
+                    .iter()
+                    .position(|a| a.instance_id == c.instance_id)
+                    .expect("every committed column has a place in the active order");
+                active_vps[j]
+            })
+            .collect();
 
         // Phase 2a: each Module encodes its own offscreen passes / per-frame uploads before the
         // shared pass opens. `scale_factor` rides along so logical-px sizing lands right on Retina.

@@ -34,6 +34,9 @@ pub mod module;
 /// The horizontal-strip layout (ADR 0003): persisted `Column`s and the viewport geometry.
 pub mod layout;
 
+/// The host-owned pointer-grab router (ADR 0004): hit-testing, reorder reflow, event dispatch.
+pub mod input;
+
 /// Default width of the flexing Waveform, in logical pixels (its pre-meter window width). The
 /// window default is COMPUTED from this plus the Loudness column's derived intrinsic width — not
 /// hand-synced, so retuning the meter's layout knobs can't silently squeeze the default Waveform.
