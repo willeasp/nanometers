@@ -22,7 +22,7 @@ use std::{
 };
 use wgpu::SurfaceTargetUnsafe;
 
-use crate::layout::{Column, default_layout, reconcile_fixed_widths, viewports};
+use crate::layout::{Column, default_layout, reconcile_fixed_widths, remap_to_layout_order, viewports};
 use crate::module::loudness::LoudnessModule;
 use crate::module::oscilloscope::OscilloscopeModule;
 use crate::module::waveform::WaveformModule;
@@ -604,16 +604,7 @@ fn run_render_loop(
             surface_config.height as f32,
             scale_factor,
         );
-        let viewports: Vec<Rect> = layout
-            .iter()
-            .map(|c| {
-                let j = active
-                    .iter()
-                    .position(|a| a.instance_id == c.instance_id)
-                    .expect("every committed column has a place in the active order");
-                active_vps[j]
-            })
-            .collect();
+        let viewports: Vec<Rect> = remap_to_layout_order(&layout, active, &active_vps);
 
         // Phase 2a: each Module encodes its own offscreen passes / per-frame uploads before the
         // shared pass opens. `scale_factor` rides along so logical-px sizing lands right on Retina.

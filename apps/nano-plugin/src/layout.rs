@@ -173,6 +173,23 @@ pub fn viewports(cols: &[Column], surface_w: f32, surface_h: f32, scale: f32) ->
 /// visible and, crucially, finite-positive so it can't serialize to a load-breaking JSON `null`.
 const MIN_FLEX_FRACTION: f32 = 0.05;
 
+/// Map each column in `layout` order to its viewport, looked up from the `active` order's
+/// `active_vps` by instance_id. `active` is the provisional reorder order while a column drags (the
+/// strip re-tiles to preview the drop), else `layout` itself (identity). The modules Vec stays in
+/// committed `layout` order, so this returns each module's rect in that order. All three slices are
+/// the same length (provisional is a permutation of the committed layout), so the `unwrap_or(i)`
+/// identity fallback keeps the index in bounds — it can't panic the way the old inline `.expect` could.
+pub fn remap_to_layout_order(layout: &[Column], active: &[Column], active_vps: &[Rect]) -> Vec<Rect> {
+    layout
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let j = active.iter().position(|a| a.instance_id == c.instance_id).unwrap_or(i);
+            active_vps[j]
+        })
+        .collect()
+}
+
 /// The column whose viewport contains physical-px `x` (columns are full-height, so x alone
 /// decides). `None` if x is past every rect — including a column clamped to zero width in a
 /// too-narrow window. Viewports tile gap-free, so the first containing rect is the answer.
@@ -446,6 +463,35 @@ mod tests {
         assert_eq!(reorder_target(&vp, 0, 800.0), 2);
         // cursor near the left edge → stays slot 0.
         assert_eq!(reorder_target(&vp, 0, 10.0), 0);
+    }
+
+    #[test]
+    fn remap_identity_when_active_is_layout() {
+        let layout = cols(&[0.5, 0.5]);
+        let vps = viewports(&layout, 800.0, 600.0, 1.0);
+        // No drag: active IS the committed layout, so the remap is identity.
+        assert_eq!(remap_to_layout_order(&layout, &layout, &vps), vps);
+    }
+
+    #[test]
+    fn remap_follows_provisional_permutation() {
+        let layout = cols(&[0.5, 0.5]); // ids 0, 1 — modules render in this order
+        let active = vec![layout[1].clone(), layout[0].clone()]; // provisional swap: [1, 0]
+        let a = Rect { x: 0.0, y: 0.0, w: 400.0, h: 600.0 };
+        let b = Rect { x: 400.0, y: 0.0, w: 400.0, h: 600.0 };
+        let active_vps = vec![a, b];
+        // Column 0 sits in active slot 1 → gets rect B; column 1 sits in active slot 0 → rect A.
+        assert_eq!(remap_to_layout_order(&layout, &active, &active_vps), vec![b, a]);
+    }
+
+    #[test]
+    fn remap_falls_back_to_identity_on_unknown_id() {
+        let layout = cols(&[0.5, 0.5]); // ids 0, 1
+        // active is missing id 1 (replaced by a stranger) — column 1 keeps its own-index rect, no panic.
+        let active = vec![layout[0].clone(), Column::new(7, module_type::WAVEFORM, 0.5)];
+        let a = Rect { x: 0.0, y: 0.0, w: 400.0, h: 600.0 };
+        let b = Rect { x: 400.0, y: 0.0, w: 400.0, h: 600.0 };
+        assert_eq!(remap_to_layout_order(&layout, &active, &[a, b]), vec![a, b]);
     }
 
     #[test]
