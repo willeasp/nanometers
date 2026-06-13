@@ -7,7 +7,7 @@ struct NanoMetersApp: App {
 
     init() {
         do {
-            container = try ModelContainer(for: Track.self, Playlist.self)
+            container = try ModelContainer(for: AppSchema.schema)
         } catch {
             fatalError("Failed to create ModelContainer: \(error)")
         }
