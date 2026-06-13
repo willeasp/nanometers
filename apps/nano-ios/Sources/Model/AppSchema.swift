@@ -4,7 +4,7 @@ import SwiftData
 /// harness both build from this, so adding a model is a one-line change here.
 enum AppSchema {
     static let allModels: [any PersistentModel.Type] = [
-        Track.self, Playlist.self, Source.self, RootFolder.self,
+        Track.self, Playlist.self, Source.self, RootFolder.self, FolderNode.self,
     ]
     static var schema: Schema { Schema(allModels) }
 }

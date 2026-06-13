@@ -52,4 +52,21 @@ enum LibraryStore {
             predicate: #Predicate { $0.sourceId == sourceId },
             sortBy: [SortDescriptor(\.dateAdded)]))
     }
+
+    static func folderNode(id: String, _ ctx: ModelContext) throws -> FolderNode? {
+        var d = FetchDescriptor<FolderNode>(predicate: #Predicate { $0.id == id })
+        d.fetchLimit = 1
+        return try ctx.fetch(d).first
+    }
+
+    static func childFolders(of parentId: String, _ ctx: ModelContext) throws -> [FolderNode] {
+        try ctx.fetch(FetchDescriptor<FolderNode>(predicate: #Predicate { $0.parentId == parentId }))
+    }
+
+    /// Resolve a folder's direct tracks in stored order, skipping dangling ids.
+    static func tracksInFolder(id: String, _ ctx: ModelContext) throws -> [Track] {
+        guard let node = try folderNode(id: id, ctx) else { return [] }
+        let byID = Dictionary(uniqueKeysWithValues: try allTracks(ctx).map { ($0.id, $0) })
+        return node.trackIds.compactMap { byID[$0] }
+    }
 }
