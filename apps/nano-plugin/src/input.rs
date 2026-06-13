@@ -199,6 +199,18 @@ impl Router {
                 None
             }
 
+            Event::Mouse(MouseEvent::WheelScrolled { .. }) => {
+                // Scroll carries no position (baseview), so route it to the column under the last
+                // cursor — only when ungrabbed; scrolling mid-drag isn't a gesture we define. The
+                // event forwards as-is (to_local only translates CursorMoved; the module reads delta).
+                if let (PointerGrab::None, Some((x, _))) = (self.grab, self.last_cursor) {
+                    if let Some(idx) = column_index_at(committed_vps, x) {
+                        self.forward(idx, committed_vps, modules, event, scale);
+                    }
+                }
+                None
+            }
+
             // CursorLeft fires mid-drag (macOS tracking-area quirk) — it must NOT end a grab; a grab
             // ends only on ButtonReleased. We just drop it.
             _ => None,

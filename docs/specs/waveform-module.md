@@ -80,7 +80,7 @@ JSON-encoded (`serde_json`, the encoding the whole `EditorState` uses).
 
 | field | default | notes |
 |---|---|---|
-| `window_seconds` | 5.0 | viewable window; **built (F1)** — read live in the scroll calc, persisted |
+| `window_seconds` | 5.0 | viewable window; **built (F1/F2)** — scroll the Waveform to zoom [1–8 s], persisted |
 | `outline_enabled` | `true` | 0007 — future |
 | `band_low_hz` | ~250 | low/mid crossover — future |
 | `band_high_hz` | ~4000 | mid/high crossover — future |

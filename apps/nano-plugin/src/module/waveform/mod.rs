@@ -35,6 +35,17 @@ const BAND_HIGH_HZ: f32 = 4000.0;
 const DISPLAY_WINDOW_SECONDS: f64 = 5.0;
 /// The base-bin store holds more than the display window so the left edge never clips.
 const STORE_WINDOW_SECONDS: f32 = 8.0;
+
+/// Floor for the scroll-to-zoom visible window; the ceiling is `STORE_WINDOW_SECONDS` (can't show
+/// more history than the store buffers).
+const WINDOW_SECONDS_MIN: f64 = 1.0;
+
+/// Apply a mouse-wheel notch to the visible window: scroll up (positive `scroll_dy`) zooms IN (a
+/// shorter window, more detail), down zooms out, multiplicatively (constant feel at any zoom).
+/// Clamped to `[WINDOW_SECONDS_MIN, STORE_WINDOW_SECONDS]`.
+fn zoom_window(current: f64, scroll_dy: f32) -> f64 {
+    (current * 0.9_f64.powf(scroll_dy as f64)).clamp(WINDOW_SECONDS_MIN, STORE_WINDOW_SECONDS as f64)
+}
 /// Per-half amplitude scale: L top half (clip-y center +0.5), R bottom half (−0.5); sample ±1
 /// reaches ±0.45 within its half.
 const HALF_SCALE: f32 = 0.45;
@@ -601,8 +612,19 @@ impl Module for WaveformModule {
         rpass.draw(0..3, 0..1);
     }
 
-    fn on_event(&mut self, _event: &baseview::Event, _viewport: Rect) -> EventStatus {
-        EventStatus::Ignored // the Waveform has no interior interaction (hover-dB was cut)
+    fn on_event(&mut self, event: &baseview::Event, _viewport: Rect) -> EventStatus {
+        use baseview::{Event, MouseEvent, ScrollDelta};
+        // Scroll over the Waveform zooms its visible window (config.window_seconds), read live by
+        // the scroll calc → instant zoom; the host flushes the new config after this discrete event.
+        if let Event::Mouse(MouseEvent::WheelScrolled { delta, .. }) = event {
+            let dy = match delta {
+                ScrollDelta::Lines { y, .. } => *y,
+                ScrollDelta::Pixels { y, .. } => *y / 20.0, // trackpad px → ≈notches
+            };
+            self.config.window_seconds = zoom_window(self.config.window_seconds, dy);
+            return EventStatus::Captured;
+        }
+        EventStatus::Ignored
     }
 
     fn save_config(&self) -> Vec<u8> {
@@ -672,5 +694,16 @@ mod tests {
         // Empty (Column::new default) and unparseable bytes → defaults, never a panic (trait contract).
         assert_eq!(WaveformConfig::from_bytes(&[]), WaveformConfig::default());
         assert_eq!(WaveformConfig::from_bytes(b"{not json"), WaveformConfig::default());
+    }
+
+    #[test]
+    fn zoom_window_scales_and_clamps() {
+        // Scroll up (positive dy) zooms IN → shorter window; down → longer.
+        assert!(zoom_window(5.0, 1.0) < 5.0);
+        assert!(zoom_window(5.0, -1.0) > 5.0);
+        // Clamps: never below the floor, never past the store's history window (can't show what
+        // isn't buffered).
+        assert_eq!(zoom_window(1.0, 50.0), WINDOW_SECONDS_MIN);
+        assert_eq!(zoom_window(8.0, -50.0), STORE_WINDOW_SECONDS as f64);
     }
 }
