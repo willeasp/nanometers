@@ -20,6 +20,7 @@ enum TrackImporter {
                 .bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
 
             let meta = await readMetadata(url)
+            let audio = audioFormat(url)        // real sample rate (kHz) + PCM bit depth from the decoder
             let track = Track(
                 title: meta.title,
                 artist: meta.artist,
@@ -30,7 +31,8 @@ enum TrackImporter {
                 displayPath: SourceKind.local.label,
                 durationSec: meta.duration,
                 format: url.pathExtension.uppercased(),
-                sampleRate: "",
+                sampleRate: audio.rate,
+                bitDepth: audio.bits,
                 hasEmbeddedArt: meta.artwork != nil,
                 artworkData: meta.artwork
             )
@@ -43,6 +45,21 @@ enum TrackImporter {
     }
 
     private struct Meta { var title: String; var artist: String; var album: String; var duration: Double; var artwork: Data? }
+
+    /// Real sample rate (as a kHz string, e.g. "96" / "44.1") + PCM bit depth from the decoder.
+    /// Best-effort: a non-audio file (tests) yields ("", nil); lossy files report 0 bits → nil.
+    private static func audioFormat(_ url: URL) -> (rate: String, bits: Int?) {
+        guard let af = try? AVAudioFile(forReading: url) else { return ("", nil) }
+        let asbd = af.fileFormat.streamDescription.pointee
+        let bits = Int(asbd.mBitsPerChannel)
+        return (khz(asbd.mSampleRate), bits > 0 ? bits : nil)
+    }
+
+    private static func khz(_ sr: Double) -> String {
+        guard sr > 0 else { return "" }
+        let k = sr / 1000
+        return k == k.rounded() ? String(Int(k)) : String(format: "%.1f", k)
+    }
 
     private static func readMetadata(_ url: URL) async -> Meta {
         let fallbackTitle = url.deletingPathExtension().lastPathComponent

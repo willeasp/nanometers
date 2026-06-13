@@ -27,6 +27,15 @@ enum Theme {
     static let npGradientMid    = Color(hex: 0x14161C)
     static let npGradientBottom = Color(hex: 0x111319)
 
+    // Now Playing redesign (§06F): neutral warm gradient (168°) — no per-track album-art tint.
+    static let npBgTop    = Color(hex: 0x232029)
+    static let npBgMid    = Color(hex: 0x1A1820)
+    static let npBgBottom = Color(hex: 0x131218)
+    // Flip-card back face gradient (158°, §06B).
+    static let cardBackTop    = Color(hex: 0x221F2A)
+    static let cardBackMid    = Color(hex: 0x18171F)
+    static let cardBackBottom = Color(hex: 0x131218)
+
     // Corner radii (§01)
     enum Radius {
         static let albumRow: CGFloat = 7
@@ -36,6 +45,7 @@ enum Theme {
         static let mosaic: CGFloat = 12
         static let button: CGFloat = 14
         static let albumNowPlaying: CGFloat = 18   // §03D artwork hero
+        static let flipCard: CGFloat = 22          // §06B flip card
     }
 
     // Layout (§01)
