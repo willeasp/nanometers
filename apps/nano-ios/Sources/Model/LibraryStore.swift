@@ -36,4 +36,14 @@ enum LibraryStore {
     static func remove(in pl: Playlist, atOffsets: IndexSet) {
         pl.itemIDs.remove(atOffsets: atOffsets)
     }
+
+    static func allSources(_ ctx: ModelContext) throws -> [Source] {
+        try ctx.fetch(FetchDescriptor<Source>(sortBy: [SortDescriptor(\.canonicalOrder)]))
+    }
+
+    static func source(id: String, _ ctx: ModelContext) throws -> Source? {
+        var d = FetchDescriptor<Source>(predicate: #Predicate { $0.id == id })
+        d.fetchLimit = 1
+        return try ctx.fetch(d).first
+    }
 }
