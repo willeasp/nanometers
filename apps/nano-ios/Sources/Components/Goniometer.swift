@@ -14,8 +14,9 @@ struct Goniometer: View {
     @State private var fade = MeterFade()
 
     var body: some View {
-        TimelineView(.animation(paused: !active)) { _ in
+        TimelineView(.animation(paused: !active)) { timeline in
             Canvas { ctx, size in
+                _ = timeline.date   // a Canvas in a TimelineView only re-renders per tick if it READS the schedule date
                 let s = samples(pointCount)
                 fade.step(towardLive: isPlaying && !s.l.isEmpty)
                 draw(ctx, size, l: s.l, r: s.r, fade: CGFloat(fade.value))
