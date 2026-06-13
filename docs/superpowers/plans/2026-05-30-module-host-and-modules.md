@@ -326,28 +326,24 @@ land, so this phase is independently verifiable as two side-by-side Module colum
 
 ---
 
-## Phase E — Input routing: host PointerGrab (Task #5)
+## Phase E — Input routing: host PointerGrab (Task #5) — BUILT
 
-**Files:**
-- Modify: `nanometers/src/editor.rs` (`RenderWindow::on_event` becomes the router).
-- Modify: `nanometers/src/layout.rs` (hit-testing helpers, gutter test, reflow fractions — pure).
+> Built 2026-06-13. The detailed, as-built plan (with the render-side-router correction and the
+> grill's scope decisions) is [`2026-06-13-phase-e-input.md`](2026-06-13-phase-e-input.md); ADR 0004
+> carries the amendment. The router moved to the RENDER thread (modules + layout live there since
+> ADR 0008) — `on_event` is just a forwarder over the `WindowMsg` channel. Sketch below kept for
+> history; the paths (`nanometers/src/…`) predate the workspace split.
 
-- [ ] **E1 — Pure hit-testing + gutter + reflow (TDD).** `x → column index`; `is_in_resize_gutter(x,
-  boundaries, gutter_px) -> Option<boundary>`; `reorder_preview(cols, dragged, cursor_x) ->
-  Vec<f32>` provisional fractions. Tests: cursor in gutter picks the right boundary; reorder of
-  col 0 past col 1 swaps order; fractions always sum to 1.
-- [ ] **E2 — PointerGrab state machine.**
-  ```rust
-  enum PointerGrab { None, LayoutResize { boundary: usize },
-                     LayoutReorder { instance_id: u64, grab_dx: f32 }, Module { instance_id: u64 } }
-  ```
-  Press decides once (gutter→Resize; else offer to column in local coords → `Captured`=Module grab,
-  `Ignored` body-press→Reorder). Move/up route to the grab owner regardless of x. Release commits
-  reorder/resize into `EditorState.layout`; reflow live during reorder. Window-resize stays host-only.
-- [ ] **E3 — Wire Module interactions.** Hover inside a Waveform → that column's dB readout
-  (`wgpu_text`); click inside Loudness reset affordance → `LoudnessDsp::reset()` and return
-  `Captured`. Verify in GUI: drag a column to reorder (live reflow), drag a boundary to resize,
-  hover Waveform shows dB, click Loudness resets I. Commit per interaction.
+- [x] **E1 — Pure hit-testing + reorder + sanitize (TDD).** `column_index_at`, `resize_boundary_at`
+  (flex|flex only — fixed columns aren't user-draggable), `reorder_target` + `apply_reorder`, and
+  `sanitize_layout` (a NaN fraction serializes to JSON `null` and fails the whole load). In
+  `layout.rs`. (Reflow carries provisional `Column`s, not bare fractions — fixed columns kept px.)
+- [x] **E2 — PointerGrab state machine** (render-side, `input.rs`). `None` / `LayoutReorder` /
+  `Module`; press decides once; live-reflow reorder commits on release. `LayoutResize` **deferred to
+  Phase F** — no draggable flex|flex boundary exists until multi-instance can add a second flex column.
+- [x] **E3 — Module interactions.** Loudness reset on an I-caption click → `LoudnessDsp::reset()` +
+  `Captured`. Waveform hover records the peak dB under the cursor (routing proven); the on-screen dB
+  **text is deferred** to a follow-up (it needs a `wgpu_text` brush in the waveform module).
 
 ---
 
