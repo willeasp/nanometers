@@ -15,7 +15,7 @@ final class WaveformCacheTests: XCTestCase {
 
         let loaded = WaveformCache.load(key: key)
         XCTAssertEqual(loaded?.bins, bins)
-        XCTAssertEqual(loaded?.closeUpBins, closeUp)        // v2: stereo close-up array round-trips
+        XCTAssertEqual(loaded?.closeUpBins, closeUp)        // v3: stereo close-up array round-trips
         XCTAssertEqual(loaded?.integratedLUFS, -9.5)
     }
 
@@ -23,7 +23,7 @@ final class WaveformCacheTests: XCTestCase {
         XCTAssertNil(WaveformCache.load(key: "definitely-not-present-\(UUID().uuidString)"))
     }
 
-    /// A v1 (mono-only) file must be rejected by the version check so it re-analyzes into v2 — no
+    /// An old (mono-only) file must be rejected by the version check so it re-analyzes into v3 — no
     /// silent half-load. Simulate by writing the old "NMW1"/version-1 header.
     func test_v1FileRejectedAsCacheMiss() throws {
         let key = "v1_\(UUID().uuidString)"

@@ -1,7 +1,7 @@
 import Foundation
 
 /// On-disk cache of a track's analyzed bins, keyed by content hash, under the purgeable Caches dir
-/// (regenerable data — never Application Support). Format (v2): a fixed header, then `monoCount` × 16
+/// (regenerable data — never Application Support). Format (v3): a fixed header, then `monoCount` × 16
 /// bytes of `WaveBin` (overview, 4× Float32 LE), then `stereoCount` × 28 bytes of `StereoWaveBin`
 /// (close-up, 7× Float32 LE). A miss, a purge, or a version mismatch returns nil so the renderer shows
 /// an "analyzing" state and re-analyzes. v1 files (mono only) fail the version check → transparent
