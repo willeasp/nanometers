@@ -178,16 +178,19 @@ const MIN_FLEX_FRACTION: f32 = 0.05;
 /// Map each column in `layout` order to its viewport, looked up from the `active` order's
 /// `active_vps` by instance_id. `active` is the provisional reorder order while a column drags (the
 /// strip re-tiles to preview the drop), else `layout` itself (identity). The modules Vec stays in
-/// committed `layout` order, so this returns each module's rect in that order. All three slices are
-/// the same length (provisional is a permutation of the committed layout), so the `unwrap_or(i)`
-/// identity fallback keeps the index in bounds — it can't panic the way the old inline `.expect` could.
+/// committed `layout` order, so this returns each module's rect in that order. The live code keeps all
+/// three slices the same length (provisional is a permutation of the committed layout), so the
+/// `unwrap_or(i)` identity fallback resolves; the final `.get(j)` is a belt-and-suspenders guard so a
+/// future slip degrades to an empty (draw-nothing) rect instead of panicking the render thread — the
+/// whole point of extracting this off the old inline `.expect`.
 pub fn remap_to_layout_order(layout: &[Column], active: &[Column], active_vps: &[Rect]) -> Vec<Rect> {
+    let empty = Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
     layout
         .iter()
         .enumerate()
         .map(|(i, c)| {
             let j = active.iter().position(|a| a.instance_id == c.instance_id).unwrap_or(i);
-            active_vps[j]
+            active_vps.get(j).copied().unwrap_or(empty)
         })
         .collect()
 }
@@ -504,6 +507,19 @@ mod tests {
         let a = Rect { x: 0.0, y: 0.0, w: 400.0, h: 600.0 };
         let b = Rect { x: 400.0, y: 0.0, w: 400.0, h: 600.0 };
         assert_eq!(remap_to_layout_order(&layout, &active, &[a, b]), vec![a, b]);
+    }
+
+    #[test]
+    fn remap_never_panics_when_active_is_shorter_than_layout() {
+        // The invariant (active/active_vps same length as layout) can't be violated by the live code,
+        // but the remap must DEGRADE, not panic, if a future change ever slips it — a render-thread
+        // panic kills the editor. A 3-column layout against a 2-entry active → the orphan gets an
+        // empty rect (draws nothing) instead of an out-of-bounds index.
+        let layout = cols(&[0.34, 0.33, 0.33]); // ids 0, 1, 2
+        let a = Rect { x: 0.0, y: 0.0, w: 400.0, h: 600.0 };
+        let b = Rect { x: 400.0, y: 0.0, w: 400.0, h: 600.0 };
+        let out = remap_to_layout_order(&layout, &layout[..2], &[a, b]);
+        assert_eq!(out, vec![a, b, Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 }]);
     }
 
     #[test]

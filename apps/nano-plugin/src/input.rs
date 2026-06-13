@@ -133,6 +133,13 @@ impl Router {
         self.provisional.as_deref()
     }
 
+    /// Dismiss any open context menu. Called when the surface resizes: the anchor is captured in
+    /// physical px at open time, so a resize (especially a DPI/scale change) would otherwise leave the
+    /// panel pinned to stale coordinates — closing it is the clean, expected behavior. Idempotent.
+    pub fn close_menu(&mut self) {
+        self.menu = None;
+    }
+
     /// A read-only view of the open menu for the Overlay renderer, or `None` when no menu is open.
     pub fn menu_overlay(&self) -> Option<MenuOverlay<'_>> {
         self.menu.as_ref().map(|m| MenuOverlay {

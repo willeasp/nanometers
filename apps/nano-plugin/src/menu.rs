@@ -31,6 +31,11 @@ pub struct MenuItem {
 /// The menu's content, derived from where the right-click landed. `column` is the column under the
 /// cursor (`None` on an empty strip or past every column) — it decides both whether `Remove` appears
 /// and where an `Add` inserts.
+///
+/// `column` is a positional INDEX, not an instance_id, so it's only valid while the layout is
+/// unchanged. That holds because the menu is modal (`input.rs`): no reorder/add/remove can land
+/// between opening the menu and applying its selection — the selection is committed synchronously in
+/// the same input batch. If that modal guarantee is ever relaxed, switch this to an instance_id.
 pub struct MenuModel {
     pub items: Vec<MenuItem>,
     column: Option<usize>,

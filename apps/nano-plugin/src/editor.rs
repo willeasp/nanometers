@@ -527,6 +527,9 @@ fn run_render_loop(
             surface_config.height = h.max(1);
             surface.configure(&device, &surface_config);
             scale_factor = scale;
+            // The menu anchor is physical px from before the resize; dismiss rather than redraw it at
+            // stale coordinates (a scale change would reinterpret the anchor wholesale).
+            router.close_menu();
         }
         // Run the pointer-grab router over this batch of input (after the resize, so it hit-tests
         // against the current surface). Hit-testing uses the STABLE committed viewports — the swap
