@@ -22,7 +22,7 @@ struct BrowseContent {
 enum LibraryBrowse {
     @MainActor
     static func content(for nav: LibraryNav, index: LibraryIndex, ctx: ModelContext) -> BrowseContent {
-        if nav.smart == .allSongs { return BrowseContent(level: .allSongs) }
+        if nav.smart == .allSongs { return allSongsContent(index: index, ctx: ctx) }
         if let sourceId = nav.sourceId { return folderContent(sourceId: sourceId, nav: nav, index: index, ctx: ctx) }
         return rootContent(index: index, ctx: ctx)
     }
@@ -104,5 +104,14 @@ enum LibraryBrowse {
         var visited = Set<String>()
         return flatten(node, ctx: ctx, visited: &visited)
     }
-    // allSongsContent added in Task 4.
+    @MainActor
+    private static func allSongsContent(index: LibraryIndex, ctx: ModelContext) -> BrowseContent {
+        let reachable = index.reachableTrackIds
+        let tracks = ((try? LibraryStore.allTracks(ctx)) ?? []).filter { reachable.contains($0.id) }
+        var c = BrowseContent(level: .allSongs, title: "All Songs")
+        c.tracks = tracks
+        c.playAll = tracks
+        c.sourceTint = Theme.accentHex
+        return c
+    }
 }
