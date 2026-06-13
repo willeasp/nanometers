@@ -27,6 +27,7 @@ targets:
         UILaunchScreen: {}
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         UIBackgroundModes: [audio]
+        CADisableMinimumFrameDurationOnPhone: true   # allow the live meters to run >60 Hz (ProMotion 120 Hz)
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.willeasp.nanometers.ios
