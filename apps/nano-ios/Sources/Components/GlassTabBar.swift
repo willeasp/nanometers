@@ -8,12 +8,13 @@ enum Tab: CaseIterable {
 
 struct GlassTabBar: View {
     @Binding var selection: Tab
+    var onReselect: (Tab) -> Void = { _ in }
     var body: some View {
         HStack(spacing: 0) {
             ForEach(Tab.allCases, id: \.self) { tab in
                 let active = tab == selection
                 Button {
-                    selection = tab
+                    if tab == selection { onReselect(tab) } else { selection = tab }
                 } label: {
                     VStack(spacing: 3) {
                         Image(systemName: tab.icon).font(.system(size: 24))

@@ -1,7 +1,5 @@
 import SwiftUI
-#if DEBUG
 import SwiftData
-#endif
 
 /// App shell. The library/playlists/search content fills the screen; the mini player + glass tab bar
 /// are docked via `.safeAreaInset(.bottom)` so the content insets above them automatically and the
@@ -19,10 +17,14 @@ struct RootView: View {
     @State private var engine = AudioEngine()
     @State private var npOpen = false
     @State private var deviceInsets = EdgeInsets()
+    @State private var libNav = LibraryNav()
+    @State private var libIndex = LibraryIndex()
     @Namespace private var heroNS
-    #if DEBUG
     @Environment(\.modelContext) private var ctx
-    #endif
+
+    // Probes to detect data changes and rebuild the index.
+    @Query(sort: \Track.dateAdded, order: .reverse) private var allTracksProbe: [Track]
+    @Query private var sourcesProbe: [Source]
 
     var body: some View {
         ZStack {
@@ -42,7 +44,9 @@ struct RootView: View {
                     MiniPlayer(artNamespace: heroNS, artSourceID: Self.artID,
                                onTapBody: { npOpen = true })
                 }
-                GlassTabBar(selection: $tab)
+                GlassTabBar(selection: $tab, onReselect: { t in
+                    if t == .library { libNav.reset() }
+                })
             }
         }
         .fullScreenCover(isPresented: $npOpen) {
@@ -53,8 +57,19 @@ struct RootView: View {
         // Outermost, so `.safeAreaInset(.bottom)` above doesn't shrink the bottom we capture.
         .onGeometryChange(for: EdgeInsets.self, of: { $0.safeAreaInsets }, action: { deviceInsets = $0 })
         .environment(engine)
+        .environment(libNav)
+        .environment(libIndex)
         .preferredColorScheme(.dark)
         .tint(Theme.accent)
+        .task {
+            libIndex.rebuild(from: ctx)
+        }
+        .onChange(of: allTracksProbe.count) {
+            libIndex.rebuild(from: ctx)
+        }
+        .onChange(of: sourcesProbe.count) {
+            libIndex.rebuild(from: ctx)
+        }
         #if DEBUG
         .onAppear {   // headless self-test hooks: `-autoplay` docks a track, `-expand` opens Now Playing
             if ProcessInfo.processInfo.arguments.contains("-autoplay"), engine.current == nil {
