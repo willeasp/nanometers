@@ -7,6 +7,7 @@ import SwiftUI
 /// The optional 56×22 mini-waveform slot (§02) appears once the track's bins are analyzed.
 struct MiniPlayer: View {
     @Environment(AudioEngine.self) private var engine
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var artNamespace: Namespace.ID
     var artSourceID: String
     var onTapBody: () -> Void = {}
@@ -51,10 +52,14 @@ struct MiniPlayer: View {
             }
 
             Button { engine.toggle() } label: {
-                Image(systemName: engine.isPlaying ? "pause.fill" : "play.fill")
-                    .font(.system(size: 18)).foregroundStyle(Theme.text)
-                    .contentTransition(.symbolEffect(.replace))           // snappy glyph swap, not a crossfade
-                    .frame(width: 40, height: 40).contentShape(Rectangle())
+                ZStack {
+                    Image(systemName: engine.isPlaying ? "pause.fill" : "play.fill")
+                        .font(.system(size: 18)).foregroundStyle(Theme.text)
+                        .transition(.scale(scale: 0.7).combined(with: .opacity))   // replace-look pop, speed we control
+                        .id(engine.isPlaying)
+                }
+                .frame(width: 40, height: 40).contentShape(Rectangle())
+                .animation(reduceMotion ? nil : .spring(response: 0.25, dampingFraction: 0.85), value: engine.isPlaying)
             }
             .buttonStyle(PressableButtonStyle())
             .accessibilityIdentifier("miniPlayerPlayPause")

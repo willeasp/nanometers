@@ -168,8 +168,10 @@ struct NowPlayingScreen: View {
                         .shadow(color: .black.opacity(0.4), radius: 20, y: 6)
                     Image(systemName: engine.isPlaying ? "pause.fill" : "play.fill")
                         .font(.system(size: 30)).foregroundStyle(Theme.bg)   // dark-on-amber (§03D)
-                        .contentTransition(.symbolEffect(.replace))          // snappy glyph swap, not a crossfade
+                        .transition(.scale(scale: 0.7).combined(with: .opacity))   // replace-look pop, at a speed we control
+                        .id(engine.isPlaying)                                       // (native symbolEffect.replace's duration is fixed/slower)
                 }
+                .animation(reduceMotion ? nil : .spring(response: 0.25, dampingFraction: 0.85), value: engine.isPlaying)   // matches the artwork scale
             }.buttonStyle(PressableButtonStyle()).frame(maxWidth: .infinity)
             .accessibilityIdentifier("npPlayPause").accessibilityLabel(engine.isPlaying ? "Pause" : "Play")
             .sensoryFeedback(.impact(weight: .light), trigger: engine.isPlaying)
@@ -244,7 +246,7 @@ struct NowPlayingScreen: View {
         .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous).strokeBorder(.white.opacity(0.06), lineWidth: 0.5))
         .scaleEffect(reduceMotion ? 1 : (engine.isPlaying ? 1 : 0.86))   // §motion: paused artwork shrinks to 0.86
-        .animation(reduceMotion ? nil : .spring(response: 0.5, dampingFraction: 0.86), value: engine.isPlaying)
+        .animation(reduceMotion ? nil : .spring(response: 0.25, dampingFraction: 0.85), value: engine.isPlaying)
         .frame(maxHeight: .infinity)                  // claim the leftover space; the art centers + caps within it
         .shadow(color: .black.opacity(0.45), radius: 15, y: 10)   // §01: 0 10 30 @.45 (radius ≈ CSS blur/2)
         .shadow(color: .black.opacity(0.3), radius: 4, y: 2)      // + the tight contact shadow (0 2 8 @.3)
