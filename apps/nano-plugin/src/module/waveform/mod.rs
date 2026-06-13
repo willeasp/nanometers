@@ -162,6 +162,10 @@ pub struct WaveformModule {
     last_audio_advance: Option<Instant>, // when audio last advanced — drives pause detection
     last_sample_rate: f32,
 
+    /// Per-instance persisted config (ADR 0003). Loaded from the column's bytes at spawn, flushed
+    /// back after input. Today just the visible `window_seconds`, read live in the scroll calc.
+    config: WaveformConfig,
+
     scroll_dbg: ScrollDbg,
 }
 
@@ -347,6 +351,7 @@ impl WaveformModule {
             prev_closed: 0,
             last_audio_advance: None,
             last_sample_rate: 0.0,
+            config: WaveformConfig::default(),
             scroll_dbg: ScrollDbg {
                 on: crate::diag_enabled("NANO_DEBUG_SCROLL"),
                 ..Default::default()
@@ -497,11 +502,11 @@ impl Module for WaveformModule {
         // (always px) or the old columns. Pixel step, with hysteresis so a refresh-rate estimate at a
         // rounding boundary can't flip it frame to frame.
         let fps = (sr / self.avg_arrival).max(1.0);
-        let continuous = columns as f64 / (DISPLAY_WINDOW_SECONDS * fps);
+        let continuous = columns as f64 / (self.config.window_seconds * fps);
         let px_changed =
             !self.ring_init || (continuous - self.px_per_frame as f64).abs() > 0.6;
         if px_changed {
-            self.px_per_frame = choose_px_per_frame(columns, DISPLAY_WINDOW_SECONDS, fps);
+            self.px_per_frame = choose_px_per_frame(columns, self.config.window_seconds, fps);
         }
         let px = self.px_per_frame.max(1);
         let s_nominal = (self.avg_arrival / px as f64).max(MIN_SAMPLES_PER_COL);
@@ -601,10 +606,12 @@ impl Module for WaveformModule {
     }
 
     fn save_config(&self) -> Vec<u8> {
-        Vec::new() // opaque config lands in Phase F
+        self.config.to_bytes()
     }
 
-    fn load_config(&mut self, _bytes: &[u8]) {}
+    fn load_config(&mut self, bytes: &[u8]) {
+        self.config = WaveformConfig::from_bytes(bytes);
+    }
 }
 
 const CONTOUR_WGSL: &str = r#"
