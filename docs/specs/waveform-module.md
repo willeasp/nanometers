@@ -75,16 +75,23 @@ mean-square, never RMS — `sqrt` only at draw, per 0002.)
 
 ## 6. Config — Module-owned opaque blob (0003)
 
-Persisted per instance via the host's opaque-config path (host never reads the fields):
+Persisted per instance via the host's opaque-config path (host never reads the fields). The blob is
+JSON-encoded (`serde_json`, the encoding the whole `EditorState` uses).
 
 | field | default | notes |
 |---|---|---|
-| `window_seconds` | ~4–6 | viewable window; user-editable later via settings |
-| `outline_enabled` | `true` | 0007 |
-| `band_low_hz` | ~250 | low/mid crossover |
-| `band_high_hz` | ~4000 | mid/high crossover |
-| `color_white_strength` | tbd | how hard broadband desaturates to white |
+| `window_seconds` | 5.0 | viewable window; **built (F1)** — read live in the scroll calc, persisted |
+| `outline_enabled` | `true` | 0007 — future |
+| `band_low_hz` | ~250 | low/mid crossover — future |
+| `band_high_hz` | ~4000 | mid/high crossover — future |
+| `color_white_strength` | tbd | how hard broadband desaturates to white — future |
 | `palette` | tbd | optional later |
+
+**Built so far (Phase F1):** the config persistence path is live (`save_config`/`load_config` route
+through `WaveformConfig`, which today carries only `window_seconds`). The remaining fields and the UI
+to edit them land later (F2+). Forward-compatible: a blob from a future build that carries extra
+fields still restores `window_seconds` here (serde ignores unknown fields); only structurally-invalid
+or empty bytes fall back to defaults (`from_bytes` never panics — the trait contract).
 
 **Multi-instance (0003):** two Waveforms at different zooms is first-class. Each instance owns its
 own store, filterbank state, and config — no shared global state.
