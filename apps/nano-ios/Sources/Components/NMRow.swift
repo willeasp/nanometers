@@ -4,6 +4,7 @@ struct NMRow: View {
     let track: Track
     var isCurrent: Bool = false
     var isPlaying: Bool = false
+    var isAvailable: Bool = true
     var onTap: () -> Void = {}
     var onEllipsis: () -> Void = {}
 
@@ -25,11 +26,22 @@ struct NMRow: View {
                 }
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(track.title)
-                    .font(Theme.sans(16, .medium))
-                    .tracking(-0.2)                              // §01 row title tracking
-                    .foregroundStyle(isCurrent ? Theme.accent : Theme.text)
-                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    Text(track.title)
+                        .font(Theme.sans(16, .medium))
+                        .tracking(-0.2)                              // §01 row title tracking
+                        .foregroundStyle(isCurrent ? Theme.accent : Theme.text)
+                        .lineLimit(1)
+                    if !isAvailable {
+                        Text("Unavailable")
+                            .font(Theme.sans(10, .medium))
+                            .foregroundStyle(Theme.text3)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2)
+                            .background(Theme.text3.opacity(0.18), in: Capsule())
+                            .accessibilityIdentifier("unavailableTag")
+                    }
+                }
                 HStack(spacing: 0) {
                     Text(track.artist).foregroundStyle(Theme.text2)
                     if !track.album.isEmpty {
@@ -60,7 +72,8 @@ struct NMRow: View {
         }
         .frame(minHeight: Theme.Layout.rowMinHeight)
         .contentShape(Rectangle())
-        .onTapGesture { onTap() }
+        .onTapGesture { if isAvailable { onTap() } }
+        .opacity(isAvailable ? 1 : 0.45)
         .task(id: track.persistentModelID) {
             bins = await WaveformStore.shared.bins(for: track) ?? []
         }
