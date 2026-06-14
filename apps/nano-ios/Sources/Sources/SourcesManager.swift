@@ -153,8 +153,10 @@ final class SourcesManager {
         case .gdrive:
             return GoogleDriveProvider(api: DriveAPIClient(http: URLSessionHTTPClient()),
                                        accessToken: accessToken)
-        case .onedrive, .dropbox:
-            // Future providers — these paths are unreachable while the UI gates them as "Coming soon".
+        case .onedrive:
+            return OneDriveProvider(api: GraphAPIClient(http: URLSessionHTTPClient()), accessToken: accessToken)
+        case .dropbox:
+            // Future provider — unreachable while the UI gates Dropbox as "Coming soon".
             // Fail loudly so a future caller doesn't silently get a no-op local provider.
             assertionFailure("provider(for:) called for unsupported provider '\(kind.rawValue)'")
             return LocalSourceProvider(kind: .local)
