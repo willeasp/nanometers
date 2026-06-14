@@ -261,7 +261,8 @@ struct NowPlayingScreen: View {
             let canGoToSource = engine.current.map { t in
                 guard let p = index.trackPath[t.id],
                       let source = try? LibraryStore.source(id: p.sourceId, ctx) else { return false }
-                return SourceState(rawValue: source.state) != .disconnected
+                let s = SourceState(rawValue: source.state)
+                return s == .connected || s == .offline
             } ?? false
 
             Button {

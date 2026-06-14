@@ -72,13 +72,15 @@ struct TrackContextSheet: View {
     private var isConnected: Bool {
         guard let p = index.trackPath[track.id],
               let source = try? LibraryStore.source(id: p.sourceId, ctx) else { return false }
-        return SourceState(rawValue: source.state) != .disconnected
+        let s = SourceState(rawValue: source.state)
+        return s == .connected || s == .offline
     }
 
+    /// Short name for the source (e.g. "Drive") used in the disabled sub-label (handoff §H).
     private var sourceDisplayLabel: String? {
         guard let p = index.trackPath[track.id],
               let source = try? LibraryStore.source(id: p.sourceId, ctx) else { return nil }
-        return source.label
+        return SourceKind(rawValue: source.kind)?.short ?? source.label
     }
 
     private func goToSourceLabel(subtitle: String?, dimmed: Bool) -> some View {
