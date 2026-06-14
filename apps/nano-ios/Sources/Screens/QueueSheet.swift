@@ -83,7 +83,7 @@ struct QueueSheet: View {
                 }
                 ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
             }
-            .task(id: engine.current?.persistentModelID) {
+            .task(id: engine.current?.binsTaskID) {   // re-runs on track switch + once a cloud track is analyzed
                 if let c = engine.current { bins = await WaveformStore.shared.bins(for: c) ?? [] }
             }
             .sheet(item: $contextTrack) { TrackContextSheet(track: $0) }

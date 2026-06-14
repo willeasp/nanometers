@@ -170,6 +170,9 @@ final class AudioEngine {
                 self.isPreparing = false
                 if let url {
                     self.loadFromURL(url, track: track)
+                    // The cloud file is now on disk; analyze it so the waveform + LUFS appear (the file
+                    // has no bundledName/bookmark, so the row's bins(for:) can't reach it on its own).
+                    Task { @MainActor in await WaveformStore.shared.analyzeDownloaded(track: track, fileURL: url) }
                 } else {
                     // No URL resolved — remain as a selection-only / unresolvable state.
                     NSLog("[AudioEngine] remoteURLProvider returned nil for \(track.title) — selection only")

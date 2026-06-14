@@ -31,6 +31,12 @@ final class WaveformStore {
             return cached.bins
         }
 
+        // A cloud track with no local handle can't be resolved here — only `analyzeDownloaded` can, once
+        // the file is in the cache. Bail BEFORE registering an in-flight slot: a doomed task here would be
+        // joined by a concurrent `analyzeDownloaded` (same key), which would then return nil and skip the
+        // real analysis of the downloaded file.
+        guard track.bundledName != nil || track.bookmark != nil else { return nil }
+
         // First analyze for this track — de-dupe: concurrent callers join the one Task.
         let id = track.persistentModelID
         if let task = inflight[id] { return await task.value }
@@ -50,6 +56,41 @@ final class WaveformStore {
         inflight[id] = nil
         return result
     }
+
+    /// Analyze a cloud track from a file already downloaded into the cache (which has no bundledName or
+    /// bookmark, so `bins(for:)` can't locate it). Persists bins + sets `waveformCacheKey`/`integratedLUFS`
+    /// on the track so the rows and Now Playing scrubber pick them up. Joins the same in-flight slot as
+    /// `bins(for:)` so the engine's call and a view's call can't double-analyze the same track.
+    @discardableResult
+    func analyzeDownloaded(track: Track, fileURL: URL) async -> [WaveBin]? {
+        if !track.waveformCacheKey.isEmpty,
+           let box = memory.object(forKey: track.waveformCacheKey as NSString) { return box.bins }
+        let id = track.persistentModelID
+        if let task = inflight[id] { return await task.value }
+
+        let ref = TrackRef(bundledName: nil, bookmark: nil, directURL: fileURL)
+        let task = Task { @MainActor () -> [WaveBin]? in
+            guard let result = try? await self.analyzer.analyze(ref) else { return nil }
+            WaveformCache.save(key: result.key, bins: result.bins, integratedLUFS: result.integratedLUFS,
+                               sampleRate: result.sampleRate, durationSec: result.durationSec)
+            self.memory.setObject(BinsBox(result.bins), forKey: result.key as NSString)
+            track.waveformCacheKey = result.key
+            track.integratedLUFS = result.integratedLUFS
+            return result.bins
+        }
+        inflight[id] = task
+        let result = await task.value
+        inflight[id] = nil
+        return result
+    }
+}
+
+extension Track {
+    /// Identity for a view's bins-fetch `.task(id:)`. Changes on BOTH a track switch (persistentModelID)
+    /// and analysis completion (waveformCacheKey flips "" → hash) — so the task restarts in either case.
+    /// Keying on waveformCacheKey alone would leave a stale in-flight fetch when switching between two
+    /// not-yet-analyzed tracks (both keys ""); keying on the id alone never re-fetches post-analysis.
+    var binsTaskID: String { "\(persistentModelID.hashValue):\(waveformCacheKey)" }
 }
 
 /// Boxes `[WaveBin]` so `NSCache` (which requires class keys/values) can hold it.

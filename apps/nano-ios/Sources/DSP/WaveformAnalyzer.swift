@@ -7,6 +7,9 @@ import CryptoKit
 struct TrackRef: Sendable {
     let bundledName: String?
     let bookmark: Data?
+    /// A directly-known local file (e.g. a cloud track already downloaded into RemoteFileCache). Takes
+    /// priority over bundle/bookmark resolution and needs no security scope — it's in our own caches dir.
+    var directURL: URL? = nil
 }
 
 /// Decodes a track ONCE off the main actor and runs nano-dsp over it: a mono mixdown for
@@ -67,6 +70,8 @@ actor WaveformAnalyzer {
     /// Resolve a track URL the same way AudioEngine does — bundled by name, else bookmark — but
     /// with the analyzer's own security scope.
     static func resolve(_ ref: TrackRef) throws -> (URL, Bool) {
+        // A downloaded cloud file in our caches dir — no bundle/bookmark, no security scope.
+        if let url = ref.directURL { return (url, false) }
         if let name = ref.bundledName, let url = Bundle.main.url(forResource: name, withExtension: nil) {
             return (url, false)
         }

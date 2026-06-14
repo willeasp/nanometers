@@ -4,6 +4,7 @@ struct NMRow: View {
     let track: Track
     var isCurrent: Bool = false
     var isPlaying: Bool = false
+    var isPreparing: Bool = false   // cloud track downloading before playback → show a spinner
     var isAvailable: Bool = true
     var onTap: () -> Void = {}
     var onEllipsis: () -> Void = {}
@@ -14,12 +15,16 @@ struct NMRow: View {
         HStack(spacing: 12) {
             NMArtwork(data: track.artworkData, size: 46, radius: Theme.Radius.albumRow)
                 .overlay {
-                    if isCurrent {
+                    if isCurrent || isPreparing {
                         ZStack {
                             Color.black.opacity(0.45)
-                            Image(systemName: isPlaying ? "waveform" : "play.fill")
-                                .font(.system(size: 16, weight: .semibold))
-                                .foregroundStyle(.white)
+                            if isPreparing {
+                                ProgressView().controlSize(.small).tint(.white)
+                            } else {
+                                Image(systemName: isPlaying ? "waveform" : "play.fill")
+                                    .font(.system(size: 16, weight: .semibold))
+                                    .foregroundStyle(.white)
+                            }
                         }
                         .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.albumRow, style: .continuous))
                     }
@@ -74,7 +79,8 @@ struct NMRow: View {
         .contentShape(Rectangle())
         .onTapGesture { if isAvailable { onTap() } }
         .opacity(isAvailable ? 1 : 0.45)
-        .task(id: track.persistentModelID) {
+        // binsTaskID re-runs the fetch once a just-downloaded cloud track is analyzed (key flips "" → hash).
+        .task(id: track.binsTaskID) {
             bins = await WaveformStore.shared.bins(for: track) ?? []
         }
     }

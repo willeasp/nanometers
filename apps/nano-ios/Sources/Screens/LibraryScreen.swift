@@ -352,6 +352,7 @@ private struct LibraryFolderLevel: View {
                             track: track,
                             isCurrent: engine.current?.id == track.id,
                             isPlaying: engine.isPlaying && engine.current?.id == track.id,
+                            isPreparing: engine.isPreparing && engine.current?.id == track.id,
                             onTap: { engine.play(track, in: content.tracks, context: rowCtx) },
                             onEllipsis: { detailTrack = track }
                         )
@@ -529,6 +530,7 @@ private struct LibraryAllSongsLevel: View {
                                     track: track,
                                     isCurrent: engine.current?.id == track.id,
                                     isPlaying: engine.isPlaying && engine.current?.id == track.id,
+                                    isPreparing: engine.isPreparing && engine.current?.id == track.id,
                                     onTap: { engine.play(track, in: content.tracks, context: .library) },
                                     onEllipsis: { detailTrack = track }
                                 )
@@ -689,7 +691,7 @@ private struct SearchHitRow: View {
         .frame(minHeight: Theme.Layout.rowMinHeight)
         .contentShape(Rectangle())
         .onTapGesture { onTap() }
-        .task(id: hit.track.persistentModelID) {
+        .task(id: hit.track.binsTaskID) {   // re-runs once a downloaded cloud track is analyzed
             bins = await WaveformStore.shared.bins(for: hit.track) ?? []
         }
     }

@@ -53,17 +53,22 @@ struct MiniPlayer: View {
 
             Button { engine.toggle() } label: {
                 ZStack {
-                    Image(systemName: engine.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 18)).foregroundStyle(Theme.text)
-                        .transition(.scale(scale: 0.7).combined(with: .opacity))   // replace-look pop, speed we control
-                        .id(engine.isPlaying)
+                    if engine.isPreparing {
+                        ProgressView().controlSize(.small).tint(Theme.text)
+                    } else {
+                        Image(systemName: engine.isPlaying ? "pause.fill" : "play.fill")
+                            .font(.system(size: 18)).foregroundStyle(Theme.text)
+                            .transition(.scale(scale: 0.7).combined(with: .opacity))   // replace-look pop, speed we control
+                            .id(engine.isPlaying)
+                    }
                 }
                 .frame(width: 40, height: 40).contentShape(Rectangle())
                 .animation(reduceMotion ? nil : .spring(response: 0.25, dampingFraction: 0.85), value: engine.isPlaying)
             }
             .buttonStyle(PressableButtonStyle())
+            .disabled(engine.isPreparing)
             .accessibilityIdentifier("miniPlayerPlayPause")
-            .accessibilityLabel(engine.isPlaying ? "Pause" : "Play")
+            .accessibilityLabel(engine.isPreparing ? "Loading" : (engine.isPlaying ? "Pause" : "Play"))
             .sensoryFeedback(.impact(weight: .light), trigger: engine.isPlaying)
 
             Button { engine.next() } label: {
@@ -90,7 +95,7 @@ struct MiniPlayer: View {
         .overlay(alignment: .bottom) { progressBar }
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .shadow(color: .black.opacity(0.4), radius: 12, y: 6)   // §01: 0 6 24 @.4 (radius ≈ CSS blur/2)
-        .task(id: track.persistentModelID) {
+        .task(id: track.binsTaskID) {   // re-runs on track switch + once a downloaded cloud track is analyzed
             bins = await WaveformStore.shared.bins(for: track) ?? []
         }
         .padding(.horizontal, 12)

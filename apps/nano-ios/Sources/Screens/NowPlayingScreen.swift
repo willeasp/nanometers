@@ -53,7 +53,7 @@ struct NowPlayingScreen: View {
         .task(id: engine.current?.persistentModelID) {
             if let t = engine.current { tint = await ArtworkTintStore.shared.tint(for: t) }
         }
-        .task(id: engine.current?.persistentModelID) {
+        .task(id: engine.current?.binsTaskID) {   // re-runs on track switch + once a cloud track is analyzed
             if let t = engine.current { bins = await WaveformStore.shared.bins(for: t) ?? [] }
         }
         .sheet(isPresented: $showContext) {
@@ -169,14 +169,19 @@ struct NowPlayingScreen: View {
                 ZStack {
                     Circle().fill(Theme.accent).frame(width: 64, height: 64)
                         .shadow(color: .black.opacity(0.4), radius: 20, y: 6)
-                    Image(systemName: engine.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 30)).foregroundStyle(Theme.bg)   // dark-on-amber (§03D)
-                        .transition(.scale(scale: 0.7).combined(with: .opacity))   // replace-look pop, at a speed we control
-                        .id(engine.isPlaying)                                       // (native symbolEffect.replace's duration is fixed/slower)
+                    if engine.isPreparing {
+                        ProgressView().controlSize(.regular).tint(Theme.bg)
+                    } else {
+                        Image(systemName: engine.isPlaying ? "pause.fill" : "play.fill")
+                            .font(.system(size: 30)).foregroundStyle(Theme.bg)   // dark-on-amber (§03D)
+                            .transition(.scale(scale: 0.7).combined(with: .opacity))   // replace-look pop, at a speed we control
+                            .id(engine.isPlaying)                                       // (native symbolEffect.replace's duration is fixed/slower)
+                    }
                 }
                 .animation(reduceMotion ? nil : .spring(response: 0.25, dampingFraction: 0.85), value: engine.isPlaying)   // matches the artwork scale
             }.buttonStyle(PressableButtonStyle()).frame(maxWidth: .infinity)
-            .accessibilityIdentifier("npPlayPause").accessibilityLabel(engine.isPlaying ? "Pause" : "Play")
+            .disabled(engine.isPreparing)
+            .accessibilityIdentifier("npPlayPause").accessibilityLabel(engine.isPreparing ? "Loading" : (engine.isPlaying ? "Pause" : "Play"))
             .sensoryFeedback(.impact(weight: .light), trigger: engine.isPlaying)
 
             Button { engine.next() } label: {

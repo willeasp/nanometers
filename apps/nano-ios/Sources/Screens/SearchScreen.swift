@@ -46,6 +46,7 @@ struct SearchScreen: View {
                                 track: t,
                                 isCurrent: engine.current?.id == t.id,
                                 isPlaying: engine.isPlaying && engine.current?.id == t.id,
+                                isPreparing: engine.isPreparing && engine.current?.id == t.id,
                                 isAvailable: LibraryBrowse.isAvailable(t, index: index),
                                 onTap: { engine.play(t, in: results, context: .search) }
                             )
