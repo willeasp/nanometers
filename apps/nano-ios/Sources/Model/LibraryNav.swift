@@ -47,15 +47,22 @@ final class LibraryNav {
     private(set) var switchToLibraryToken = 0
 
     /// Navigate to the folder holding `track` and flash it. Returns false (no-op) when the track's source
-    /// is missing or disconnected (handoff §5.2 "{Source} · not connected" → action disabled).
+    /// is missing or not reachable (only `.connected` and `.offline` are reachable — handoff §5.2).
     @MainActor
     func goToSource(track: Track, index: LibraryIndex, ctx: ModelContext) -> Bool {
         guard let p = index.trackPath[track.id],
-              let source = try? LibraryStore.source(id: p.sourceId, ctx),
-              SourceState(rawValue: source.state) != .disconnected else { return false }
+              let source = try? LibraryStore.source(id: p.sourceId, ctx) else { return false }
+        let s = SourceState(rawValue: source.state)
+        guard s == .connected || s == .offline else { return false }
         smart = nil; sourceId = p.sourceId; folderIds = p.folderIds
-        highlightTrackId = track.id
+        let hid = track.id
+        highlightTrackId = hid
         switchToLibraryToken += 1
+        // Self-owned clear: survives tab switches (LibraryScreen unmount would cancel the view task).
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(2.8))
+            if self.highlightTrackId == hid { self.highlightTrackId = nil }
+        }
         return true
     }
 }

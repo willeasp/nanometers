@@ -66,6 +66,8 @@ struct RootView: View {
         }
         // Task 6: Go-to-Source from a sheet/NowPlaying flips to the Library tab
         .onChange(of: libNav.switchToLibraryToken) { tab = .library }
+        // Belt-and-suspenders: clear stale highlight when leaving the Library tab.
+        .onChange(of: tab) { _, newTab in if newTab != .library { libNav.highlightTrackId = nil } }
         #if DEBUG
         .onAppear {   // headless self-test hooks: `-autoplay` docks a track, `-expand` opens Now Playing
             if ProcessInfo.processInfo.arguments.contains("-autoplay"), engine.current == nil {

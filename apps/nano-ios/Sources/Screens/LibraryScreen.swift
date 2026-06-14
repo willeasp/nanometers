@@ -16,11 +16,23 @@ struct LibraryScreen: View {
     @State private var showSettings = false
     @State private var searchActive = false
     @State private var searchQuery = ""
+    @FocusState private var searchFocused: Bool
     var onSearch: () -> Void = {}
 
     // Derived key from nav state — any change auto-clears the search.
     private var navKey: String {
         "\(nav.smart == nil ? "nil" : "smart")-\(nav.sourceId ?? "")-\(nav.folderIds.joined())"
+    }
+
+    /// Short label for the current scope — used in the search field placeholder and result count line.
+    /// At a source root: the source's short kind name (e.g. "Drive"). Otherwise: the content title.
+    private func scopeLabel(content: BrowseContent) -> String {
+        if nav.folderIds.isEmpty, nav.smart == nil, let sid = nav.sourceId,
+           let source = try? LibraryStore.source(id: sid, ctx),
+           let kind = SourceKind(rawValue: source.kind) {
+            return kind.short
+        }
+        return content.title
     }
 
     var body: some View {
@@ -44,15 +56,14 @@ struct LibraryScreen: View {
             .onChange(of: navKey) {
                 searchActive = false
                 searchQuery = ""
+                searchFocused = false
             }
-            // Task 4: scroll to highlighted track and clear after ~2.8 s
+            // Task 4: scroll to highlighted track (clear is owned by LibraryNav.goToSource)
             .task(id: nav.highlightTrackId) {
                 guard let tid = nav.highlightTrackId else { return }
                 withAnimation(.easeOut(duration: 0.3)) {
                     proxy.scrollTo(tid, anchor: .center)
                 }
-                try? await Task.sleep(for: .seconds(2.8))
-                nav.highlightTrackId = nil
             }
             .background(Theme.bg)
             .fileImporter(isPresented: $importing, allowedContentTypes: [.audio], allowsMultipleSelection: true) { result in
@@ -192,17 +203,20 @@ struct LibraryScreen: View {
 
         // (3) Scoped search field (shown when searchActive)
         if searchActive {
+            let sl = scopeLabel(content: content)
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass").foregroundStyle(Theme.text3)
-                TextField("Search in \(content.title)", text: $searchQuery)
+                TextField("Search in \(sl)", text: $searchQuery)
                     .textFieldStyle(.plain)
                     .foregroundStyle(Theme.text)
                     .autocorrectionDisabled()
+                    .focused($searchFocused)
                     .accessibilityIdentifier("scopedSearchField")
             }
             .padding(.horizontal, 12).frame(height: 40)
             .background(Theme.bgElev, in: RoundedRectangle(cornerRadius: Theme.Radius.searchField, style: .continuous))
             .padding(.bottom, 6)
+            .onAppear { searchFocused = true }
         }
 
         // (3b) Mono breadcrumb — below the title (handoff §3.2 order)
@@ -281,14 +295,15 @@ struct LibraryScreen: View {
                 // Tracks section
                 if !content.tracks.isEmpty {
                     sectionHeader("Tracks")
-                    let playCtx = folderPlayContext(content: content)
+                    // Row tap uses bare folder name context; Play All uses the source-qualified form (§5.3 G).
+                    let rowCtx = PlayContext(kind: "PLAYING FROM", name: content.title)
                     LazyVStack(spacing: 0) {
                         ForEach(content.tracks) { track in
                             NMRow(
                                 track: track,
                                 isCurrent: engine.current?.id == track.id,
                                 isPlaying: engine.isPlaying && engine.current?.id == track.id,
-                                onTap: { engine.play(track, in: content.tracks, context: playCtx) },
+                                onTap: { engine.play(track, in: content.tracks, context: rowCtx) },
                                 onEllipsis: { detailTrack = track }
                             )
                             .id(track.id)
@@ -356,17 +371,20 @@ struct LibraryScreen: View {
 
         // Scoped search field (shown when searchActive)
         if searchActive {
+            let sl = scopeLabel(content: content)
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass").foregroundStyle(Theme.text3)
-                TextField("Search in \(content.title)", text: $searchQuery)
+                TextField("Search in \(sl)", text: $searchQuery)
                     .textFieldStyle(.plain)
                     .foregroundStyle(Theme.text)
                     .autocorrectionDisabled()
+                    .focused($searchFocused)
                     .accessibilityIdentifier("scopedSearchField")
             }
             .padding(.horizontal, 12).frame(height: 40)
             .background(Theme.bgElev, in: RoundedRectangle(cornerRadius: Theme.Radius.searchField, style: .continuous))
             .padding(.bottom, 8)
+            .onAppear { searchFocused = true }
         }
 
         if searchActive && !searchQuery.trimmingCharacters(in: .whitespaces).isEmpty {
@@ -396,17 +414,18 @@ struct LibraryScreen: View {
     private func searchResultsView(content: BrowseContent, proxy: ScrollViewProxy) -> some View {
         let hits = LibraryBrowse.search(content.playAll, query: searchQuery, nav: nav, index: index, ctx: ctx)
         let q = searchQuery.trimmingCharacters(in: .whitespaces)
+        let sl = scopeLabel(content: content)
 
         // Helper line
         if hits.isEmpty {
-            Text("No tracks match \"\(q)\"")
+            Text("No tracks match \"\(q)\".")
                 .font(Theme.sans(13))
                 .foregroundStyle(Theme.text3)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.top, 4)
                 .padding(.bottom, 8)
         } else {
-            Text("\(hits.count) results in \(content.title)")
+            Text("\(hits.count) \(hits.count == 1 ? "result" : "results") in \(sl)")
                 .font(Theme.sans(13))
                 .foregroundStyle(Theme.text3)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -545,13 +564,18 @@ private struct SearchHitRow: View {
                     .tracking(-0.2)
                     .foregroundStyle(isCurrent ? Theme.accent : Theme.text)
                     .lineLimit(1)
-                let subtitle = hit.pathLabel.isEmpty
-                    ? hit.track.artist
-                    : "\(hit.track.artist) · \(hit.pathLabel)"
-                Text(subtitle)
-                    .font(Theme.sans(13.5))
-                    .foregroundStyle(Theme.text2)
-                    .lineLimit(1)
+                // Two-tone subtitle: artist in text2, path suffix in text3 (§H.2).
+                if hit.pathLabel.isEmpty {
+                    Text(hit.track.artist)
+                        .font(Theme.sans(13.5))
+                        .foregroundStyle(Theme.text2)
+                        .lineLimit(1)
+                } else {
+                    (Text(hit.track.artist).foregroundStyle(Theme.text2)
+                        + Text(" · \(hit.pathLabel)").foregroundStyle(Theme.text3))
+                        .font(Theme.sans(13.5))
+                        .lineLimit(1)
+                }
             }
             Spacer(minLength: 8)
 

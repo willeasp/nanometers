@@ -65,4 +65,56 @@ final class LibraryNavTests: XCTestCase {
         XCTAssertFalse(n.goToSource(track: tr, index: idx, ctx: ctx))
         XCTAssertNil(n.sourceId)
     }
+
+    // MARK: - Bug B regression: highlight clear is owned by goToSource, not the view
+
+    /// goToSource sets highlightTrackId immediately; the self-owned Task clears it after ~2.8s.
+    /// This test only verifies the synchronous side (set + token bump); timer behaviour is not unit-testable.
+    func test_goToSource_setsHighlight_andOwnsTheClear() throws {
+        let ctx = try TestDB.context()
+        ctx.insert(Source(id: "gdrive", kind: .gdrive, state: .connected))
+        ctx.insert(RootFolder(sourceId: "gdrive", name: "P", providerFolderId: "mine"))
+        let tr = Track(title: "X", artist: "", album: ""); tr.sourceId = "gdrive"; tr.folderId = "house"; ctx.insert(tr)
+        ctx.insert(FolderNode(id: "mine",  sourceId: "gdrive", name: "P",     parentId: nil,    childFolderIds: ["house"]))
+        ctx.insert(FolderNode(id: "house", sourceId: "gdrive", name: "House", parentId: "mine", trackIds: [tr.id]))
+        let idx = LibraryIndex(); idx.rebuild(from: ctx)
+        let n = LibraryNav()
+        XCTAssertTrue(n.goToSource(track: tr, index: idx, ctx: ctx))
+        // highlight must be set synchronously by goToSource, not by the view
+        XCTAssertEqual(n.highlightTrackId, tr.id)
+    }
+
+    // MARK: - Bug E regression: only .connected and .offline are reachable
+
+    func test_goToSource_needsReauth_returnsFalse() throws {
+        let ctx = try TestDB.context()
+        ctx.insert(Source(id: "gdrive", kind: .gdrive, state: .needsReauth))
+        let tr = Track(title: "X", artist: "", album: ""); tr.sourceId = "gdrive"; tr.folderId = "house"; ctx.insert(tr)
+        ctx.insert(FolderNode(id: "house", sourceId: "gdrive", name: "House", parentId: nil, trackIds: [tr.id]))
+        let idx = LibraryIndex(); idx.rebuild(from: ctx)
+        XCTAssertFalse(LibraryNav().goToSource(track: tr, index: idx, ctx: ctx),
+                       "needsReauth should not be treated as reachable")
+    }
+
+    func test_goToSource_authorizing_returnsFalse() throws {
+        let ctx = try TestDB.context()
+        ctx.insert(Source(id: "gdrive", kind: .gdrive, state: .authorizing))
+        let tr = Track(title: "X", artist: "", album: ""); tr.sourceId = "gdrive"; tr.folderId = "house"; ctx.insert(tr)
+        ctx.insert(FolderNode(id: "house", sourceId: "gdrive", name: "House", parentId: nil, trackIds: [tr.id]))
+        let idx = LibraryIndex(); idx.rebuild(from: ctx)
+        XCTAssertFalse(LibraryNav().goToSource(track: tr, index: idx, ctx: ctx),
+                       "authorizing should not be treated as reachable")
+    }
+
+    func test_goToSource_offline_returnsTrue() throws {
+        let ctx = try TestDB.context()
+        ctx.insert(Source(id: "gdrive", kind: .gdrive, state: .offline))
+        ctx.insert(RootFolder(sourceId: "gdrive", name: "P", providerFolderId: "mine"))
+        let tr = Track(title: "X", artist: "", album: ""); tr.sourceId = "gdrive"; tr.folderId = "house"; ctx.insert(tr)
+        ctx.insert(FolderNode(id: "mine",  sourceId: "gdrive", name: "P",     parentId: nil,    childFolderIds: ["house"]))
+        ctx.insert(FolderNode(id: "house", sourceId: "gdrive", name: "House", parentId: "mine", trackIds: [tr.id]))
+        let idx = LibraryIndex(); idx.rebuild(from: ctx)
+        XCTAssertTrue(LibraryNav().goToSource(track: tr, index: idx, ctx: ctx),
+                      "offline source should be reachable for Go-to-Source")
+    }
 }
