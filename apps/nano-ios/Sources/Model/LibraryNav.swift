@@ -4,6 +4,15 @@ import SwiftData
 
 enum SmartEntry: Equatable { case allSongs }
 
+/// One pushed level of the Library `NavigationStack`. Each case carries the *full* context it needs to
+/// render independently (a folder knows its whole path), so a destination never reads the live `nav` —
+/// which keeps ancestor levels rendering their own content while they sit mounted beneath the top one.
+enum LibraryRoute: Hashable {
+    case allSongs
+    case source(String)                       // sourceId, at its root
+    case folder(source: String, ids: [String]) // cumulative folder path under a source
+}
+
 /// The single nav-state object that drives the whole Library tab (handoff §02 `libNav`). Breadcrumbs,
 /// back, tab re-tap, and Go-to-Source are just different ways of writing this. Owned by RootView and
 /// injected, so any track context (playlist/queue/search/Now Playing) can re-drive it.
@@ -15,6 +24,30 @@ final class LibraryNav {
     var folderIds: [String] = []
 
     var isRoot: Bool { smart == nil && sourceId == nil }
+
+    /// The `NavigationStack` path, derived from this nav state and written back on pop/swipe-back.
+    /// `get` expands the flat state into one route per visible level; `set` collapses the (always
+    /// prefix-consistent) array back — the last element fully determines the state, so push, pop, and
+    /// multi-level jumps all round-trip exactly. Empty path == Library root.
+    var routePath: [LibraryRoute] {
+        get {
+            if smart == .allSongs { return [.allSongs] }
+            guard let sid = sourceId else { return [] }
+            var routes: [LibraryRoute] = [.source(sid)]
+            for i in folderIds.indices {
+                routes.append(.folder(source: sid, ids: Array(folderIds[0...i])))
+            }
+            return routes
+        }
+        set {
+            guard let last = newValue.last else { reset(); return }
+            switch last {
+            case .allSongs:                       smart = .allSongs; sourceId = nil; folderIds = []
+            case .source(let s):                  smart = nil; sourceId = s; folderIds = []
+            case .folder(let s, let ids):         smart = nil; sourceId = s; folderIds = ids
+            }
+        }
+    }
 
     func reset() { smart = nil; sourceId = nil; folderIds = [] }
     func openAllSongs() { smart = .allSongs; sourceId = nil; folderIds = [] }

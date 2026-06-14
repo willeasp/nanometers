@@ -42,6 +42,38 @@ final class LibraryBrowserUITests: XCTestCase {
                       "Tab re-tap should pop back to root showing 'All Songs'")
     }
 
+    /// The headline ask: a left-to-right edge swipe pops the stack (interactive swipe-back), even though
+    /// the system nav bar is hidden. Proven by re-revealing the parent level's folder row — which only
+    /// exists at the source level, not inside the folder. If the swipe-back shim were a no-op, the swipe
+    /// would do nothing and the folder row would never come back.
+    @MainActor
+    func test_edgeSwipe_popsBackToParent() {
+        let app = XCUIApplication()
+        app.launch()
+
+        // Drill: root → source → into the "On My iPhone" root folder.
+        let sourceRow = app.descendants(matching: .any)["sourceRow-local"].firstMatch
+        XCTAssertTrue(sourceRow.waitForExistence(timeout: 10), "Root should show the local source row")
+        sourceRow.tap()
+
+        let folderRow = app.descendants(matching: .any)["folderRow-On My iPhone"].firstMatch
+        XCTAssertTrue(folderRow.waitForExistence(timeout: 10), "Source level should show the root folder row")
+        folderRow.tap()
+
+        // Inside the folder: a demo track is visible.
+        XCTAssertTrue(app.staticTexts["Biljam"].waitForExistence(timeout: 5),
+                      "Folder should contain demo track 'Biljam'")
+
+        // Edge swipe left→right from the screen's left edge.
+        let edge = app.coordinate(withNormalizedOffset: CGVector(dx: 0.0, dy: 0.5))
+        let target = app.coordinate(withNormalizedOffset: CGVector(dx: 0.92, dy: 0.5))
+        edge.press(forDuration: 0.1, thenDragTo: target)
+
+        // Popped back to the source level: the parent's folder row is visible again.
+        XCTAssertTrue(folderRow.waitForExistence(timeout: 5),
+                      "Edge swipe-back should pop to the source level (folder row visible again)\n\(app.debugDescription)")
+    }
+
     /// All Songs lists both demo tracks.
     @MainActor
     func test_allSongs_listsDemoTracks() {

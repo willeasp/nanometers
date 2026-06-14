@@ -22,11 +22,29 @@ struct BrowseContent {
     var showsPlayAll: Bool { !playAll.isEmpty }
 }
 
+/// An immutable address inside the Library — the part of `LibraryNav` that decides *what* renders.
+/// Each `NavigationStack` level holds its own `NavLocation` so it renders independently of the live nav.
+struct NavLocation: Equatable {
+    var smart: SmartEntry?
+    var sourceId: String?
+    var folderIds: [String]
+    init(smart: SmartEntry? = nil, sourceId: String? = nil, folderIds: [String] = []) {
+        self.smart = smart; self.sourceId = sourceId; self.folderIds = folderIds
+    }
+    static let root = NavLocation()
+}
+
 enum LibraryBrowse {
     @MainActor
     static func content(for nav: LibraryNav, index: LibraryIndex, ctx: ModelContext) -> BrowseContent {
-        if nav.smart == .allSongs { return allSongsContent(index: index, ctx: ctx) }
-        if let sourceId = nav.sourceId { return folderContent(sourceId: sourceId, nav: nav, index: index, ctx: ctx) }
+        content(at: NavLocation(smart: nav.smart, sourceId: nav.sourceId, folderIds: nav.folderIds),
+                index: index, ctx: ctx)
+    }
+
+    @MainActor
+    static func content(at loc: NavLocation, index: LibraryIndex, ctx: ModelContext) -> BrowseContent {
+        if loc.smart == .allSongs { return allSongsContent(index: index, ctx: ctx) }
+        if let sourceId = loc.sourceId { return folderContent(sourceId: sourceId, folderIds: loc.folderIds, index: index, ctx: ctx) }
         return rootContent(index: index, ctx: ctx)
     }
 
@@ -45,14 +63,14 @@ enum LibraryBrowse {
     }
 
     @MainActor
-    private static func folderContent(sourceId: String, nav: LibraryNav, index: LibraryIndex, ctx: ModelContext) -> BrowseContent {
+    private static func folderContent(sourceId: String, folderIds: [String], index: LibraryIndex, ctx: ModelContext) -> BrowseContent {
         let source = try? LibraryStore.source(id: sourceId, ctx)
         let kind = source.flatMap { SourceKind(rawValue: $0.kind) } ?? .local
         var c = BrowseContent(level: .folder)
         c.sourceTint = kind.tintHex
         var crumbs = [BrowseContent.Crumb(label: kind.short, folderDepth: -1)]   // first crumb = source root
 
-        if nav.folderIds.isEmpty {
+        if folderIds.isEmpty {
             // Source root: list the source's root folders.
             c.title = source?.label ?? kind.label
             let roots = (try? LibraryStore.rootFolders(of: sourceId, ctx)) ?? []
@@ -65,7 +83,7 @@ enum LibraryBrowse {
 
         // Inside a folder: title + crumbs from the path; sub-folders + direct tracks; recursive play-all.
         var node: FolderNode?
-        for (depth, fid) in nav.folderIds.enumerated() {
+        for (depth, fid) in folderIds.enumerated() {
             node = try? LibraryStore.folderNode(id: fid, ctx)
             crumbs.append(.init(label: node?.name ?? "…", folderDepth: depth))
         }
@@ -135,12 +153,17 @@ enum LibraryBrowse {
     /// each hit annotated with its folder path. Empty/whitespace query → no hits (search is opt-in).
     @MainActor
     static func search(_ scope: [Track], query: String, nav: LibraryNav, index: LibraryIndex, ctx: ModelContext) -> [SearchHit] {
+        search(scope, query: query, scopeFolderIds: nav.folderIds, allSongs: nav.smart == .allSongs, index: index, ctx: ctx)
+    }
+
+    @MainActor
+    static func search(_ scope: [Track], query: String, scopeFolderIds: [String], allSongs: Bool, index: LibraryIndex, ctx: ModelContext) -> [SearchHit] {
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
         guard !q.isEmpty else { return [] }
         let filtered = dedupeByID(scope.filter {
             $0.title.lowercased().contains(q) || $0.artist.lowercased().contains(q) || $0.album.lowercased().contains(q)
         })
-        return filtered.map { SearchHit(track: $0, pathLabel: relativePath(for: $0, scopeFolderIds: nav.folderIds, allSongs: nav.smart == .allSongs, index: index, ctx: ctx)) }
+        return filtered.map { SearchHit(track: $0, pathLabel: relativePath(for: $0, scopeFolderIds: scopeFolderIds, allSongs: allSongs, index: index, ctx: ctx)) }
     }
 
     /// Folder path for a hit. Under a source scope: path RELATIVE to the current scope (strips the scope

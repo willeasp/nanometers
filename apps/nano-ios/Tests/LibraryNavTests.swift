@@ -39,6 +39,55 @@ final class LibraryNavTests: XCTestCase {
         XCTAssertNil(n.smart)
     }
 
+    // MARK: - routePath bridge (the NavigationStack path)
+
+    func test_routePath_root_isEmpty() {
+        XCTAssertEqual(LibraryNav().routePath, [])
+    }
+    func test_routePath_allSongs() {
+        let n = LibraryNav(); n.openAllSongs()
+        XCTAssertEqual(n.routePath, [.allSongs])
+    }
+    func test_routePath_sourceAndFolders_expandOnePerLevel() {
+        let n = LibraryNav(); n.openSource("gdrive"); n.openFolder("mine"); n.openFolder("house")
+        XCTAssertEqual(n.routePath, [
+            .source("gdrive"),
+            .folder(source: "gdrive", ids: ["mine"]),
+            .folder(source: "gdrive", ids: ["mine", "house"]),
+        ])
+    }
+    /// Pop (NavigationStack truncates the path) writes back the right state — the last element wins.
+    func test_routePath_set_popsToFolder() {
+        let n = LibraryNav(); n.openSource("gdrive"); n.openFolder("mine"); n.openFolder("house")
+        n.routePath = [.source("gdrive"), .folder(source: "gdrive", ids: ["mine"])]
+        XCTAssertEqual(n.sourceId, "gdrive"); XCTAssertEqual(n.folderIds, ["mine"]); XCTAssertNil(n.smart)
+    }
+    func test_routePath_set_emptyPops_toRoot() {
+        let n = LibraryNav(); n.openSource("gdrive"); n.openFolder("mine")
+        n.routePath = []
+        XCTAssertTrue(n.isRoot); XCTAssertNil(n.smart); XCTAssertEqual(n.folderIds, [])
+    }
+    func test_routePath_set_toSourceRoot_clearsFolders() {
+        let n = LibraryNav(); n.openSource("gdrive"); n.openFolder("mine"); n.openFolder("house")
+        n.routePath = [.source("gdrive")]
+        XCTAssertEqual(n.sourceId, "gdrive"); XCTAssertEqual(n.folderIds, [])
+    }
+    /// get∘set is identity for every reachable state (the stability NavigationStack relies on).
+    func test_routePath_roundTrips() {
+        for (smart, sid, folders): (SmartEntry?, String?, [String]) in [
+            (nil, nil, []),
+            (.allSongs, nil, []),
+            (nil, "gdrive", []),
+            (nil, "gdrive", ["a"]),
+            (nil, "local", ["a", "b", "c"]),
+        ] {
+            let n = LibraryNav(); n.smart = smart; n.sourceId = sid; n.folderIds = folders
+            let path = n.routePath
+            let m = LibraryNav(); m.routePath = path
+            XCTAssertEqual(m.smart, smart); XCTAssertEqual(m.sourceId, sid); XCTAssertEqual(m.folderIds, folders)
+        }
+    }
+
     func test_goToSource_resolvesPath_setsHighlight_andRequestsLibrary() throws {
         let ctx = try TestDB.context()
         ctx.insert(Source(id: "gdrive", kind: .gdrive, state: .connected))
