@@ -179,6 +179,7 @@ final class AudioEngine {
             releaseScope()
             progress = 0; elapsed = 0; seekOffsetFrames = 0; lastKnownFrame = 0; outputLevel = 0
             liveMeter.requestReset(); momentaryLUFS = nil
+            scopeTap.reset()                                    // and the live-scope ring (Drive track switch)
             current = track; isPlaying = false; file = nil; totalFrames = 0
             updateNowPlayingInfo()
             isPreparing = true
