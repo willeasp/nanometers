@@ -20,20 +20,21 @@ struct TrackContextSheet: View {
                             Text("\(track.format) · \(track.sampleRate) kHz").font(Theme.mono(11)).foregroundStyle(Theme.text3)
                         }
                         Spacer()
-                    }.listRowBackground(Theme.bg)
+                    }.listRowBackground(Color.clear)
                 }
                 Section {
                     action("Play Next", "text.line.first.and.arrowtriangle.forward") { engine.playNext(track); dismiss() }
                     action("Add to Queue", "list.bullet.indent") { engine.enqueue(track); dismiss() }
                     action("Add to Playlist…", "plus.circle") { addToPlaylist = true }
                     action(track.isLoved ? "Loved" : "Love", track.isLoved ? "heart.fill" : "heart") { track.isLoved.toggle() }
-                }.listRowBackground(Theme.bg)
+                }.listRowBackground(Color.clear)
             }
-            .listStyle(.plain).background(Theme.bg)
+            .listStyle(.plain).scrollContentBackground(.hidden)
             .navigationTitle("").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
             .sheet(isPresented: $addToPlaylist) { AddToPlaylistSheet(track: track) }
         }
+        .nmSheetGlass()
         .preferredColorScheme(.dark)
     }
 

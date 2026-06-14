@@ -23,12 +23,14 @@ struct SettingsSheet: View {
                 } footer: {
                     Text("Tap the meter icons in the player to switch between close-up, goniometer and spectrum — show one or several at once.")
                 }
+                .listRowBackground(Color.clear)          // let the sheet's glass material show through
             }
             .tint(Theme.accent)
-            .scrollContentBackground(.hidden).background(Theme.bg)
+            .scrollContentBackground(.hidden)
             .navigationTitle("Settings").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
         }
+        .nmSheetGlass()
         .preferredColorScheme(.dark)
     }
 

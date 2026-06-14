@@ -7,6 +7,7 @@ import SwiftUI
 /// The optional 56×22 mini-waveform slot (§02) appears once the track's bins are analyzed.
 struct MiniPlayer: View {
     @Environment(AudioEngine.self) private var engine
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var artNamespace: Namespace.ID
     var artSourceID: String
     var onTapBody: () -> Void = {}
@@ -51,20 +52,26 @@ struct MiniPlayer: View {
             }
 
             Button { engine.toggle() } label: {
-                Image(systemName: engine.isPlaying ? "pause.fill" : "play.fill")
-                    .font(.system(size: 18)).foregroundStyle(Theme.text)
-                    .frame(width: 40, height: 40).contentShape(Rectangle())
+                ZStack {
+                    Image(systemName: engine.isPlaying ? "pause.fill" : "play.fill")
+                        .font(.system(size: 18)).foregroundStyle(Theme.text)
+                        .transition(.scale(scale: 0.7).combined(with: .opacity))   // replace-look pop, speed we control
+                        .id(engine.isPlaying)
+                }
+                .frame(width: 40, height: 40).contentShape(Rectangle())
+                .animation(reduceMotion ? nil : .spring(response: 0.25, dampingFraction: 0.85), value: engine.isPlaying)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(PressableButtonStyle())
             .accessibilityIdentifier("miniPlayerPlayPause")
             .accessibilityLabel(engine.isPlaying ? "Pause" : "Play")
+            .sensoryFeedback(.impact(weight: .light), trigger: engine.isPlaying)
 
             Button { engine.next() } label: {
                 Image(systemName: "forward.fill")
                     .font(.system(size: 16)).foregroundStyle(Theme.text)
                     .frame(width: 40, height: 40).contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(PressableButtonStyle())
             .accessibilityIdentifier("miniPlayerNext")
             .accessibilityLabel("Next")
         }
@@ -74,9 +81,15 @@ struct MiniPlayer: View {
             RoundedRectangle(cornerRadius: 20, style: .continuous)
                 .strokeBorder(Theme.glassBorder, lineWidth: 0.5)
         )
+        .overlay(alignment: .top) {                       // 1px inner-top sheen (matches the glass tab bar)
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(Theme.glassSheen, lineWidth: 1)
+                .blur(radius: 0.5)
+                .mask(LinearGradient(colors: [.white, .clear], startPoint: .top, endPoint: .center))
+        }
         .overlay(alignment: .bottom) { progressBar }
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .shadow(color: .black.opacity(0.4), radius: 18, y: 8)
+        .shadow(color: .black.opacity(0.4), radius: 12, y: 6)   // §01: 0 6 24 @.4 (radius ≈ CSS blur/2)
         .task(id: track.persistentModelID) {
             bins = await WaveformStore.shared.bins(for: track) ?? []
         }

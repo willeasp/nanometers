@@ -22,7 +22,8 @@ use std::{
 };
 use wgpu::SurfaceTargetUnsafe;
 
-use crate::layout::{Column, default_layout, reconcile_fixed_widths, viewports};
+use crate::input::Commit;
+use crate::layout::{Column, default_layout, reconcile_fixed_widths, remap_to_layout_order, viewports};
 use crate::module::loudness::LoudnessModule;
 use crate::module::oscilloscope::OscilloscopeModule;
 use crate::module::waveform::WaveformModule;
@@ -292,6 +293,47 @@ fn build_module(
     }
 }
 
+/// A runtime layout mutation from the context menu (ADR 0003 / 0004 — multi-instance, Phase F3).
+/// The render loop applies it via [`apply_edit`], which keeps `layout` and `modules` 1:1.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LayoutEdit {
+    /// Insert a new Module of `module_type` right after the column at `after` (clamped).
+    Insert { after: usize, module_type: String },
+    /// Remove the column (and its Module) at `index`.
+    Remove { index: usize },
+}
+
+/// Apply a [`LayoutEdit`] to the live `layout` + `modules` together, so the two never drift out of
+/// the 1:1 alignment the render loop relies on. `build` constructs the Module for an inserted column
+/// (the real loop passes `build_module`; tests pass a FakeModule factory). An inserted column
+/// reconciles its fixed width from the freshly-built Module — the Module is the size-of-truth, the
+/// same rule spawn uses — and loads its (empty) config so it boots at defaults.
+fn apply_edit<F>(
+    layout: &mut Vec<Column>,
+    modules: &mut Vec<Box<dyn Module + Send>>,
+    edit: &LayoutEdit,
+    mut build: F,
+) where
+    F: FnMut(&str) -> Box<dyn Module + Send>,
+{
+    match edit {
+        LayoutEdit::Insert { after, module_type } => {
+            let at = crate::layout::insert_column(layout, *after, module_type);
+            let mut module = build(module_type);
+            if let Some(w) = module.intrinsic_width() {
+                layout[at].fixed_width_px = Some(w);
+            }
+            module.load_config(&layout[at].config);
+            modules.insert(at, module);
+        }
+        LayoutEdit::Remove { index } => {
+            if crate::layout::remove_column(layout, *index).is_some() {
+                modules.remove(*index);
+            }
+        }
+    }
+}
+
 /// Push each column's persisted opaque config (ADR 0003) into its freshly-built Module. Called at
 /// editor spawn AFTER `build_module` — modules + layout are 1:1 by position. A module treats
 /// unrecognized/empty bytes as defaults, so this is always safe (including the default empty config).
@@ -465,6 +507,8 @@ fn run_render_loop(
     let mut last = Instant::now();
     // Host-owned pointer-grab state (ADR 0004, amended: render-side). Transient — never persisted.
     let mut router = crate::input::Router::new();
+    // Host overlay (context menu + empty-strip hint) — drawn over the strip in its own load pass.
+    let mut overlay = crate::overlay::Overlay::new(&device, surface_config.format);
 
     while !ctl.stop.load(Ordering::Relaxed) {
         // Drain the message channel (host → main thread → here): coalesce resizes (only the latest
@@ -483,23 +527,36 @@ fn run_render_loop(
             surface_config.height = h.max(1);
             surface.configure(&device, &surface_config);
             scale_factor = scale;
+            // The menu anchor is physical px from before the resize; dismiss rather than redraw it at
+            // stale coordinates (a scale change would reinterpret the anchor wholesale).
+            router.close_menu();
         }
         // Run the pointer-grab router over this batch of input (after the resize, so it hit-tests
         // against the current surface). Hit-testing uses the STABLE committed viewports — the swap
         // points stay put under the cursor even as the strip reflows. A reorder commit returns the
         // new order (modules already permuted to match); adopt + persist it.
-        let committed_vps = viewports(
-            &layout,
-            surface_config.width as f32,
-            surface_config.height as f32,
-            scale_factor,
-        );
+        let sw = surface_config.width as f32;
+        let sh = surface_config.height as f32;
+        // Recomputed after any layout-changing commit so every event in the batch hit-tests against
+        // the CURRENT columns — an add/remove mid-batch would otherwise leave stale viewports that
+        // index a since-removed module out of bounds.
+        let mut committed_vps = viewports(&layout, sw, sh, scale_factor);
         let mut layout_dirty = false;
         for ev in &inputs {
-            if let Some(new) = router.handle(ev, &layout, &committed_vps, &mut modules, scale_factor)
-            {
-                layout = new;
-                layout_dirty = true;
+            match router.handle(ev, &layout, &committed_vps, &mut modules, sw, sh, scale_factor) {
+                Some(Commit::Reorder(new)) => {
+                    layout = new;
+                    layout_dirty = true;
+                    committed_vps = viewports(&layout, sw, sh, scale_factor);
+                }
+                Some(Commit::Edit(edit)) => {
+                    apply_edit(&mut layout, &mut modules, &edit, |t| {
+                        build_module(t, &device, surface_config.format)
+                    });
+                    layout_dirty = true;
+                    committed_vps = viewports(&layout, sw, sh, scale_factor);
+                }
+                None => {}
             }
         }
         // Persist when something durable changed: a committed reorder, or a discrete press/release/
@@ -604,16 +661,7 @@ fn run_render_loop(
             surface_config.height as f32,
             scale_factor,
         );
-        let viewports: Vec<Rect> = layout
-            .iter()
-            .map(|c| {
-                let j = active
-                    .iter()
-                    .position(|a| a.instance_id == c.instance_id)
-                    .expect("every committed column has a place in the active order");
-                active_vps[j]
-            })
-            .collect();
+        let viewports: Vec<Rect> = remap_to_layout_order(&layout, active, &active_vps);
 
         // Phase 2a: each Module encodes its own offscreen passes / per-frame uploads before the
         // shared pass opens. `scale_factor` rides along so logical-px sizing lands right on Retina.
@@ -646,6 +694,23 @@ fn run_render_loop(
                 m.render(&mut rpass, *vp);
             }
         }
+
+        // Phase 2c: the host overlay (context menu + empty-strip hint + draggable-seam hairlines) over
+        // the whole surface, in its own load pass. The seams come from the ACTIVE order/geometry, so a
+        // hairline tracks its boundary live while a column drags. A no-op when there's nothing to show.
+        let seams = crate::layout::draggable_seams(active, &active_vps);
+        overlay.render(
+            &device,
+            &queue,
+            &mut encoder,
+            &view,
+            sw,
+            sh,
+            scale_factor,
+            router.menu_overlay(),
+            layout.is_empty(),
+            &seams,
+        );
 
         queue.submit(Some(encoder.finish()));
         // Async present (CAMetalLayer.presentsWithTransaction defaults false, wgpu doesn't override),
@@ -837,12 +902,22 @@ mod tests {
         assert_eq!(l[1].fixed_width_px, Some(151.0));
     }
 
-    /// A Module with no GPU state — `load_configs`/`flush_configs` only touch save/load_config, never
-    /// render, so this is constructible in a unit test (render/update are unreachable no-ops here).
+    /// A Module with no GPU state — the config/edit plumbing only touches save/load_config and
+    /// intrinsic_width, never render, so this is constructible in a unit test (render/update are
+    /// unreachable no-ops here). `intrinsic` lets a test stand in for a fixed-width Module (Loudness).
     struct FakeModule {
         config: Vec<u8>,
+        intrinsic: Option<f32>,
+    }
+    impl FakeModule {
+        fn flex(config: Vec<u8>) -> Self {
+            Self { config, intrinsic: None }
+        }
     }
     impl Module for FakeModule {
+        fn intrinsic_width(&self) -> Option<f32> {
+            self.intrinsic
+        }
         fn update(&mut self, _c: &FrameContext, _q: &wgpu::Queue) {}
         fn render(&mut self, _r: &mut wgpu::RenderPass, _v: Rect) {}
         fn on_event(&mut self, _e: &baseview::Event, _v: Rect) -> crate::module::EventStatus {
@@ -856,6 +931,73 @@ mod tests {
         }
     }
 
+    fn apply_edit_tests_flex_factory(_t: &str) -> Box<dyn Module + Send> {
+        Box::new(FakeModule::flex(Vec::new()))
+    }
+
+    #[test]
+    fn apply_edit_insert_adds_module_and_column_in_lockstep() {
+        let mut layout = vec![
+            Column::new(0, module_type::WAVEFORM, 1.0),
+            Column::fixed(1, module_type::LOUDNESS, 150.0),
+        ];
+        let mut modules: Vec<Box<dyn Module + Send>> =
+            vec![Box::new(FakeModule::flex(vec![])), Box::new(FakeModule::flex(vec![]))];
+        apply_edit(
+            &mut layout,
+            &mut modules,
+            &LayoutEdit::Insert { after: 0, module_type: module_type::OSCILLOSCOPE.into() },
+            apply_edit_tests_flex_factory,
+        );
+        assert_eq!(layout.len(), 3);
+        assert_eq!(modules.len(), layout.len(), "modules stay 1:1 with columns");
+        assert_eq!(layout[1].module_type, module_type::OSCILLOSCOPE, "lands right after column 0");
+        assert_eq!(layout[1].instance_id, 2, "fresh id");
+    }
+
+    #[test]
+    fn apply_edit_remove_drops_both() {
+        let mut layout = vec![
+            Column::new(0, module_type::WAVEFORM, 0.5),
+            Column::new(1, module_type::OSCILLOSCOPE, 0.5),
+            Column::new(2, module_type::WAVEFORM, 0.5),
+        ];
+        let mut modules: Vec<Box<dyn Module + Send>> = vec![
+            Box::new(FakeModule::flex(vec![])),
+            Box::new(FakeModule::flex(vec![])),
+            Box::new(FakeModule::flex(vec![])),
+        ];
+        apply_edit(&mut layout, &mut modules, &LayoutEdit::Remove { index: 1 }, apply_edit_tests_flex_factory);
+        assert_eq!(modules.len(), layout.len());
+        assert_eq!(
+            layout.iter().map(|c| c.instance_id).collect::<Vec<_>>(),
+            vec![0, 2],
+            "the right column is gone"
+        );
+    }
+
+    #[test]
+    fn apply_edit_remove_to_empty() {
+        let mut layout = vec![Column::new(0, module_type::WAVEFORM, 1.0)];
+        let mut modules: Vec<Box<dyn Module + Send>> = vec![Box::new(FakeModule::flex(vec![]))];
+        apply_edit(&mut layout, &mut modules, &LayoutEdit::Remove { index: 0 }, apply_edit_tests_flex_factory);
+        assert!(layout.is_empty() && modules.is_empty(), "the strip can go empty");
+    }
+
+    #[test]
+    fn apply_edit_insert_pins_intrinsic_width() {
+        let mut layout = vec![Column::new(0, module_type::WAVEFORM, 1.0)];
+        let mut modules: Vec<Box<dyn Module + Send>> = vec![Box::new(FakeModule::flex(vec![]))];
+        // A factory whose built module reports an intrinsic width (stands in for Loudness).
+        apply_edit(
+            &mut layout,
+            &mut modules,
+            &LayoutEdit::Insert { after: 0, module_type: module_type::LOUDNESS.into() },
+            |_t| Box::new(FakeModule { config: Vec::new(), intrinsic: Some(150.0) }),
+        );
+        assert_eq!(layout[1].fixed_width_px, Some(150.0), "inserted column pins to the module's width");
+    }
+
     #[test]
     fn configs_load_into_modules_then_flush_back_into_columns() {
         let mut layout = vec![
@@ -863,8 +1005,8 @@ mod tests {
             column_with_config(9, module_type::LOUDNESS, 0.5, b"persisted-B".to_vec()),
         ];
         let mut modules: Vec<Box<dyn Module + Send>> = vec![
-            Box::new(FakeModule { config: Vec::new() }),
-            Box::new(FakeModule { config: Vec::new() }),
+            Box::new(FakeModule::flex(Vec::new())),
+            Box::new(FakeModule::flex(Vec::new())),
         ];
         // LOAD: the persisted bytes reach the modules (1:1 by position).
         load_configs(&mut modules, &layout);

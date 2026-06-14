@@ -65,6 +65,33 @@ impl Column {
     }
 }
 
+/// The next free instance id for a runtime-added column: one past the current max (0 when empty).
+/// Ids need only be unique among present columns (the router and reorder match by id), so reusing a
+/// freed id is harmless — they aren't durable handles, and this needs no persisted counter.
+pub fn next_instance_id(cols: &[Column]) -> u64 {
+    cols.iter().map(|c| c.instance_id).max().map_or(0, |m| m.saturating_add(1))
+}
+
+/// Insert a fresh FLEX column of `module_type` right after index `after` (clamped to the end), with a
+/// newly-allocated id. Returns the insertion index so the caller can drop the matching Module into
+/// the same slot. Intrinsic (fixed) sizing is reconciled by the caller from the built module — the
+/// same split as spawn, since layout has no view of Module widths.
+pub fn insert_column(cols: &mut Vec<Column>, after: usize, module_type: &str) -> usize {
+    let id = next_instance_id(cols);
+    // saturating_add so `usize::MAX` is a safe "append at the end" sentinel (the empty-strip / no-column
+    // menu case) — it clamps to len rather than overflowing.
+    let at = after.saturating_add(1).min(cols.len());
+    cols.insert(at, Column::new(id, module_type, 1.0));
+    at
+}
+
+/// Remove the column at `index`, returning its instance_id; `None` if out of range. No minimum count —
+/// an empty strip is a valid state (it shows the right-click hint), so the caller drops the matching
+/// Module at the same index without a floor check.
+pub fn remove_column(cols: &mut Vec<Column>, index: usize) -> Option<u64> {
+    (index < cols.len()).then(|| cols.remove(index).instance_id)
+}
+
 /// The app-default layout for a fresh instance with no persisted state (ADR 0003): the Waveform
 /// flexes to fill the window, with the Loudness meter pinned to a fixed width on the right.
 pub fn default_layout() -> Vec<Column> {
@@ -148,6 +175,26 @@ pub fn viewports(cols: &[Column], surface_w: f32, surface_h: f32, scale: f32) ->
 /// visible and, crucially, finite-positive so it can't serialize to a load-breaking JSON `null`.
 const MIN_FLEX_FRACTION: f32 = 0.05;
 
+/// Map each column in `layout` order to its viewport, looked up from the `active` order's
+/// `active_vps` by instance_id. `active` is the provisional reorder order while a column drags (the
+/// strip re-tiles to preview the drop), else `layout` itself (identity). The modules Vec stays in
+/// committed `layout` order, so this returns each module's rect in that order. The live code keeps all
+/// three slices the same length (provisional is a permutation of the committed layout), so the
+/// `unwrap_or(i)` identity fallback resolves; the final `.get(j)` is a belt-and-suspenders guard so a
+/// future slip degrades to an empty (draw-nothing) rect instead of panicking the render thread — the
+/// whole point of extracting this off the old inline `.expect`.
+pub fn remap_to_layout_order(layout: &[Column], active: &[Column], active_vps: &[Rect]) -> Vec<Rect> {
+    let empty = Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
+    layout
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let j = active.iter().position(|a| a.instance_id == c.instance_id).unwrap_or(i);
+            active_vps.get(j).copied().unwrap_or(empty)
+        })
+        .collect()
+}
+
 /// The column whose viewport contains physical-px `x` (columns are full-height, so x alone
 /// decides). `None` if x is past every rect — including a column clamped to zero width in a
 /// too-narrow window. Viewports tile gap-free, so the first containing rect is the answer.
@@ -174,6 +221,16 @@ pub fn resize_boundary_at(
             && cols[i].fixed_width_px.is_none()
             && cols[i + 1].fixed_width_px.is_none()
     })
+}
+
+/// The physical-px x of every DRAGGABLE seam — the boundary between two adjacent FLEX columns (the
+/// only resizable seams, [`resize_boundary_at`]). The Overlay draws a hairline at each so the resize
+/// affordance is visible; a fixed column's edge (e.g. the Loudness meter) is excluded.
+pub fn draggable_seams(cols: &[Column], viewports: &[Rect]) -> Vec<f32> {
+    (0..cols.len().saturating_sub(1))
+        .filter(|&i| cols[i].fixed_width_px.is_none() && cols[i + 1].fixed_width_px.is_none())
+        .map(|i| viewports[i].x + viewports[i].w)
+        .collect()
 }
 
 /// The slot the dragged column should occupy if dropped at physical-px `cursor_x`: the count of
@@ -211,12 +268,76 @@ pub fn sanitize_layout(cols: &mut [Column]) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn next_instance_id_is_one_past_the_max() {
+        assert_eq!(next_instance_id(&[]), 0, "empty strip starts at 0");
+        assert_eq!(next_instance_id(&cols(&[0.5, 0.5])), 2, "ids 0,1 → 2");
+        let with_gap = vec![Column::new(5, module_type::WAVEFORM, 1.0)];
+        assert_eq!(next_instance_id(&with_gap), 6, "single id 5 → 6");
+        let unsorted = vec![
+            Column::new(2, module_type::WAVEFORM, 1.0),
+            Column::new(0, module_type::WAVEFORM, 1.0),
+            Column::new(9, module_type::WAVEFORM, 1.0),
+            Column::new(3, module_type::WAVEFORM, 1.0),
+        ];
+        assert_eq!(next_instance_id(&unsorted), 10, "one past the max regardless of order");
+    }
+
     fn cols(fracs: &[f32]) -> Vec<Column> {
         fracs
             .iter()
             .enumerate()
             .map(|(i, &f)| Column::new(i as u64, module_type::WAVEFORM, f))
             .collect()
+    }
+
+    #[test]
+    fn insert_column_lands_right_after_and_allocates_id() {
+        let mut v = cols(&[0.5, 0.5]); // ids 0, 1
+        let at = insert_column(&mut v, 0, module_type::OSCILLOSCOPE);
+        assert_eq!(at, 1, "lands right after the clicked column");
+        assert_eq!(v.iter().map(|c| c.instance_id).collect::<Vec<_>>(), vec![0, 2, 1]);
+        assert_eq!(v[1].module_type, module_type::OSCILLOSCOPE);
+        assert!(v[1].fixed_width_px.is_none(), "inserts as flex; the caller reconciles intrinsic width");
+    }
+
+    #[test]
+    fn insert_column_clamps_after_past_end() {
+        let mut v = cols(&[0.5, 0.5]);
+        let at = insert_column(&mut v, 99, module_type::WAVEFORM);
+        assert_eq!(at, 2, "an out-of-range `after` appends at the end");
+        assert_eq!(v.len(), 3);
+    }
+
+    #[test]
+    fn insert_column_max_after_appends_without_overflow() {
+        // usize::MAX is the empty-strip / no-column "append" sentinel — saturating_add must not panic.
+        let mut empty: Vec<Column> = Vec::new();
+        assert_eq!(insert_column(&mut empty, usize::MAX, module_type::WAVEFORM), 0);
+        assert_eq!(empty.len(), 1);
+        let mut two = cols(&[0.5, 0.5]);
+        assert_eq!(insert_column(&mut two, usize::MAX, module_type::WAVEFORM), 2, "appends at the end");
+    }
+
+    #[test]
+    fn remove_column_drops_at_index_and_returns_id() {
+        let mut v = cols(&[0.3, 0.3, 0.4]); // ids 0, 1, 2
+        assert_eq!(remove_column(&mut v, 1), Some(1));
+        assert_eq!(v.iter().map(|c| c.instance_id).collect::<Vec<_>>(), vec![0, 2]);
+    }
+
+    #[test]
+    fn remove_column_out_of_range_is_none() {
+        let mut v = cols(&[0.5, 0.5]);
+        assert_eq!(remove_column(&mut v, 9), None);
+        assert_eq!(v.len(), 2, "nothing removed");
+    }
+
+    #[test]
+    fn remove_to_empty_is_allowed() {
+        let mut v = cols(&[1.0]);
+        assert_eq!(remove_column(&mut v, 0), Some(0));
+        assert!(v.is_empty(), "an empty strip is a valid state (shows the right-click hint)");
     }
 
     #[test]
@@ -359,6 +480,31 @@ mod tests {
     }
 
     #[test]
+    fn draggable_seams_are_only_the_flex_flex_boundaries() {
+        // Three flex columns → two draggable seams at their boundaries.
+        let three = cols(&[0.25, 0.25, 0.5]);
+        let vp = viewports(&three, 800.0, 600.0, 1.0); // [0..200],[200..400],[400..800]
+        assert_eq!(draggable_seams(&three, &vp), vec![200.0, 400.0]);
+
+        // flex | fixed: no draggable seam (the fixed column owns its edge).
+        let flexfixed = vec![
+            Column::new(0, module_type::WAVEFORM, 1.0),
+            Column::fixed(1, module_type::LOUDNESS, 200.0),
+        ];
+        let vp2 = viewports(&flexfixed, 800.0, 600.0, 1.0);
+        assert!(draggable_seams(&flexfixed, &vp2).is_empty());
+
+        // flex | flex | fixed: only the first seam is draggable.
+        let mixed = vec![
+            Column::new(0, module_type::WAVEFORM, 0.5),
+            Column::new(1, module_type::WAVEFORM, 0.5),
+            Column::fixed(2, module_type::LOUDNESS, 160.0),
+        ];
+        let vp3 = viewports(&mixed, 800.0, 600.0, 1.0); // flex split 640 → [0..320],[320..640],[640..800]
+        assert_eq!(draggable_seams(&mixed, &vp3), vec![320.0]);
+    }
+
+    #[test]
     fn reorder_target_counts_other_midpoints_left_of_cursor() {
         let vp = viewports(&cols(&[0.34, 0.33, 0.33]), 900.0, 600.0, 1.0);
         // mids ≈ 153, 459, 762. Drag col 0 (A): cursor just right of B's mid → target slot 1.
@@ -367,6 +513,48 @@ mod tests {
         assert_eq!(reorder_target(&vp, 0, 800.0), 2);
         // cursor near the left edge → stays slot 0.
         assert_eq!(reorder_target(&vp, 0, 10.0), 0);
+    }
+
+    #[test]
+    fn remap_identity_when_active_is_layout() {
+        let layout = cols(&[0.5, 0.5]);
+        let vps = viewports(&layout, 800.0, 600.0, 1.0);
+        // No drag: active IS the committed layout, so the remap is identity.
+        assert_eq!(remap_to_layout_order(&layout, &layout, &vps), vps);
+    }
+
+    #[test]
+    fn remap_follows_provisional_permutation() {
+        let layout = cols(&[0.5, 0.5]); // ids 0, 1 — modules render in this order
+        let active = vec![layout[1].clone(), layout[0].clone()]; // provisional swap: [1, 0]
+        let a = Rect { x: 0.0, y: 0.0, w: 400.0, h: 600.0 };
+        let b = Rect { x: 400.0, y: 0.0, w: 400.0, h: 600.0 };
+        let active_vps = vec![a, b];
+        // Column 0 sits in active slot 1 → gets rect B; column 1 sits in active slot 0 → rect A.
+        assert_eq!(remap_to_layout_order(&layout, &active, &active_vps), vec![b, a]);
+    }
+
+    #[test]
+    fn remap_falls_back_to_identity_on_unknown_id() {
+        let layout = cols(&[0.5, 0.5]); // ids 0, 1
+        // active is missing id 1 (replaced by a stranger) — column 1 keeps its own-index rect, no panic.
+        let active = vec![layout[0].clone(), Column::new(7, module_type::WAVEFORM, 0.5)];
+        let a = Rect { x: 0.0, y: 0.0, w: 400.0, h: 600.0 };
+        let b = Rect { x: 400.0, y: 0.0, w: 400.0, h: 600.0 };
+        assert_eq!(remap_to_layout_order(&layout, &active, &[a, b]), vec![a, b]);
+    }
+
+    #[test]
+    fn remap_never_panics_when_active_is_shorter_than_layout() {
+        // The invariant (active/active_vps same length as layout) can't be violated by the live code,
+        // but the remap must DEGRADE, not panic, if a future change ever slips it — a render-thread
+        // panic kills the editor. A 3-column layout against a 2-entry active → the orphan gets an
+        // empty rect (draws nothing) instead of an out-of-bounds index.
+        let layout = cols(&[0.34, 0.33, 0.33]); // ids 0, 1, 2
+        let a = Rect { x: 0.0, y: 0.0, w: 400.0, h: 600.0 };
+        let b = Rect { x: 400.0, y: 0.0, w: 400.0, h: 600.0 };
+        let out = remap_to_layout_order(&layout, &layout[..2], &[a, b]);
+        assert_eq!(out, vec![a, b, Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 }]);
     }
 
     #[test]

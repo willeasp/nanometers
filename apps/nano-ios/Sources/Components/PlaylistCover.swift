@@ -12,6 +12,7 @@ struct PlaylistCover: View {
         }
         .frame(width: size, height: size)
         .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.mosaic, style: .continuous))
+        .shadow(color: .black.opacity(0.35), radius: 9, y: 6)   // §list: 0 6 18 @.35 (radius ≈ CSS blur/2)
     }
     private func tile(_ data: Data?, _ s: CGFloat) -> some View { NMArtwork(data: data, size: s, radius: 0) }
     private func padded(_ a: [Data?]) -> [Data?] {

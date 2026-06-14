@@ -27,6 +27,7 @@ struct NowPlayingScreen: View {
     @AppStorage("modules") private var modulesCSV = "scope" // selected meters (CSV, min 1; §06E)
     @State private var bins: [WaveBin] = []
     @State private var closeUpBins: [StereoWaveBin] = []
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion   // gates the play/pause motion (§01)
 
     var body: some View {
         VStack(spacing: 14) {
@@ -180,11 +181,12 @@ struct NowPlayingScreen: View {
             Button { engine.toggleShuffle() } label: {
                 Image(systemName: "shuffle").font(.system(size: 22))
                     .foregroundStyle(engine.isShuffle ? Theme.accent : .white.opacity(0.85))
-            }.buttonStyle(.plain).frame(maxWidth: .infinity)
+            }.buttonStyle(PressableButtonStyle()).frame(maxWidth: .infinity)
+            .sensoryFeedback(.selection, trigger: engine.isShuffle)
 
             Button { engine.prev() } label: {
                 Image(systemName: "backward.fill").font(.system(size: 34)).foregroundStyle(Theme.text)
-            }.buttonStyle(.plain).frame(maxWidth: .infinity)
+            }.buttonStyle(PressableButtonStyle()).frame(maxWidth: .infinity)
 
             Button { engine.toggle() } label: {
                 ZStack {
@@ -192,18 +194,23 @@ struct NowPlayingScreen: View {
                         .shadow(color: Theme.accent.opacity(0.4), radius: 13, y: 6)      // §06 accent glow
                     Image(systemName: engine.isPlaying ? "pause.fill" : "play.fill")
                         .font(.system(size: 30)).foregroundStyle(Theme.bg)               // dark-on-amber (§01)
+                        .transition(.scale(scale: 0.7).combined(with: .opacity))   // replace-look pop, at a speed we control
+                        .id(engine.isPlaying)                                       // (native symbolEffect.replace's duration is fixed/slower)
                 }
-            }.buttonStyle(.plain).frame(maxWidth: .infinity)
+                .animation(reduceMotion ? nil : .spring(response: 0.25, dampingFraction: 0.85), value: engine.isPlaying)   // matches the artwork scale
+            }.buttonStyle(PressableButtonStyle()).frame(maxWidth: .infinity)
             .accessibilityIdentifier("npPlayPause").accessibilityLabel(engine.isPlaying ? "Pause" : "Play")
+            .sensoryFeedback(.impact(weight: .light), trigger: engine.isPlaying)
 
             Button { engine.next() } label: {
                 Image(systemName: "forward.fill").font(.system(size: 34)).foregroundStyle(Theme.text)
-            }.buttonStyle(.plain).frame(maxWidth: .infinity)
+            }.buttonStyle(PressableButtonStyle()).frame(maxWidth: .infinity)
 
             Button { engine.setRepeat(!engine.isRepeat) } label: {
                 Image(systemName: "repeat").font(.system(size: 22))
                     .foregroundStyle(engine.isRepeat ? Theme.accent : .white.opacity(0.85))
-            }.buttonStyle(.plain).frame(maxWidth: .infinity)
+            }.buttonStyle(PressableButtonStyle()).frame(maxWidth: .infinity)
+            .sensoryFeedback(.selection, trigger: engine.isRepeat)
         }
     }
 

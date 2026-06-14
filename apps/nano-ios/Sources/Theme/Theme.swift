@@ -20,7 +20,7 @@ enum Theme {
     static let bandMix    = Color(hex: 0xEEF1F6)
     // Hairlines / glass
     static let hair        = Color.white.opacity(0.08)
-    static let glassBorder = Color.white.opacity(0.10)
+    static let glassBorder = Color.white.opacity(0.12)   // §01 materials edge treatment (the prototype uses 12% on every glass surface)
     static let glassSheen  = Color.white.opacity(0.14)
     static let artFallback = Color(hex: 0x22252E)
     // Now Playing gradient stops (§01 / §03D background).

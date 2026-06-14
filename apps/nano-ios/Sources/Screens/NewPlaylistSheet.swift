@@ -30,12 +30,11 @@ struct NewPlaylistSheet: View {
                             Spacer()
                         }
                     }
-                    .listRowBackground(Theme.bg)
+                    .listRowBackground(Color.clear)
                 }
-                .listStyle(.plain)
+                .listStyle(.plain).scrollContentBackground(.hidden)
             }
             .padding(.horizontal, Theme.Layout.screenMargin)
-            .background(Theme.bg)
             .navigationTitle("New Playlist")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -45,6 +44,8 @@ struct NewPlaylistSheet: View {
                 }
             }
         }
+        .nmSheetGlass()
+        .preferredColorScheme(.dark)
         // NOTE: intentionally no @FocusState autofocus — see handoff §04 lesson (autofocus caused a
         // layout bug in the prototype). The user taps the field.
     }

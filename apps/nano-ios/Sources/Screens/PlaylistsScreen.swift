@@ -12,7 +12,7 @@ struct PlaylistsScreen: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     HStack {
-                        Text("Playlists").font(Theme.sans(32, .bold)).foregroundStyle(Theme.text)
+                        Text("Playlists").font(Theme.sans(32, .bold)).tracking(-0.5).foregroundStyle(Theme.text)
                         Spacer()
                         GlassRoundButton(systemName: "plus") { creating = true }
                     }
