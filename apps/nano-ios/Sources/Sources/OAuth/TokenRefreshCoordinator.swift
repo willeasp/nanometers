@@ -3,7 +3,7 @@ import Foundation
 /// Singleton actor that coalesces concurrent token-refresh requests across ALL SourcesManager instances.
 ///
 /// Problems solved:
-/// - RootView, SettingsSheet, DriveFolderBrowserView each build a fresh SourcesManager, so the
+/// - RootView, SettingsSheet, CloudFolderBrowserView each build a fresh SourcesManager, so the
 ///   per-instance `refreshTasks` dict on SourcesManager was a no-op serialisation.
 /// - A failed refresh Task was cached forever (the slot only cleared on success).
 ///

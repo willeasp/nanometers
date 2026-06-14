@@ -260,7 +260,7 @@ struct SourceDetailView: View {
             }
         }
         .sheet(isPresented: $showDriveBrowser) {
-            DriveFolderBrowserSheet(manager: manager, sourceId: source.id) {
+            CloudFolderBrowserSheet(kind: kind, manager: manager, sourceId: source.id) {
                 showDriveBrowser = false
             }
         }
@@ -614,22 +614,27 @@ private extension SourceState {
     }
 }
 
-// MARK: - Drive folder browser (Task 9)
+// MARK: - Cloud folder browser (Task 9, generalized for OneDrive)
 
-/// A sheet that lets the user browse Drive folders and pick one as a root.
-/// Opened from SourceDetailView when kind == .gdrive instead of the system FolderPicker.
-struct DriveFolderBrowserSheet: View {
+/// A lightweight UI value for a browsable cloud folder, decoupled from any provider's file type.
+struct CloudFolder: Identifiable, Hashable { let id: String; let name: String }
+
+/// A sheet that lets the user browse a cloud source's folders and pick one as a root.
+/// Opened from SourceDetailView for any cloud kind instead of the system FolderPicker.
+struct CloudFolderBrowserSheet: View {
+    let kind: SourceKind
     let manager: SourcesManager
     let sourceId: String
     let onDismiss: () -> Void
 
     var body: some View {
         NavigationStack {
-            DriveFolderBrowserView(
+            CloudFolderBrowserView(
+                kind: kind,
                 manager: manager,
                 sourceId: sourceId,
                 parentId: "root",
-                parentName: "My Drive",
+                parentName: kind == .onedrive ? "OneDrive" : "My Drive",
                 onPick: { _ in onDismiss() }
             )
             .toolbar {
@@ -642,15 +647,16 @@ struct DriveFolderBrowserSheet: View {
     }
 }
 
-/// Lists Drive folders under `parentId`, lets the user drill or pick a folder as root.
-struct DriveFolderBrowserView: View {
+/// Lists a cloud source's folders under `parentId`, lets the user drill or pick a folder as root.
+struct CloudFolderBrowserView: View {
+    let kind: SourceKind
     let manager: SourcesManager
     let sourceId: String
     let parentId: String
     let parentName: String
-    let onPick: (DriveFile) -> Void
+    let onPick: (CloudFolder) -> Void
 
-    @State private var folders: [DriveFile] = []
+    @State private var folders: [CloudFolder] = []
     @State private var isLoading = true
     @State private var loadError: String? = nil
     @State private var isEnumerating = false
@@ -678,8 +684,9 @@ struct DriveFolderBrowserView: View {
                     .listRowBackground(Color.clear)
             } else {
                 Section {
-                    ForEach(folders, id: \.id) { folder in
-                        NavigationLink(destination: DriveFolderBrowserView(
+                    ForEach(folders) { folder in
+                        NavigationLink(destination: CloudFolderBrowserView(
+                            kind: kind,
                             manager: manager,
                             sourceId: sourceId,
                             parentId: folder.id,
@@ -723,8 +730,7 @@ struct DriveFolderBrowserView: View {
                         .listRowBackground(Color.clear)
                     } else {
                         Button {
-                            pickFolder(DriveFile(id: parentId, name: parentName,
-                                                 mimeType: "application/vnd.google-apps.folder"))
+                            pickFolder(CloudFolder(id: parentId, name: parentName))
                         } label: {
                             HStack(spacing: 10) {
                                 Image(systemName: "checkmark.circle")
@@ -737,7 +743,7 @@ struct DriveFolderBrowserView: View {
                             .frame(minHeight: 44)
                         }
                         .buttonStyle(.plain)
-                        .accessibilityIdentifier("useDriveFolder-\(parentId)")
+                        .accessibilityIdentifier("useCloudFolder-\(parentId)")
                         .listRowBackground(Color.clear)
                     }
                 }
@@ -753,45 +759,42 @@ struct DriveFolderBrowserView: View {
         isLoading = true
         loadError = nil
         do {
-            let config = OAuthConfig.google
-            let client = OAuthClient(config: config, http: URLSessionHTTPClient())
-            let tokenStore = KeychainTokenStore()
+            guard let config = oauthConfig(for: kind) else { return }
             let token = try await manager.accessToken(
-                for: .gdrive,
-                config: config,
-                client: client,
-                tokenStore: tokenStore
-            )
-            let api = DriveAPIClient(http: URLSessionHTTPClient())
-            let (drivefolders, _) = try await api.listChildren(parentId: parentId, accessToken: token)
-            folders = drivefolders
+                for: kind, config: config,
+                client: OAuthClient(config: config, http: URLSessionHTTPClient()),
+                tokenStore: KeychainTokenStore())
+            switch kind {
+            case .gdrive:
+                let (f, _) = try await DriveAPIClient(http: URLSessionHTTPClient()).listChildren(parentId: parentId, accessToken: token)
+                folders = f.map { CloudFolder(id: $0.id, name: $0.name) }
+            case .onedrive:
+                let (f, _) = try await GraphAPIClient(http: URLSessionHTTPClient()).listChildren(parentId: parentId, accessToken: token)
+                folders = f.map { CloudFolder(id: $0.id, name: $0.name) }
+            default:
+                folders = []
+            }
         } catch {
             loadError = error.localizedDescription
         }
         isLoading = false
     }
 
-    private func pickFolder(_ folder: DriveFile) {
+    private func pickFolder(_ folder: CloudFolder) {
         isEnumerating = true
         enumerationError = nil
         Task { @MainActor in
             defer { isEnumerating = false }
             do {
-                let config = OAuthConfig.google
+                guard let config = oauthConfig(for: kind) else { return }
                 let client = OAuthClient(config: config, http: URLSessionHTTPClient())
                 let tokenStore = KeychainTokenStore()
-                let provider = GoogleDriveProvider(
-                    api: DriveAPIClient(http: URLSessionHTTPClient()),
-                    accessToken: { force in
-                        try await manager.accessToken(
-                            for: .gdrive,
-                            config: config,
-                            client: client,
-                            tokenStore: tokenStore,
-                            forceRefresh: force
-                        )
-                    }
-                )
+                // The factory hands back the right provider for the kind (Drive / OneDrive).
+                let provider = manager.provider(for: kind, accessToken: { force in
+                    try await manager.accessToken(
+                        for: kind, config: config, client: client,
+                        tokenStore: tokenStore, forceRefresh: force)
+                })
                 let result = try await provider.enumerate(
                     rootBookmark: nil,
                     providerFolderId: folder.id,
