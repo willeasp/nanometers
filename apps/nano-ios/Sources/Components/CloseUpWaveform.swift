@@ -97,8 +97,6 @@ struct CloseUpWaveform: View {
         guard lastBin > firstBin else { return }
 
         func x(_ i: Int) -> CGFloat { centerX + CGFloat(Double(i) / binsPerSec - center) * pxPerSec }
-        let x0 = x(firstBin), x1 = x(lastBin)
-        let span = max(1, x1 - x0)
 
         // Rectified peak per channel: the upper silhouette is L, the lower is R, hinged on the center.
         func ampL(_ b: StereoWaveBin) -> CGFloat { CGFloat(max(b.lMax, -b.lMin)) }
@@ -115,16 +113,24 @@ struct CloseUpWaveform: View {
         let lPath = silhouette(up: true, ampL)
         let rPath = silhouette(up: false, ampR)
 
-        // Horizontal spectral gradient, ONE stop per visible bin (no moving subsample grid → no shimmer).
+        // Horizontal spectral gradient, ONE stop per visible bin, anchored to the FIXED scope width [0, w] —
+        // NOT the visible-bin window [x(firstBin), x(lastBin)]. That window's endpoints step 2–3 bins/frame as
+        // it scrolls, so normalizing the stop locations + edge fade against it re-mapped every bin's colour and
+        // opacity each frame: the small colour flicker. Pinning to [0, w] keeps each bin's colour + fade put as
+        // it scrolls; only the off-screen edge stops (under the ~0-opacity fade) come and go.
         var stops: [Gradient.Stop] = []
         stops.reserveCapacity(lastBin - firstBin + 1)
+        var lastLoc: CGFloat = -1
         for i in firstBin...lastBin {
-            let loc = min(1, max(0, (x(i) - x0) / span))
+            let loc = min(1, max(0, x(i) / w))
+            if loc <= lastLoc { continue }      // Gradient stop locations must be strictly increasing
+            lastLoc = loc
             let base = coloringOn ? Self.scopeColor(bins[i]) : Theme.accent
             stops.append(.init(color: base.opacity(edgeAlpha(loc)), location: loc))
         }
+        guard stops.count > 1 else { return }
         let shading = GraphicsContext.Shading.linearGradient(
-            Gradient(stops: stops), startPoint: CGPoint(x: x0, y: 0), endPoint: CGPoint(x: x1, y: 0))
+            Gradient(stops: stops), startPoint: CGPoint(x: 0, y: 0), endPoint: CGPoint(x: w, y: 0))
         ctx.fill(lPath, with: shading)
         ctx.fill(rPath, with: shading)
     }
