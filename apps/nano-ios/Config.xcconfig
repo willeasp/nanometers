@@ -1,13 +1,18 @@
 // Base build configuration for the NanoMeters app target.
 //
-// Secrets (your Google OAuth client id) are NOT committed. They live in Secrets.xcconfig, which is
-// gitignored and optionally included below. Without it these stay empty, so OAuthConfig.isConfigured
-// is false and Google Drive Connect is disabled — the app builds and every non-Drive feature works.
+// Secrets (your OAuth client ids) are NOT committed. They live in Secrets.xcconfig, which is gitignored
+// and optionally included below. Without it the client ids stay empty, so OAuthConfig.isConfigured is
+// false and that provider's Connect button is disabled — the app builds and every other feature works.
 //
-// To enable Drive: copy Secrets.example.xcconfig → Secrets.xcconfig and fill in your client id
-// (see docs/google-drive-setup.md), then `xcodegen generate`.
+// To enable a provider: copy Secrets.example.xcconfig → Secrets.xcconfig and fill in the client id
+// (Drive: docs/google-drive-setup.md · OneDrive: docs/onedrive-setup.md), then `xcodegen generate`.
 
 GOOGLE_OAUTH_CLIENT_ID =
 GOOGLE_OAUTH_REVERSED_SCHEME =
+
+// OneDrive: the client id is sensitive-ish (kept in Secrets.xcconfig); the redirect scheme is derived
+// from the public bundle id, so it's defaulted here to keep the registered URL scheme non-empty.
+MICROSOFT_OAUTH_CLIENT_ID =
+MICROSOFT_OAUTH_REDIRECT_SCHEME = msauth.com.willeasp.nanometers.ios
 
 #include? "Secrets.xcconfig"

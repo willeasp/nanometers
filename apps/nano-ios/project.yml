@@ -27,13 +27,18 @@ targets:
         UILaunchScreen: {}
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         UIBackgroundModes: [audio]
-        # Google Drive OAuth. These resolve from build settings at build time (Info.plist $(VAR)
+        # OAuth client ids. These resolve from build settings at build time (Info.plist $(VAR)
         # substitution); the real values live in the gitignored Secrets.xcconfig (see Config.xcconfig /
-        # Secrets.example.xcconfig). With no Secrets.xcconfig they're empty → Drive Connect stays disabled.
+        # Secrets.example.xcconfig). With no Secrets.xcconfig the client ids are empty → that provider's
+        # Connect stays disabled. (docs/google-drive-setup.md · docs/onedrive-setup.md)
         GoogleOAuthClientID: "$(GOOGLE_OAUTH_CLIENT_ID)"
+        MicrosoftOAuthClientID: "$(MICROSOFT_OAUTH_CLIENT_ID)"
+        MicrosoftOAuthRedirectScheme: "$(MICROSOFT_OAUTH_REDIRECT_SCHEME)"
         CFBundleURLTypes:
           - CFBundleURLSchemes:
               - "$(GOOGLE_OAUTH_REVERSED_SCHEME)"
+          - CFBundleURLSchemes:
+              - "$(MICROSOFT_OAUTH_REDIRECT_SCHEME)"
         CADisableMinimumFrameDurationOnPhone: true   # allow the live meters to run >60 Hz (ProMotion 120 Hz)
     configFiles:
       Debug: Config.xcconfig

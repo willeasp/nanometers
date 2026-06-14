@@ -16,9 +16,9 @@ final class SourcesSettingsUITests: XCTestCase {
     @MainActor
     func test_sourcesManager_navigation() {
         let app = XCUIApplication()
-        // Force the unconfigured Drive state so this asserts "Needs setup" regardless of whether a local
-        // Secrets.xcconfig supplied a real client id to the build under test.
-        app.launchArguments += ["-force-drive-unconfigured"]
+        // Force both cloud providers unconfigured so they assert "Needs setup" regardless of whether a
+        // local Secrets.xcconfig supplied a real client id to the build under test.
+        app.launchArguments += ["-force-cloud-unconfigured"]
         app.launch()
 
         // Wait for Library root (migration + index ready signal).
@@ -100,32 +100,40 @@ final class SourcesSettingsUITests: XCTestCase {
         XCTAssertTrue(connectICloud.waitForExistence(timeout: 8),
                       "Add Source list should contain a 'connect-icloud' connect pill\n\(app.debugDescription)")
 
-        // Google Drive (Phase 5): the placeholder client ID is NOT configured, so Drive shows
-        // the "needs setup" state — a disabled "Needs setup" pill and setup instructions.
-        // (Dropbox/OneDrive still show "Coming soon"; we assert that below too.)
+        // Both OAuth providers (Google Drive + OneDrive) are forced unconfigured, so each shows the
+        // "needs setup" state — a disabled "Needs setup" pill + a setup sub-label. Dropbox (no OAuth
+        // config) still shows "Coming soon".
 
         // connect-gdrive element must exist (it's the "Needs setup" pill in not-configured state).
         let connectGdrive = app.descendants(matching: .any)["connect-gdrive"].firstMatch
         XCTAssertTrue(connectGdrive.waitForExistence(timeout: 5),
                       "connect-gdrive element should exist in Add Source list\n\(app.debugDescription)")
 
+        // connect-onedrive must also exist — OneDrive is un-gated (not "Coming soon" anymore).
+        let connectOnedrive = app.descendants(matching: .any)["connect-onedrive"].firstMatch
+        XCTAssertTrue(connectOnedrive.waitForExistence(timeout: 5),
+                      "connect-onedrive element should exist in Add Source list\n\(app.debugDescription)")
+
         // The "Needs setup" pill text should be visible (not "Coming soon", not "Connect").
         let needsSetupText = app.staticTexts["Needs setup"].firstMatch
         XCTAssertTrue(needsSetupText.waitForExistence(timeout: 5),
-                      "Drive should show 'Needs setup' pill (placeholder client id, not configured)\n\(app.debugDescription)")
+                      "A cloud provider should show the 'Needs setup' pill (placeholder client id)\n\(app.debugDescription)")
 
-        // The setup instruction sub-label should mention the client ID.
-        let setupInstructions = app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'Google client ID'")).firstMatch
-        XCTAssertTrue(setupInstructions.waitForExistence(timeout: 5),
-                      "Drive row should show setup instructions sub-label\n\(app.debugDescription)")
+        // Both providers' setup sub-labels should be present: Google and Microsoft client ID hints.
+        let googleSetup = app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'Google client ID'")).firstMatch
+        XCTAssertTrue(googleSetup.waitForExistence(timeout: 5),
+                      "Drive row should show its 'Google client ID' setup sub-label\n\(app.debugDescription)")
+        let microsoftSetup = app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'Microsoft client ID'")).firstMatch
+        XCTAssertTrue(microsoftSetup.waitForExistence(timeout: 5),
+                      "OneDrive row should show its 'Microsoft client ID' setup sub-label\n\(app.debugDescription)")
 
-        // Dropbox and OneDrive still show "Coming soon".
+        // Dropbox still shows "Coming soon" (no OAuth config).
         let comingSoonText = app.staticTexts["Coming soon"].firstMatch
         XCTAssertTrue(comingSoonText.waitForExistence(timeout: 5),
-                      "Add Source list should show 'Coming soon' text for Dropbox/OneDrive\n\(app.debugDescription)")
+                      "Add Source list should show 'Coming soon' text for Dropbox\n\(app.debugDescription)")
 
-        // connect-gdrive is the non-interactive "Needs setup" capsule — not a tappable NavigationLink.
-        // (The live Connect button is only shown when OAuthConfig.google.isConfigured == true,
-        //  which requires a real client id in project.yml / Info.plist.)
+        // The "Needs setup" capsules are non-interactive — not tappable NavigationLinks.
+        // (A live Connect button only appears when that provider's OAuthConfig.isConfigured == true,
+        //  which requires a real client id in Secrets.xcconfig / Info.plist.)
     }
 }
