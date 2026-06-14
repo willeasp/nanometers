@@ -9,11 +9,16 @@ struct GoogleDriveProvider: SourceProvider {
 
     func enumerate(rootBookmark: Data?, providerFolderId: String?, rootName: String, rootId: String) async throws -> EnumerationResult {
         var folders: [FolderDescriptor] = []; var tracks: [TrackDescriptor] = []
-        try await walk(folderId: rootId, name: rootName, parentId: nil, folders: &folders, tracks: &tracks)
+        var visited = Set<String>()
+        try await walk(folderId: rootId, name: rootName, parentId: nil, depth: 0,
+                       visited: &visited, folders: &folders, tracks: &tracks)
         return EnumerationResult(folders: folders, tracks: tracks)
     }
-    private func walk(folderId: String, name: String, parentId: String?,
+    private func walk(folderId: String, name: String, parentId: String?, depth: Int,
+                      visited: inout Set<String>,
                       folders: inout [FolderDescriptor], tracks: inout [TrackDescriptor]) async throws {
+        guard visited.insert(folderId).inserted else { return }   // cycle / multi-parent — skip duplicate
+        guard depth <= 64 else { return }                          // depth backstop (shortcuts-to-ancestor)
         let token = try await accessToken()
         let (subFolders, subTracks) = try await api.listChildren(parentId: folderId, accessToken: token)
         var childIds: [String] = []; var trackIds: [String] = []
@@ -25,6 +30,9 @@ struct GoogleDriveProvider: SourceProvider {
                                           bookmark: nil, providerFileId: t.id))
         }
         folders.append(FolderDescriptor(id: folderId, name: name, parentId: parentId, childFolderIds: childIds, trackIds: trackIds))
-        for f in subFolders { try await walk(folderId: f.id, name: f.name, parentId: folderId, folders: &folders, tracks: &tracks) }
+        for f in subFolders {
+            try await walk(folderId: f.id, name: f.name, parentId: folderId, depth: depth + 1,
+                           visited: &visited, folders: &folders, tracks: &tracks)
+        }
     }
 }
