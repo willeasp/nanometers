@@ -16,9 +16,13 @@ final class PlaybackUITests: XCTestCase {
         let app = XCUIApplication()
         app.launch()
 
-        // Library shows the seeded tracks.
+        // Library root is a folder browser — navigate into All Songs to reach the seeded tracks.
+        XCTAssertTrue(app.staticTexts["All Songs"].waitForExistence(timeout: 10),
+                      "Root should show 'All Songs'")
+        app.staticTexts["All Songs"].tap()
+
         let mercy = app.staticTexts["Mercy"]
-        XCTAssertTrue(mercy.waitForExistence(timeout: 10), "library should show the seeded 'Mercy' row")
+        XCTAssertTrue(mercy.waitForExistence(timeout: 10), "All Songs should show the seeded 'Mercy' row")
         mercy.tap()
 
         // Tapping the row docks the mini player and starts playback (button labeled "Pause").

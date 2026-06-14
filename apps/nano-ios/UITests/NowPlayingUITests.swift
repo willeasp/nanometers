@@ -24,7 +24,13 @@ final class NowPlayingUITests: XCTestCase {
     func test_miniPlayerExpandsAndChevronCollapses() {
         let app = XCUIApplication()
         app.launch()
-        XCTAssertTrue(app.staticTexts["Mercy"].waitForExistence(timeout: 10))
+
+        // Library root is a folder browser — navigate into All Songs to reach the seeded tracks.
+        XCTAssertTrue(app.staticTexts["All Songs"].waitForExistence(timeout: 10),
+                      "Root should show 'All Songs'")
+        app.staticTexts["All Songs"].tap()
+        XCTAssertTrue(app.staticTexts["Mercy"].waitForExistence(timeout: 10),
+                      "All Songs should show the seeded 'Mercy' row")
         app.staticTexts["Mercy"].tap()                       // dock the mini player
 
         // The player is ONE persistent view morphing on a 0…1 progress, so present/dismiss are

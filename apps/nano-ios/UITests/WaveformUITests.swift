@@ -8,6 +8,11 @@ final class WaveformUITests: XCTestCase {
         let app = XCUIApplication()
         app.launch()
 
+        // Library root is a folder browser — navigate into All Songs to reach the seeded tracks.
+        XCTAssertTrue(app.staticTexts["All Songs"].waitForExistence(timeout: 10),
+                      "Root should show 'All Songs'")
+        app.staticTexts["All Songs"].tap()
+
         // After lazy analysis, a row shows a numeric LUFS value (the "LUFS" label appears).
         XCTAssertTrue(app.staticTexts["LUFS"].firstMatch.waitForExistence(timeout: 15))
 
