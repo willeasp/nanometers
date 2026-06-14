@@ -19,6 +19,9 @@ pub mod loudness;
 /// 3-band spectral-color filterbank + mapping, and the pure scroll control law.
 pub mod waveform;
 
+/// Smoothed stereo phase-correlation for the Stereometer Module (shared so the TUI/iOS get it too).
+pub mod correlation;
+
 /// C-ABI facade for the iOS app (ADR 0008 / 0009). Gated behind `ffi` so the plugin/TUI never
 /// compile it; cbindgen-equivalent header is hand-maintained at `include/nano_dsp.h` (Task 6).
 #[cfg(feature = "ffi")]

@@ -49,7 +49,7 @@ cargo run --bin nanometers -- --audio-layout 2 \
 ## Working style
 
 - **Push back, don't validate.** If a proposal is flawed, name the flaw. User explicitly wants this over agreeable nodding.
-- **Commit often, one logical change per commit.** Lead the subject with the change, use the body for the *why*. See existing history for tone.
+- **Commit often, one logical change per commit.** Use **Conventional Commits with a monorepo package scope** — `type(scope): subject` (e.g. `feat(plugin): add the Stereometer module`, `fix(dsp): …`). Scopes: `plugin`, `dsp`, `ios`, `tui`, or `docs`/`build`/`repo` for cross-cutting; pick the primary package when a change spans several. Types: `feat`/`fix`/`refactor`/`perf`/`docs`/`test`/`build`/`chore`. Body carries the *why*. (Commits before 2026-06-14 predate this — don't rewrite them.)
 - **Verify before claiming done.** Run `cargo check` / `./build.sh` / `auval -v` and report the actual result. No "should work" claims.
 - **Debug against data, not in your head.** When stuck, instrument first (eprintln, file logging, color diagnostics like a magenta clear-color) before theorizing. The history of the waveform fix is in the git log if you want a worked example.
 - **Match the trajectory.** Chill open source, MiniMeters aesthetic, no enterprise hardening, no defensive scaffolding that the code doesn't need.
