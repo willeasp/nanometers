@@ -69,7 +69,8 @@ struct NowPlayingScreen: View {
             bins = await WaveformStore.shared.bins(for: t) ?? []
             closeUpBins = await WaveformStore.shared.closeUpBins(for: t) ?? []
         }
-        .onChange(of: engine.current?.persistentModelID) { flipped = false }   // §06B reset to cover on track change
+        // Flip side (album ⇄ analysis) persists across track changes — the B-side data reloads via the
+        // .task(id:) above. (Deliberate departure from §06B's "reset to cover on track change".)
         .sheet(isPresented: $showContext) {
             if let t = engine.current { TrackContextSheet(track: t) }
         }
