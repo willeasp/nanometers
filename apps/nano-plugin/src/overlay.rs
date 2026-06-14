@@ -25,9 +25,12 @@ const HINT_COLOR: [f32; 4] = [0.45, 0.50, 0.60, 1.0]; // the empty-strip hint
 
 const TEXT_PX: f32 = 13.0; // row-label / hint size, LOGICAL px (× scale at draw)
 const ROW_PAD_X: f32 = 10.0; // label inset from the panel's left edge, LOGICAL px
-/// Vertex-buffer capacity in quads: the panel + one hover row, with headroom. Rows are text (the
-/// brush), not quads, so this stays tiny.
-const MAX_QUADS: usize = 8;
+const SEAM_RGB: [f32; 3] = [0.30, 0.34, 0.42]; // a draggable flex|flex divider (F4)
+const SEAM_W: f32 = 1.5; // divider thickness, LOGICAL px (× scale at draw)
+/// Vertex-buffer capacity in quads: the menu panel + hover row, plus a generous run of seam
+/// hairlines (one per draggable boundary). Seams beyond this are skipped rather than overflow the
+/// buffer — far past any sane column count. Rows are text (the brush), not quads, so this stays small.
+const MAX_QUADS: usize = 32;
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -127,7 +130,9 @@ impl Overlay {
     }
 
     /// Draw the overlay into `view` in its own load pass — but only if there's something to show.
-    /// `menu` is the open context menu (`None` when closed); `strip_empty` draws the right-click hint.
+    /// `menu` is the open context menu (`None` when closed); `strip_empty` draws the right-click hint;
+    /// `seams` are the physical-px x of draggable flex|flex boundaries, each drawn as a hairline so the
+    /// resize affordance (F4) is visible.
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
@@ -140,8 +145,9 @@ impl Overlay {
         scale: f32,
         menu: Option<MenuOverlay>,
         strip_empty: bool,
+        seams: &[f32],
     ) {
-        if menu.is_none() && !strip_empty {
+        if menu.is_none() && !strip_empty && seams.is_empty() {
             return;
         }
 
@@ -155,6 +161,13 @@ impl Overlay {
         self.verts.clear();
         let mut sections: Vec<Section> = Vec::new();
         let font = TEXT_PX * scale;
+
+        // Draggable flex|flex seams: a centered hairline at each (capped to the vertex budget, which
+        // leaves room for the menu's quads).
+        let half = SEAM_W * scale * 0.5;
+        for &x in seams.iter().take(MAX_QUADS - 2) {
+            push_quad(&mut self.verts, surface_w, surface_h, x - half, x + half, 0.0, surface_h, SEAM_RGB);
+        }
 
         if strip_empty {
             sections.push(

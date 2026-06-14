@@ -12,16 +12,24 @@
 //! stable COMMITTED viewports, so the swap points don't shift under the cursor mid-drag.
 
 use crate::editor::LayoutEdit;
-use crate::layout::{apply_reorder, column_index_at, reorder_target, sanitize_layout, Column};
+use crate::layout::{
+    apply_reorder, column_index_at, reorder_target, resize_boundary_at, sanitize_layout, Column,
+};
 use crate::menu::{menu_item_at, menu_rect, MenuItem, MenuModel};
 use crate::module::{EventStatus, Module, Rect};
 
-/// Which owner holds the pointer until mouse-up (ADR 0004). `LayoutResize` is deferred to Phase F
-/// (no draggable flex|flex boundary exists until multi-instance), so its arm isn't built here.
+/// How close (physical px) a press must land to a flex|flex seam to grab it for a resize instead of
+/// passing to the column. Matches the Phase E `resize_boundary_at` tests' gutter.
+const RESIZE_GUTTER_PX: f32 = 6.0;
+
+/// Which owner holds the pointer until mouse-up (ADR 0004). `LayoutResize` drags the seam between two
+/// FLEX columns to retrade their widths (Phase F4) — only reachable once multi-instance (F3) has put
+/// two flex columns side by side, since the default flex|fixed seam isn't draggable.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PointerGrab {
     None,
     LayoutReorder { instance_id: u64 },
+    LayoutResize { left_id: u64, right_id: u64 },
     Module { instance_id: u64 },
 }
 
@@ -59,6 +67,16 @@ pub fn decide_press(
     x: f32,
     hit: impl FnOnce(usize, f32) -> EventStatus,
 ) {
+    // A press within the gutter of a flex|flex seam grabs the seam for a resize — ahead of the
+    // column under it, so the Module never sees a seam press (F4). `resize_boundary_at` only matches
+    // flex|flex seams, so a fixed column's edge (e.g. the Loudness meter) is never draggable.
+    if let Some(i) = resize_boundary_at(cols, viewports, x, RESIZE_GUTTER_PX) {
+        *grab = PointerGrab::LayoutResize {
+            left_id: cols[i].instance_id,
+            right_id: cols[i + 1].instance_id,
+        };
+        return;
+    }
     let Some(idx) = column_index_at(viewports, x) else {
         return;
     };
@@ -67,6 +85,42 @@ pub fn decide_press(
         EventStatus::Captured => PointerGrab::Module { instance_id: cols[idx].instance_id },
         EventStatus::Ignored => PointerGrab::LayoutReorder { instance_id: cols[idx].instance_id },
     };
+}
+
+/// Smallest physical-px width either flex neighbor of a dragged seam may shrink to — keeps both
+/// visible (and their fractions positive) however far the cursor goes.
+const MIN_RESIZE_PX: f32 = 24.0;
+
+/// The provisional (and, on release, committed) layout when the seam between `left_id` and `right_id`
+/// is dragged to physical-px `cursor_x`. ONLY those two columns retrade: their combined fraction is
+/// preserved and re-split by the new pixel ratio, so every other column keeps its width and the
+/// window total is unchanged. Sanitized so a degenerate fraction can't reach `set_layout`. Pure —
+/// drives both the live preview and the commit.
+pub fn resize_preview(
+    committed: &[Column],
+    viewports: &[Rect],
+    left_id: u64,
+    right_id: u64,
+    cursor_x: f32,
+) -> Vec<Column> {
+    let mut new = committed.to_vec();
+    let (Some(li), Some(ri)) = (
+        committed.iter().position(|c| c.instance_id == left_id),
+        committed.iter().position(|c| c.instance_id == right_id),
+    ) else {
+        return new;
+    };
+    let combined_px = viewports[li].w + viewports[ri].w;
+    if combined_px <= 2.0 * MIN_RESIZE_PX {
+        return new; // too narrow to split meaningfully — leave the pair as-is
+    }
+    let left_px = (cursor_x - viewports[li].x).clamp(MIN_RESIZE_PX, combined_px - MIN_RESIZE_PX);
+    let ratio = left_px / combined_px;
+    let combined_frac = committed[li].width_fraction + committed[ri].width_fraction;
+    new[li].width_fraction = combined_frac * ratio;
+    new[ri].width_fraction = combined_frac * (1.0 - ratio);
+    sanitize_layout(&mut new);
+    new
 }
 
 /// The provisional (and, on release, committed) order when the column at `dragged` is dragged to
@@ -266,6 +320,12 @@ impl Router {
                         let di = committed.iter().position(|c| c.instance_id == instance_id)?;
                         self.provisional = Some(reorder_preview(committed, committed_vps, di, x));
                     }
+                    PointerGrab::LayoutResize { left_id, right_id } => {
+                        // Live-reflow the seam: re-split the two neighbors at the cursor, hit-tested
+                        // against the STABLE committed viewports (the seam stays under the cursor).
+                        self.provisional =
+                            Some(resize_preview(committed, committed_vps, left_id, right_id, x));
+                    }
                     PointerGrab::Module { instance_id } => {
                         if let Some(idx) =
                             committed.iter().position(|c| c.instance_id == instance_id)
@@ -296,7 +356,11 @@ impl Router {
 
             Event::Mouse(MouseEvent::ButtonReleased { button: MouseButton::Left, .. }) => {
                 let committed_new = match self.grab {
-                    PointerGrab::LayoutReorder { .. } => self.provisional.take(),
+                    // Both layout drags commit the provisional layout on release. For a resize the
+                    // column order is unchanged, so the `reorder_modules` below is an identity permute.
+                    PointerGrab::LayoutReorder { .. } | PointerGrab::LayoutResize { .. } => {
+                        self.provisional.take()
+                    }
                     PointerGrab::Module { instance_id } => {
                         if let Some(idx) =
                             committed.iter().position(|c| c.instance_id == instance_id)
@@ -436,5 +500,57 @@ mod tests {
         // Cursor still in col 0's half → order unchanged.
         let same = reorder_preview(&cols, &vp, 0, 100.0);
         assert_eq!(same.iter().map(|c| c.instance_id).collect::<Vec<_>>(), vec![0, 1]);
+    }
+
+    // ── F4: dragging the seam between two flex columns to retrade their widths (ADR 0004) ──
+
+    #[test]
+    fn seam_press_between_two_flex_columns_begins_a_resize() {
+        let cols = two_flex();
+        let vp = viewports(&cols, 800.0, 600.0, 1.0); // seam at 400
+        let mut grab = PointerGrab::None;
+        // A press within the gutter of the flex|flex seam grabs the seam, NOT the column body — so
+        // the `hit` closure (which would capture/reorder) is never even consulted.
+        decide_press(&mut grab, &cols, &vp, 402.0, |_, _| panic!("module must not be offered a seam press"));
+        assert_eq!(grab, PointerGrab::LayoutResize { left_id: 0, right_id: 1 });
+    }
+
+    #[test]
+    fn resize_preview_redistributes_between_the_two_neighbors() {
+        let cols = two_flex(); // 0.5 / 0.5, seam at 400
+        let vp = viewports(&cols, 800.0, 600.0, 1.0);
+        // Drag the seam left to x=300: col0 shrinks, col1 grows, combined fraction preserved.
+        let new = resize_preview(&cols, &vp, 0, 1, 300.0);
+        assert!((new[0].width_fraction - 0.375).abs() < 1e-3, "left → 300/800");
+        assert!((new[1].width_fraction - 0.625).abs() < 1e-3, "right → 500/800");
+        assert!((new[0].width_fraction + new[1].width_fraction - 1.0).abs() < 1e-6, "combined preserved");
+    }
+
+    #[test]
+    fn resize_preview_leaves_other_columns_untouched() {
+        let cols = vec![
+            Column::new(0, module_type::WAVEFORM, 0.25),
+            Column::new(1, module_type::WAVEFORM, 0.25),
+            Column::new(2, module_type::WAVEFORM, 0.5),
+        ];
+        let vp = viewports(&cols, 800.0, 600.0, 1.0); // [0..200],[200..400],[400..800]; 0|1 seam at 200
+        let new = resize_preview(&cols, &vp, 0, 1, 100.0);
+        assert!((new[2].width_fraction - 0.5).abs() < 1e-6, "the third column is untouched");
+        assert!(
+            (new[0].width_fraction + new[1].width_fraction - 0.5).abs() < 1e-6,
+            "the pair's combined fraction is preserved"
+        );
+        assert!(new[0].width_fraction < new[1].width_fraction, "left shrank");
+    }
+
+    #[test]
+    fn resize_preview_clamps_so_neither_neighbor_vanishes() {
+        let cols = two_flex();
+        let vp = viewports(&cols, 800.0, 600.0, 1.0);
+        // Drag far past the left edge — the left column clamps to a minimum, never 0 or negative.
+        let new = resize_preview(&cols, &vp, 0, 1, -500.0);
+        assert!(new[0].width_fraction.is_finite() && new[0].width_fraction > 0.0);
+        assert!(new[1].width_fraction.is_finite() && new[1].width_fraction > 0.0);
+        assert!(new[0].width_fraction < new[1].width_fraction, "dragged left → left is the smaller");
     }
 }

@@ -123,9 +123,26 @@ for DAW passthrough (below). The menu's model + geometry are pure and tested (`m
 holds the modal state and `handle()` now returns a `Commit::{Reorder, Edit}`; a host `Overlay`
 (`overlay.rs`) draws the panel + the empty-strip hint in a second full-surface `LoadOp::Load` pass.
 
-`LayoutResize` is now **GUI-reachable** in principle — adding a second Waveform yields a flex|flex
-seam — but its grab arm is still **not built**; wiring it (over the existing `resize_boundary_at`
-helper) remains the open Phase F item.
+## Amendment (2026-06-14): the LayoutResize grab is built (Phase F4)
+
+`LayoutResize` is now live. A left-press within the seam gutter (`resize_boundary_at`, flex|flex
+only) grabs the seam ahead of the column under it; dragging re-splits the two neighbors' combined
+flex fraction by the cursor's pixel ratio (`resize_preview`), so only those two columns retrade and
+the rest of the strip — and the window total — stay put; release commits. It reuses the reorder
+machinery whole: the live preview rides `provisional` (the render loop already tiles from it) and the
+release returns `Commit::Reorder`, whose `reorder_modules` is an identity permute since the order is
+unchanged — so the new widths persist through the same `set_layout` → serde path. A subtle hairline
+is drawn on each draggable seam (`layout::draggable_seams` → the overlay) so the affordance is
+visible; no hover **cursor** change yet (baseview's macOS `set_mouse_cursor` is still `todo!()`).
+
+Only reachable once F3 has placed two flex columns side by side — the default flex|fixed seam isn't
+draggable (a fixed column owns its width).
+
+> **Host window resize** (dragging the plugin's outer window to resize *everything*) is a separate,
+> unbuilt concern: nih-plug's CLAP wrapper stubs `gui.can_resize → false` (host→plugin resize is a
+> TODO upstream), and plugin-initiated `request_resize` works in Logic but the live layer resize
+> races our off-main-thread renderer (ADR 0008). That's deferred; F4 is purely *internal* width
+> redistribution, which touches none of it.
 
 **Platform note.** Keyboard events return `Ignored` so DAW transport shortcuts pass through (baseview
 only honors `Captured`/`Ignored` for keyboard). `set_mouse_cursor` is `todo!()` on macOS in vendored
