@@ -1,19 +1,29 @@
 import SwiftUI
+import SwiftData
 
 /// App settings (handoff §03 §6 / §02). The "Waveform Display" toggles are the SINGLE source of
 /// truth for what Now Playing renders — there are no equivalent controls on the player. Persisted
 /// app-wide via @AppStorage. Frequency coloring is disabled when both waveforms are off.
+/// "Library Sources" group (Task 6) sits above the Waveform group.
 struct SettingsSheet: View {
     @AppStorage("zoomWave") private var zoomWave = false      // Close-up (Phase 5 surface; off in v1)
     @AppStorage("showWave") private var showWave = true       // Track overview
     @AppStorage("spectrum") private var spectrum = false      // Frequency coloring
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.modelContext) private var ctx
+    @Environment(LibraryIndex.self) private var index
 
     private var bothOff: Bool { !zoomWave && !showWave }
 
     var body: some View {
+        // Defer SourcesManager construction until the environment is available.
+        let manager = SourcesManager(ctx: ctx, index: index)
+
         NavigationStack {
             Form {
+                // Library Sources — above Waveform (Task 6)
+                SourcesSettingsSection(manager: manager)
+
                 Section {
                     settingsToggle("waveform.path", "Close-up (DJ scroll)", "Zoomed, scrolling waveform", $zoomWave)
                     settingsToggle("waveform", "Track overview", "Full-song scrubber", $showWave)
@@ -30,6 +40,17 @@ struct SettingsSheet: View {
             .scrollContentBackground(.hidden)
             .navigationTitle("Settings").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            // NavigationStack destinations for Sources manager
+            .navigationDestination(for: SourceDetailDest.self) { dest in
+                SourceDetailView(source: dest.source, manager: manager)
+            }
+            .navigationDestination(for: AddSourceDest.self) { _ in
+                AddSourceView(manager: manager)
+            }
+            .navigationDestination(for: ConnectAndDetailDest.self) { dest in
+                // manager.connect was already called via simultaneousGesture; fetch the source row.
+                ConnectDetailBridge(kind: dest.kind, manager: manager)
+            }
         }
         .nmSheetGlass()
         .preferredColorScheme(.dark)

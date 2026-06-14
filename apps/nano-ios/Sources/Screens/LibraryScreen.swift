@@ -58,6 +58,14 @@ struct LibraryScreen: View {
                 searchQuery = ""
                 searchFocused = false
             }
+            // Task 6 nav bounce: if the source the user is browsing has been disconnected/removed,
+            // or a folder node in the path no longer exists, pop back gracefully.
+            .onChange(of: sources) { _, newSources in
+                validateNav(sources: newSources)
+            }
+            .onChange(of: index.sourceCounts) { _, _ in
+                validateNav(sources: sources)
+            }
             // Task 4: scroll to highlighted track (clear is owned by LibraryNav.goToSource)
             .task(id: nav.highlightTrackId) {
                 guard let tid = nav.highlightTrackId else { return }
@@ -514,6 +522,37 @@ struct LibraryScreen: View {
             nav.folderIds = []
         } else {
             nav.jumpTo(folderDepth: depth + 1)
+        }
+    }
+
+    /// Task 6 nav bounce: validate that the current nav state still resolves.
+    /// If the source the user is viewing has been disconnected, reset to Library root.
+    /// If a folder in the path no longer exists, pop up levels until we reach a valid ancestor.
+    private func validateNav(sources: [Source]) {
+        guard !nav.isRoot else { return }
+
+        // All Songs — always valid.
+        if nav.smart != nil { return }
+
+        // Source-level validation: if the current source was disconnected, bounce to root.
+        if let sid = nav.sourceId {
+            let sourceExists = sources.contains { $0.id == sid }
+            if !sourceExists {
+                nav.reset()
+                return
+            }
+        }
+
+        // Folder-level validation: walk down the folderIds; if any node is missing, pop to the last valid depth.
+        if !nav.folderIds.isEmpty {
+            var validDepth = 0
+            for folderId in nav.folderIds {
+                let exists = (try? LibraryStore.folderNode(id: folderId, ctx)) != nil
+                if exists { validDepth += 1 } else { break }
+            }
+            if validDepth < nav.folderIds.count {
+                nav.jumpTo(folderDepth: validDepth)
+            }
         }
     }
 
