@@ -11,6 +11,9 @@ import SwiftUI
 /// `safeArea`. The gradient bleeds full (`.ignoresSafeArea`); the chrome pads by `safeArea`.
 struct NowPlayingScreen: View {
     @Environment(AudioEngine.self) private var engine
+    @Environment(LibraryNav.self) private var nav
+    @Environment(LibraryIndex.self) private var index
+    @Environment(\.modelContext) private var ctx
     var onClose: () -> Void
     /// True device safe-area insets, read by `RootView` (the cover's own insets are wrong — see above).
     var safeArea: EdgeInsets = EdgeInsets()
@@ -254,8 +257,28 @@ struct NowPlayingScreen: View {
 
     @ViewBuilder private var bottomRail: some View {
         HStack {
-            Image(systemName: "folder").font(.system(size: 20)).foregroundStyle(Theme.text3)
-                .frame(maxWidth: .infinity).opacity(0.4)        // Go-to-Source-Folder is v2
+            // Go to Source: enabled when current track has a resolvable connected path
+            let canGoToSource = engine.current.map { t in
+                guard let p = index.trackPath[t.id],
+                      let source = try? LibraryStore.source(id: p.sourceId, ctx) else { return false }
+                return SourceState(rawValue: source.state) != .disconnected
+            } ?? false
+
+            Button {
+                if let t = engine.current, nav.goToSource(track: t, index: index, ctx: ctx) {
+                    onClose()
+                }
+            } label: {
+                Image(systemName: "folder")
+                    .font(.system(size: 20))
+                    .foregroundStyle(canGoToSource ? Theme.text2 : Theme.text3)
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.plain)
+            .disabled(!canGoToSource)
+            .opacity(canGoToSource ? 1 : 0.4)
+            .accessibilityIdentifier("npGoToSource")
+
             AirPlayButton().frame(width: 44, height: 44).frame(maxWidth: .infinity)
             Button { showQueue = true } label: {
                 Image(systemName: "list.bullet.indent").font(.system(size: 20)).foregroundStyle(Theme.text2)

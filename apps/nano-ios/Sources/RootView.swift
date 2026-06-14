@@ -64,6 +64,8 @@ struct RootView: View {
         .onReceive(NotificationCenter.default.publisher(for: ModelContext.didSave)) { _ in
             libIndex.rebuild(from: ctx)
         }
+        // Task 6: Go-to-Source from a sheet/NowPlaying flips to the Library tab
+        .onChange(of: libNav.switchToLibraryToken) { tab = .library }
         #if DEBUG
         .onAppear {   // headless self-test hooks: `-autoplay` docks a track, `-expand` opens Now Playing
             if ProcessInfo.processInfo.arguments.contains("-autoplay"), engine.current == nil {
