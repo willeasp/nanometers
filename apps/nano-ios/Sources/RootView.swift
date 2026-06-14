@@ -18,13 +18,9 @@ struct RootView: View {
     @State private var npOpen = false
     @State private var deviceInsets = EdgeInsets()
     @State private var libNav = LibraryNav()
-    @State private var libIndex = LibraryIndex()
     @Namespace private var heroNS
     @Environment(\.modelContext) private var ctx
-
-    // Probes to detect data changes and rebuild the index.
-    @Query(sort: \Track.dateAdded, order: .reverse) private var allTracksProbe: [Track]
-    @Query private var sourcesProbe: [Source]
+    @Environment(LibraryIndex.self) private var libIndex
 
     var body: some View {
         ZStack {
@@ -61,13 +57,11 @@ struct RootView: View {
         .environment(libIndex)
         .preferredColorScheme(.dark)
         .tint(Theme.accent)
-        .task {
-            libIndex.rebuild(from: ctx)
-        }
-        .onChange(of: allTracksProbe.count) {
-            libIndex.rebuild(from: ctx)
-        }
-        .onChange(of: sourcesProbe.count) {
+        // Belt-and-suspenders initial rebuild (index is also pre-populated in NanoMetersApp.init).
+        .task { libIndex.rebuild(from: ctx) }
+        // Rebuild on any SwiftData save — covers in-place Source.state flips, RootFolder add/remove,
+        // and track imports; more reliable than watching collection .count deltas.
+        .onReceive(NotificationCenter.default.publisher(for: ModelContext.didSave)) { _ in
             libIndex.rebuild(from: ctx)
         }
         #if DEBUG
