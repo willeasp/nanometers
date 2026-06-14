@@ -14,8 +14,10 @@ use std::sync::Arc;
 use realfft::num_complex::Complex;
 use realfft::{RealFftPlanner, RealToComplex};
 
-/// FFT sizes, longest (best bass resolution) → shortest (best treble response).
-const FFT_SIZES: [usize; 3] = [32768, 8192, 2048];
+/// FFT sizes, longest (best bass resolution) → shortest (best treble response). The longest is 16k
+/// (341 ms window): 32k resolved the bass finer but was too sluggish — 16k stays fine (~7 bins/oct at
+/// 20 Hz) while reacting twice as fast.
+const FFT_SIZES: [usize; 3] = [16384, 8192, 2048];
 /// A band of size `N` is "usable" above `target · fs / N` (where an octave holds ≥ target bins). Each
 /// display point uses the SHORTEST usable band, for the best time response at that frequency.
 const BINS_PER_OCT_TARGET: f32 = 24.0;
@@ -68,8 +70,8 @@ impl ResBand {
             norm: 2.0 / win_sum.max(1e-9),
             ring: vec![0.0; size],
             write: 0,
-            // 75% overlap, but cap the long FFT's hop so the bass still refreshes promptly.
-            hop: (size / 4).min(2048),
+            // Heavy overlap, capped so the long FFTs still refresh promptly (snappier bass/mids).
+            hop: (size / 4).min(1024),
             since_hop: 0,
             power: vec![0.0; nbins],
         }
@@ -291,11 +293,11 @@ mod tests {
 
     #[test]
     fn low_frequency_is_resolved_finely() {
-        // 40 Hz: only the 32k band is usable here. Its 1.46 Hz bins place the peak within ~2 Hz — a
-        // single small FFT (23 Hz bins) could be off by 10+ Hz.
+        // 40 Hz: served by the long (16k) band. Its 2.9 Hz bins place the peak within ~5 Hz — fine,
+        // not the 10+ Hz a single small FFT (23 Hz bins) would smear it to.
         let (db, freqs) = run_sine(40.0, 1.5);
         let p = peak_point(&db);
-        assert!((freqs[p] - 40.0).abs() < 2.0, "40 Hz resolved to {} Hz", freqs[p]);
+        assert!((freqs[p] - 40.0).abs() < 5.0, "40 Hz resolved to {} Hz", freqs[p]);
     }
 
     #[test]
