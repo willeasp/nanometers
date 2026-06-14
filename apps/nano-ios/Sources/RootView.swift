@@ -58,7 +58,15 @@ struct RootView: View {
         .preferredColorScheme(.dark)
         .tint(Theme.accent)
         // Belt-and-suspenders initial rebuild (index is also pre-populated in NanoMetersApp.init).
-        .task { libIndex.rebuild(from: ctx) }
+        .task {
+            libIndex.rebuild(from: ctx)
+            // Wire the remote URL provider so cloud tracks download to the on-disk cache before play.
+            // Guard on isConfigured: if no Google client ID is set, Drive Connect is disabled
+            // anyway, so we never get a cloud track with a providerFileId to resolve.
+            if OAuthConfig.google.isConfigured {
+                engine.remoteURLProvider = makeRemoteURLProvider(ctx: ctx, index: libIndex)
+            }
+        }
         // Rebuild on any SwiftData save — covers in-place Source.state flips, RootFolder add/remove,
         // and track imports; more reliable than watching collection .count deltas.
         .onReceive(NotificationCenter.default.publisher(for: ModelContext.didSave)) { _ in
@@ -77,10 +85,86 @@ struct RootView: View {
             if ProcessInfo.processInfo.arguments.contains("-expand") {
                 Task { @MainActor in try? await Task.sleep(for: .seconds(1.0)); npOpen = true }
             }
+            // `-mock-drive`: plant a Google Drive source with a fixed 2-level tree (no OAuth/network).
+            // Only inserts if no gdrive source exists yet, so it's safe on repeat launches.
+            if ProcessInfo.processInfo.arguments.contains("-mock-drive") {
+                let mgr = SourcesManager(ctx: ctx, index: libIndex)
+                mgr.connect(kind: .gdrive)
+                mgr.applyEnumeration(MockSourceProvider.fixedResult,
+                                     sourceId: SourceKind.gdrive.rawValue,
+                                     rootName: MockSourceProvider.rootName,
+                                     rootNodeId: MockSourceProvider.rootId,
+                                     rootBookmark: nil,
+                                     providerFolderId: MockSourceProvider.rootId)
+            }
+            // `-clear-cloud-sources`: remove all non-local sources and their trees (teardown for UI tests).
+            if ProcessInfo.processInfo.arguments.contains("-clear-cloud-sources") {
+                let mgr = SourcesManager(ctx: ctx, index: libIndex)
+                for kind in SourceKind.allCases where kind != .local && kind != .icloud {
+                    mgr.disconnect(sourceId: kind.rawValue)
+                }
+            }
         }
         #endif
     }
 
     /// Shared identity tying the mini-player artwork (source) to the Now Playing cover (destination).
     private static let artID = "nowPlayingArtwork"
+}
+
+// MARK: - Remote URL provider factory (Task 11)
+
+/// Builds the `remoteURLProvider` closure wired into `AudioEngine`. Downloads the cloud track's file to
+/// the on-disk LRU cache via `RemoteFileCache`, then returns the local URL so `AudioEngine`/
+/// `WaveformAnalyzer` consume it exactly like a local file. Called only for tracks where
+/// `AudioEngine.needsRemotePrep` returns true (cloud tracks with `providerFileId` set).
+///
+/// Only assembled when `OAuthConfig.google.isConfigured` so the placeholder client ID never triggers
+/// a live network call (no token exists, and Drive Connect is disabled until the user sets a real id).
+@MainActor
+private func makeRemoteURLProvider(ctx: ModelContext, index: LibraryIndex) -> (Track) async -> URL? {
+    // The cache directory lives in Caches/remote — eviction by the LRU (512 MB default).
+    let cacheDir = (try? FileManager.default.url(
+        for: .cachesDirectory, in: .userDomainMask, appropriateFor: nil, create: true))
+        .map { $0.appendingPathComponent("remote", isDirectory: true) }
+
+    return { track in
+        guard let fileId = track.providerFileId,
+              let sourceId = track.sourceId else { return nil }
+
+        // Resolve the source kind from the Track's sourceId to pick the right OAuthConfig.
+        let kind: SourceKind
+        if let k = SourceKind(rawValue: sourceId) { kind = k }
+        else { return nil }
+
+        guard kind == .gdrive else {
+            // Non-Drive cloud providers not yet wired; return nil (AudioEngine will log).
+            return nil
+        }
+
+        guard let dir = cacheDir else { return nil }
+        let cache = RemoteFileCache(directory: dir)
+
+        // Build a fresh SourcesManager / OAuthClient / token store each call (stateless);
+        // SourcesManager serialises concurrent refreshes via its refreshTasks dict.
+        let mgr = SourcesManager(ctx: ctx, index: index)
+        let config = OAuthConfig.google
+        let oauthClient = OAuthClient(config: config, http: URLSessionHTTPClient())
+        let tokenStore = KeychainTokenStore()
+
+        do {
+            let token = try await mgr.accessToken(for: kind, config: config,
+                                                   client: oauthClient,
+                                                   tokenStore: tokenStore)
+            let url = try await cache.localURL(sourceId: sourceId, fileId: fileId) {
+                let req = DriveAPIClient.mediaRequest(fileId: fileId, accessToken: token, offset: 0)
+                let (data, _) = try await URLSession.shared.data(for: req)
+                return data
+            }
+            return url
+        } catch {
+            NSLog("[remoteURLProvider] failed for \(track.title): \(error)")
+            return nil
+        }
+    }
 }
