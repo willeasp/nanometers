@@ -72,6 +72,16 @@ final class AudioEngine {
     // (dropping it is a hard "main actor-isolated property" error — the "has no effect" warning is
     // spurious); safe because access is single-write-in-init / single-read-in-deinit, never concurrent.
     nonisolated(unsafe) private var remoteTargets: [(MPRemoteCommand, Any)] = []
+    /// Set on AVAudioSession interruption `.began` if we were playing, so we auto-resume on `.ended`
+    /// (`.shouldResume`) — or on the `AVAudioEngineConfigurationChange` that may follow and undo the
+    /// restart. Cleared once playback is actually back.
+    private var resumeOnReactivation = false
+    /// Sample position captured when an interruption began. We re-schedule from it on resume because the
+    /// system stops the engine, which clears the player node's queue and resets its sample clock.
+    private var interruptionResumeFrame: AVAudioFramePosition = 0
+    // Block-based session observers (interruption + engine-config-change); removed in the nonisolated
+    // `deinit`, same single-write-in-init / single-read-in-deinit reasoning as `remoteTargets`.
+    nonisolated(unsafe) private var sessionObservers: [NSObjectProtocol] = []
 
     init() {
         engine.attach(player)
@@ -122,6 +132,7 @@ final class AudioEngine {
         // Remove our handlers from the process-global command center so a re-instantiated engine
         // (SwiftUI previews, tests) doesn't stack duplicate remote-command handlers.
         remoteTargets.forEach { $0.0.removeTarget($0.1) }
+        sessionObservers.forEach { NotificationCenter.default.removeObserver($0) }
     }
 
     // MARK: Public API (handoff §04)
@@ -378,6 +389,75 @@ final class AudioEngine {
         let s = AVAudioSession.sharedInstance()
         try? s.setCategory(.playback, mode: .default)
         try? s.setActive(true)
+        // A system interruption (call/Siri) — and the AVAudioEngineConfigurationChange that can follow it —
+        // stops the engine and deactivates the session WITHOUT going through our transport. Left unhandled
+        // that strands isPlaying=true + a "playing" lock-screen glyph over dead audio, and a paused player
+        // the user can't restart. Observe both so transport stays truthful and we re-activate/restart/resume.
+        let nc = NotificationCenter.default
+        sessionObservers = [
+            nc.addObserver(forName: AVAudioSession.interruptionNotification, object: s, queue: .main) { [weak self] note in
+                // Extract the Sendable primitives on the delivering thread, then hop to the main actor.
+                let info = note.userInfo
+                let typeRaw = info?[AVAudioSessionInterruptionTypeKey] as? UInt ?? 0
+                let optsRaw = info?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
+                Task { @MainActor in self?.handleInterruption(typeRaw: typeRaw, optionsRaw: optsRaw) }
+            },
+            nc.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.handleEngineConfigurationChange() }
+            },
+        ]
+    }
+
+    /// Mirror a system interruption into our transport so `isPlaying` / the lock screen stay truthful,
+    /// and auto-resume when it ends — but only if the system flags `.shouldResume` (Apple's media-app
+    /// guidance: never resume without it). On `.began` the system has already stopped the engine and
+    /// deactivated the session, so we don't touch them; we only reflect the forced pause and remember
+    /// the position. The restart happens on `.ended` (and/or the config-change that may follow).
+    private func handleInterruption(typeRaw: UInt, optionsRaw: UInt) {
+        guard let type = AVAudioSession.InterruptionType(rawValue: typeRaw) else { return }
+        switch type {
+        case .began:
+            guard isPlaying else { return }
+            interruptionResumeFrame = currentFrame
+            resumeOnReactivation = true
+            isPlaying = false; stopTicker()
+            outputLevel = 0; momentaryLUFS = nil
+            updateNowPlayingInfo()
+        case .ended:
+            let options = AVAudioSession.InterruptionOptions(rawValue: optionsRaw)
+            guard options.contains(.shouldResume) else { resumeOnReactivation = false; return }
+            attemptInterruptionResume()
+        @unknown default:
+            break
+        }
+    }
+
+    /// Core Audio reconfigures (often right after an interruption) by stopping the engine again — which
+    /// can undo the restart we did on `.ended`. If a post-interruption resume is still owed, (re)apply it
+    /// here; this is where the engine restart reliably sticks.
+    private func handleEngineConfigurationChange() {
+        if resumeOnReactivation { attemptInterruptionResume() }
+    }
+
+    /// Re-activate the session, restart the stopped engine, re-schedule from the held position, and play.
+    /// Re-scheduling is required: the system-forced engine stop clears the player node's queue and resets
+    /// its clock, so a bare `play()` would not resume (mirrors the `seek()` re-schedule path). If any step
+    /// fails, `resumeOnReactivation` stays set so the following `AVAudioEngineConfigurationChange` retries.
+    private func attemptInterruptionResume() {
+        guard resumeOnReactivation, let file, current != nil else { return }
+        do { try AVAudioSession.sharedInstance().setActive(true) }
+        catch { NSLog("[AudioEngine] interruption resume: setActive failed: \(error)"); return }
+        if !engine.isRunning {
+            do { try engine.start() }
+            catch { NSLog("[AudioEngine] interruption resume: engine.start failed: \(error)"); return }
+        }
+        player.stop()
+        schedule(file, from: interruptionResumeFrame)
+        player.play(); isPlaying = true
+        startTicker()
+        liveMeter.requestReset()
+        resumeOnReactivation = false
+        updateNowPlayingInfo()
     }
 
     // MARK: Transport (Task 5)

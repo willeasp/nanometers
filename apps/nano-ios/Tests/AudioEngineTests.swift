@@ -192,6 +192,66 @@ final class AudioEngineTests: XCTestCase {
         XCTAssertEqual(center.playbackState, .playing, "playbackState must return to .playing on resume")
     }
 
+    /// Regression: a system audio interruption (phone call / Siri) stops the engine WITHOUT going through
+    /// our transport. The engine must mirror it to a paused state (so the lock screen and `isPlaying` don't
+    /// lie about dead audio) and auto-resume when the interruption ends with `.shouldResume`.
+    func test_systemInterruptionPausesThenResumesWhenAsked() async throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Tone_\(UUID().uuidString).wav")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try Self.writeSine(to: url, seconds: 5.0, frequency: 440)
+
+        let track = Track(title: "Tone", artist: "", album: "", bookmark: try url.bookmarkData())
+        let engine = AudioEngine()
+        let center = MPNowPlayingInfoCenter.default()
+        engine.play(track, in: [track], context: .library)
+        try await Task.sleep(nanoseconds: 400_000_000)   // render a little so there's a position to resume from
+        XCTAssertTrue(engine.isPlaying)
+
+        Self.postInterruption(.began)
+        try await Task.sleep(nanoseconds: 150_000_000)   // allow the @MainActor hop
+        XCTAssertFalse(engine.isPlaying, "interruption .began must mirror to a paused transport")
+        XCTAssertEqual(center.playbackState, .paused, "lock screen must read paused during the interruption")
+
+        Self.postInterruption(.ended, options: .shouldResume)
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertTrue(engine.isPlaying, "interruption .ended (.shouldResume) must auto-resume")
+        XCTAssertEqual(center.playbackState, .playing, "lock screen must read playing again after resume")
+    }
+
+    /// Without the `.shouldResume` hint, Apple's guidance is to stay paused until the user initiates
+    /// playback — we must NOT auto-resume.
+    func test_systemInterruptionEndWithoutShouldResumeStaysPaused() async throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Tone_\(UUID().uuidString).wav")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try Self.writeSine(to: url, seconds: 5.0, frequency: 440)
+
+        let track = Track(title: "Tone", artist: "", album: "", bookmark: try url.bookmarkData())
+        let engine = AudioEngine()
+        engine.play(track, in: [track], context: .library)
+        try await Task.sleep(nanoseconds: 400_000_000)
+        XCTAssertTrue(engine.isPlaying)
+
+        Self.postInterruption(.began)
+        try await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertFalse(engine.isPlaying)
+
+        Self.postInterruption(.ended)   // no .shouldResume option
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertFalse(engine.isPlaying, "no .shouldResume → must wait for the user, not auto-resume")
+    }
+
+    /// Posts a fake `AVAudioSession.interruptionNotification` (matching the engine's `object: s` observer)
+    /// so the handler's state machine can be exercised headlessly.
+    private static func postInterruption(_ type: AVAudioSession.InterruptionType,
+                                         options: AVAudioSession.InterruptionOptions? = nil) {
+        var info: [AnyHashable: Any] = [AVAudioSessionInterruptionTypeKey: type.rawValue]
+        if let options { info[AVAudioSessionInterruptionOptionKey] = options.rawValue }
+        NotificationCenter.default.post(name: AVAudioSession.interruptionNotification,
+                                        object: AVAudioSession.sharedInstance(), userInfo: info)
+    }
+
     /// Writes `seconds` of a mono 44.1k float-WAV sine. The `AVAudioFile` writer is out of scope on
     /// return, so the file's header is finalized and it's immediately readable.
     private static func writeSine(to url: URL, seconds: Double, frequency: Double) throws {
