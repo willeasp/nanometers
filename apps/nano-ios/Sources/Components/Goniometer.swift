@@ -3,8 +3,8 @@ import SwiftUI
 /// Live goniometer / vectorscope (handoff §06D.2): plots the engine's recent L/R sample pairs as a
 /// Lissajous cloud — `M=(L+R)/√2` vertical, `S=(L−R)/√2` horizontal — in accent "phosphor" with
 /// additive (`.plusLighter`) blending; brightness scales with `|M|+|S|`. Mono → a vertical line; wide
-/// → spreads. Faint diamond + cross guide, no labels. Fades to a center dot when there's no live audio
-/// (paused / silent), per the idle decision.
+/// → spreads. Faint diamond + cross guide (white@6%) behind the cloud, no labels. Fades to a center dot when
+/// there's no live audio (paused / silent), per the idle decision.
 struct Goniometer: View {
     /// Monotonic frame clock + windowed reader of the live scope ring (see `ScopeCursor`). The gonio
     /// plots raw samples, so reading "the newest N" would stutter at the tap's ~10 Hz delivery; instead
@@ -43,21 +43,24 @@ struct Goniometer: View {
     private func draw(_ ctx: GraphicsContext, _ size: CGSize, l: [Float], r: [Float], fade: CGFloat) {
         let w = size.width, h = size.height
         guard w > 2, h > 2 else { return }
+        var ctx = ctx
+        ctx.clip(to: Path(CGRect(origin: .zero, size: size)))   // contain the cloud — never draw past the module's view
         let cx = w / 2, cy = h / 2
         let radius = min(w, h) / 2 - 8           // usable radius: the VIEW edge, inset 8 px so dots don't clip
-        // Cloud scale: m=(L+R)/√2, s=(L−R)/√2 is an energy-preserving 45° rotation, so the |L|,|R|≤1 input
-        // square maps to a diamond whose far corners (full-scale mono / anti-phase) sit at √2. Divide by √2 so
-        // those corners land on `radius` = the VIEW edge: a loud track fills the scope to the rim but never
-        // spills OUTSIDE the view. (The cloud may extend past the inner diamond guide below — that's wanted.)
-        let plotR = radius / 1.4142135
-        // Inner diamond reference, deliberately smaller than the view so the cloud breathes PAST it on loud
-        // parts instead of looking encased (≈ −3 dB mono touches a vertex; full-scale reaches the view edge).
-        let guideR = plotR
+        // `audioGain` is a gain on the AUDIO SOURCE (multiplied into the L/R samples in the plotting loop below).
+        // It scales the CLOUD only. The diamond/cross reference frame is drawn at the fixed `radius` (view edge)
+        // and is NOT touched by it — lowering the gain shrinks the cloud inside a frame that stays put. Calibrate
+        // freely: lower = smaller cloud / more headroom before it reaches the frame. (The clip above is only an
+        // overflow safety so a transient can never draw outside the module.) At 1/√2 a full-scale signal reaches
+        // exactly the diamond, so the diamond encapsulates the cloud and a loud track fills it.
+        let audioGain: Float = 0.70710677
 
-        // faint inner diamond (at guideR) + full-width cross orientation axes (white@6%)
+        // Fixed reference frame at the view edge (white@6%), drawn at the constant `radius`: the outer diamond
+        // border + cross axes, behind the cloud. (It earlier looked like an overlay only because the cloud's
+        // own |m|+|s| brightness banding painted diamonds; that's gone now, so this faint frame reads cleanly.)
         var guide = Path()
-        guide.move(to: CGPoint(x: cx, y: cy - guideR)); guide.addLine(to: CGPoint(x: cx + guideR, y: cy))
-        guide.addLine(to: CGPoint(x: cx, y: cy + guideR)); guide.addLine(to: CGPoint(x: cx - guideR, y: cy)); guide.closeSubpath()
+        guide.move(to: CGPoint(x: cx, y: cy - radius)); guide.addLine(to: CGPoint(x: cx + radius, y: cy))
+        guide.addLine(to: CGPoint(x: cx, y: cy + radius)); guide.addLine(to: CGPoint(x: cx - radius, y: cy)); guide.closeSubpath()
         guide.move(to: CGPoint(x: cx, y: cy - radius)); guide.addLine(to: CGPoint(x: cx, y: cy + radius))
         guide.move(to: CGPoint(x: cx - radius, y: cy)); guide.addLine(to: CGPoint(x: cx + radius, y: cy))
         ctx.stroke(guide, with: .color(.white.opacity(0.06)), lineWidth: 1)
@@ -73,28 +76,19 @@ struct Goniometer: View {
         let n = min(l.count, r.count)
         guard n > 0, fade > 0.01 else { return }            // idle → just the center dot
 
-        // Bucket points by brightness, fill each bucket ONCE — keeps the per-amplitude phosphor look
-        // while collapsing ~1024 individual blended fills to a handful (fast enough for 120 Hz). The
-        // representative opacity maps the bucket center back through the real brightness range AND keeps
-        // the `fade` factor, so the cloud genuinely dims (not just collapses) as it idles out.
-        let buckets = 6
-        let bMin = 0.16, bMax = 0.85                          // per-point brightness floor … ~peak
-        var paths = [Path](repeating: Path(), count: buckets)
+        // Uniform-brightness cloud: gather every point into ONE path and fill once. Brightness is deliberately
+        // NOT keyed to |m|+|s| — that L1 distance's level-sets are DIAMONDS, so bucketing it painted concentric
+        // diamond-shaped brightness bands ("layers", darker in the middle) over the cloud. A single uniform
+        // additive fill keeps the cloud clean (and is cheaper: one fill, not six). `fade` dims it on idle.
+        var cloud = Path()
         for i in 0..<n {
-            let m = (l[i] + r[i]) * 0.7071
-            let s = (l[i] - r[i]) * 0.7071
-            let x = cx + CGFloat(s) * plotR * fade
-            let y = cy - CGFloat(m) * plotR * fade
-            let b = 0.16 + 0.45 * Double(abs(m) + abs(s))     // pre-fade brightness
-            let t = min(1, max(0, (b - bMin) / (bMax - bMin)))
-            let bi = min(buckets - 1, Int(t * Double(buckets)))
-            paths[bi].addRect(CGRect(x: x - dot / 2, y: y - dot / 2, width: dot, height: dot))
+            let m = (l[i] + r[i]) * 0.7071 * audioGain         // input gain on the audio source
+            let s = (l[i] - r[i]) * 0.7071 * audioGain
+            let x = cx + CGFloat(s) * radius * fade            // full-radius geometry; audioGain sizes the cloud
+            let y = cy - CGFloat(m) * radius * fade
+            cloud.addRect(CGRect(x: x - dot / 2, y: y - dot / 2, width: dot, height: dot))
         }
-        for bi in 0..<buckets where !paths[bi].isEmpty {
-            let center = (Double(bi) + 0.5) / Double(buckets)
-            let rep = (bMin + center * (bMax - bMin)) * Double(fade)   // bucket brightness, faded
-            phosphor.fill(paths[bi], with: .color(Theme.accent.opacity(min(1, max(0, rep)))))
-        }
+        phosphor.fill(cloud, with: .color(Theme.accent.opacity(0.6 * Double(fade))))
     }
 }
 

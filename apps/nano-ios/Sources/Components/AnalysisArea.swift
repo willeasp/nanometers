@@ -69,7 +69,9 @@ struct AnalysisArea: View {
         if hasScope && bottom.count == 2 {
             GeometryReader { geo in
                 HStack(spacing: 10) {
-                    meterView(.gonio).frame(width: max(0, (geo.size.width - 10) * 0.4))
+                    // Square goniometer: side = the row height, so the (square) diamond fills it with no wasted
+                    // vertical space. Spectrum takes the rest of the width. Capped at half-width for safety.
+                    meterView(.gonio).frame(width: min(geo.size.height, (geo.size.width - 10) * 0.5))
                     meterView(.spectrum).frame(maxWidth: .infinity)
                 }
             }
