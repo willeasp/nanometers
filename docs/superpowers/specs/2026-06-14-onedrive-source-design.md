@@ -155,3 +155,34 @@ provider item id becomes the `RootFolder.providerFolderId`.
 - Graph `/content` 302-redirects to a storage URL; URLSession follows it by default. Verify the
   redirected request does not re-send the Bearer to the storage host (URLSession drops auth on
   cross-host redirect by default — fine, the storage URL is pre-authed).
+
+## Research validation (current Microsoft docs, retrieved 2026-06-14; source pages dated 2026-01)
+
+Verified against the live `v2-oauth2-auth-code-flow` reference (ms.date 2026-01-09, updated 2026-01-22)
+and the MSAL iOS/macOS redirect-URI guidance:
+
+- **Raw auth-code + PKCE is supported for native apps** (MSAL is recommended, not required). Public
+  clients (native/mobile) **must not** send a `client_secret` on `/token` or refresh — `OAuthClient`
+  already omits it. ✓
+- **Redirect URI `msauth.com.willeasp.nanometers.ios://auth` is correct** and the format applies
+  *whether or not MSAL is used* (it's an Entra requirement for iOS/macOS apps). Register it under the
+  **iOS/macOS platform** (portal computes it from the bundle id). Do **not** register it as `spa` or
+  `Web` — those activate CORS/`Origin` handling that the identity platform rejects for native flows.
+  `ASWebAuthenticationSession` callback scheme = `msauth.com.willeasp.nanometers.ios`.
+- **Supported account types must be "Personal Microsoft accounts only"** to match the `/consumers`
+  authority. `Files.Read` + `offline_access` delegated permissions; consumers self-consent.
+- **Refresh-token rotation:** Microsoft may issue a new `refresh_token` on every refresh and expects
+  the old one discarded. `OAuthClient.refresh` keeps `r.refresh_token ?? existingRefresh`; **add a task
+  to confirm `TokenRefreshCoordinator` persists the (possibly rotated) token back to the Keychain** —
+  Google tolerated a stale refresh token longer, Microsoft will strand the source if it isn't saved.
+- **`/content` ignores the `Range` header** (Range must be applied to the download URL, not `/content`).
+  The OneDrive `contentRequest` therefore omits the `bytes=0-` header that `DriveAPIClient.mediaRequest`
+  sets — we always pull the whole file (download-first).
+- **Pagination uses `@odata.nextLink`** — an absolute URL to GET with the same Bearer, not a page token.
+- `prompt=select_account` is a valid `/authorize` value (nicer multi-account UX); `access_type` is a
+  Google-only param and is omitted for Microsoft.
+
+Sources: [OAuth 2.0 auth code flow](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow),
+[MSAL iOS/macOS redirect URIs](https://learn.microsoft.com/en-us/entra/msal/objc/redirect-uris-ios),
+[Download driveItem content](https://learn.microsoft.com/en-us/graph/api/driveitem-get-content?view=graph-rest-1.0),
+[Get access on behalf of a user](https://learn.microsoft.com/en-us/graph/auth-v2-user).
