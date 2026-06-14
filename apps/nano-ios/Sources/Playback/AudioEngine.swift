@@ -243,6 +243,7 @@ final class AudioEngine {
         } catch {
             current = track; isPlaying = false; file = nil; totalFrames = 0
             liveMeter.stop(); momentaryLUFS = nil
+            updateNowPlayingInfo()   // reflect the failed load as paused, not a stale "playing" glyph
             NSLog("[AudioEngine] load failed for \(url.lastPathComponent): \(error)")
         }
     }
@@ -458,7 +459,11 @@ final class AudioEngine {
 
     private func updateNowPlayingInfo() {
         let center = MPNowPlayingInfoCenter.default()
-        guard let t = current else { center.nowPlayingInfo = nil; return }
+        guard let t = current else {
+            center.nowPlayingInfo = nil
+            center.playbackState = .stopped     // authoritative "nothing loaded" — clears any stale glyph
+            return
+        }
         let duration = totalFrames > 0 && sampleRate > 0 ? Double(totalFrames) / sampleRate : t.durationSec
         var info: [String: Any] = [
             MPMediaItemPropertyTitle: t.title,
@@ -472,5 +477,12 @@ final class AudioEngine {
             info[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(boundsSize: img.size) { _ in img }
         }
         center.nowPlayingInfo = info
+        // On iOS the lock-screen / Control Center play-pause glyph is driven by this explicit
+        // playbackState, NOT by MPNowPlayingInfoPropertyPlaybackRate (rate only animates the
+        // playhead). Without it, a system pause tap flips the glyph optimistically to "play" then
+        // reverts it to "pause" — desyncing from the actually-paused audio, and a second tap (now a
+        // pauseCommand on already-paused audio) is a no-op so playback can't be resumed. Set both in
+        // lockstep: rate=0 + elapsed in the dict above, authoritative state here.
+        center.playbackState = isPlaying ? .playing : .paused
     }
 }

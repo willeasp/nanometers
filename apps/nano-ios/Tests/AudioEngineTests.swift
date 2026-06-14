@@ -1,5 +1,6 @@
 import XCTest
 import AVFoundation
+import MediaPlayer
 @testable import NanoMeters
 
 /// Verifies that playback genuinely renders audio — not just that UI/transport state flips.
@@ -160,6 +161,35 @@ final class AudioEngineTests: XCTestCase {
         // isPreparing must be false: B is a local track, no prep in flight.
         XCTAssertFalse(engine.isPreparing,
                        "isPreparing must be false after B (local) is loaded")
+    }
+
+    /// Regression: the system (lock-screen / Control Center) play-pause glyph is driven by
+    /// `MPNowPlayingInfoCenter.playbackState`, which the engine must keep in lockstep with `isPlaying`.
+    /// Before the fix only `MPNowPlayingInfoPropertyPlaybackRate` was set, so a system pause tap
+    /// reverted the glyph back to "pause" while audio stayed paused — and the next tap (a pauseCommand
+    /// on already-paused audio) was a no-op, so playback couldn't be resumed from the lock screen.
+    func test_nowPlayingPlaybackStateTracksTransport() async throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Tone_\(UUID().uuidString).wav")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try Self.writeSine(to: url, seconds: 3.0, frequency: 440)
+
+        let track = Track(title: "Tone", artist: "", album: "", bookmark: try url.bookmarkData())
+        let engine = AudioEngine()
+        let center = MPNowPlayingInfoCenter.default()
+
+        // play() resolves + schedules synchronously for a bundled/bookmark track, so state is set now.
+        engine.play(track, in: [track], context: .library)
+        XCTAssertTrue(engine.isPlaying)
+        XCTAssertEqual(center.playbackState, .playing, "playbackState must be .playing after play()")
+
+        engine.toggle()   // system pause
+        XCTAssertFalse(engine.isPlaying)
+        XCTAssertEqual(center.playbackState, .paused, "playbackState must be .paused after pausing")
+
+        engine.toggle()   // system resume
+        XCTAssertTrue(engine.isPlaying)
+        XCTAssertEqual(center.playbackState, .playing, "playbackState must return to .playing on resume")
     }
 
     /// Writes `seconds` of a mono 44.1k float-WAV sine. The `AVAudioFile` writer is out of scope on
