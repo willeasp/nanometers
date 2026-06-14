@@ -16,6 +16,7 @@ enum SearchFilter {
 
 struct SearchScreen: View {
     @Environment(AudioEngine.self) private var engine
+    @Environment(LibraryIndex.self) private var index
     @Query(sort: \Track.dateAdded, order: .reverse) private var tracks: [Track]
     @State private var query = ""
 
@@ -45,6 +46,7 @@ struct SearchScreen: View {
                                 track: t,
                                 isCurrent: engine.current?.id == t.id,
                                 isPlaying: engine.isPlaying && engine.current?.id == t.id,
+                                isAvailable: LibraryBrowse.isAvailable(t, index: index),
                                 onTap: { engine.play(t, in: results, context: .search) }
                             )
                             Divider().background(Theme.hair).padding(.leading, Theme.Layout.rowSeparatorInset)

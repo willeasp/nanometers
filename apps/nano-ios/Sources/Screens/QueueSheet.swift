@@ -4,6 +4,7 @@ import SwiftUI
 /// "End of queue" empty state; title carries the current context name. Tapping a row jumps to it.
 struct QueueSheet: View {
     @Environment(AudioEngine.self) private var engine
+    @Environment(LibraryIndex.self) private var index
     @Environment(\.dismiss) private var dismiss
     @State private var bins: [WaveBin] = []
     @State private var contextTrack: Track?
@@ -36,10 +37,22 @@ struct QueueSheet: View {
                         .frame(maxWidth: .infinity).padding(.vertical, 24).listRowBackground(Color.clear)
                 } else {
                     ForEach(upcoming, id: \.offset) { item in   // positional id: a track may legitimately appear twice in the queue
+                        let available = LibraryBrowse.isAvailable(item.track, index: index)
                         HStack(spacing: 12) {
                             NMArtwork(data: item.track.artworkData, size: 42, radius: 8)
                             VStack(alignment: .leading) {
-                                Text(item.track.title).font(Theme.sans(15, .medium)).foregroundStyle(Theme.text).lineLimit(1)
+                                HStack(spacing: 6) {
+                                    Text(item.track.title).font(Theme.sans(15, .medium)).foregroundStyle(Theme.text).lineLimit(1)
+                                    if !available {
+                                        Text("Unavailable")
+                                            .font(Theme.sans(10, .medium))
+                                            .foregroundStyle(Theme.text3)
+                                            .padding(.horizontal, 5)
+                                            .padding(.vertical, 2)
+                                            .background(Theme.text3.opacity(0.18), in: Capsule())
+                                            .accessibilityIdentifier("unavailableTag")
+                                    }
+                                }
                                 Text(item.track.artist).font(Theme.sans(12.5)).foregroundStyle(Theme.text2).lineLimit(1)
                             }
                             Spacer()
@@ -53,7 +66,8 @@ struct QueueSheet: View {
                             .accessibilityIdentifier("rowEllipsis")
                         }
                         .contentShape(Rectangle())
-                        .onTapGesture { engine.jump(to: item.offset); dismiss() }
+                        .onTapGesture { if available { engine.jump(to: item.offset); dismiss() } }
+                        .opacity(available ? 1 : 0.45)
                         .listRowBackground(Color.clear)
                     }
                 }

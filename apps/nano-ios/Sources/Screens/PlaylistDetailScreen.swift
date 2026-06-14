@@ -4,6 +4,7 @@ import SwiftData
 struct PlaylistDetailScreen: View {
     @Environment(\.modelContext) private var ctx
     @Environment(AudioEngine.self) private var engine
+    @Environment(LibraryIndex.self) private var index
     let playlist: Playlist
     @State private var adding = false
     @State private var detailTrack: Track?
@@ -49,6 +50,7 @@ struct PlaylistDetailScreen: View {
                         track: t,
                         isCurrent: engine.current?.id == t.id,
                         isPlaying: engine.isPlaying && engine.current?.id == t.id,
+                        isAvailable: LibraryBrowse.isAvailable(t, index: index),
                         onTap: { engine.play(t, in: tracks, context: .playlist(playlist.name)) },
                         onEllipsis: { detailTrack = t }
                     )
