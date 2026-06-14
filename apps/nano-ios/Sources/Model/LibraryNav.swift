@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import SwiftData
 
 enum SmartEntry: Equatable { case allSongs }
 
@@ -38,5 +39,23 @@ final class LibraryNav {
     /// Go to Source (handoff §5.2): set the source + full path directly.
     func goToSource(sourceId: String, folderIds: [String]) {
         self.smart = nil; self.sourceId = sourceId; self.folderIds = folderIds
+    }
+
+    /// The row to flash after a Go-to-Source jump (handoff §5.2). LibraryScreen clears it after ~2.8 s.
+    var highlightTrackId: UUID?
+    /// Bumped to ask RootView to switch to the Library tab (Go-to-Source from a sheet/other tab).
+    private(set) var switchToLibraryToken = 0
+
+    /// Navigate to the folder holding `track` and flash it. Returns false (no-op) when the track's source
+    /// is missing or disconnected (handoff §5.2 "{Source} · not connected" → action disabled).
+    @MainActor
+    func goToSource(track: Track, index: LibraryIndex, ctx: ModelContext) -> Bool {
+        guard let p = index.trackPath[track.id],
+              let source = try? LibraryStore.source(id: p.sourceId, ctx),
+              SourceState(rawValue: source.state) != .disconnected else { return false }
+        smart = nil; sourceId = p.sourceId; folderIds = p.folderIds
+        highlightTrackId = track.id
+        switchToLibraryToken += 1
+        return true
     }
 }
