@@ -47,6 +47,8 @@ struct SourceDetailDest: Hashable { let source: Source }
 struct AddSourceDest: Hashable {}
 /// Used by AddSourceRow: fire connect(kind:) then navigate to that source's detail.
 struct ConnectAndDetailDest: Hashable { let kind: SourceKind }
+/// Pushed after a successful OAuth connect — lands on the source detail (root-picker ready).
+struct DriveOAuthDest: Hashable {}
 
 // MARK: - Source detail view
 
@@ -59,6 +61,7 @@ struct SourceDetailView: View {
 
     @Query private var allRoots: [RootFolder]
     @State private var showFolderPicker = false
+    @State private var showDriveBrowser = false
     @State private var showDisconnectConfirm = false
     @State private var enumerationError: Error?
     @State private var isEnumerating = false
@@ -157,7 +160,11 @@ struct SourceDetailView: View {
                     .listRowBackground(Color.clear)
                 } else {
                     Button {
-                        showFolderPicker = true
+                        if kind == .gdrive {
+                            showDriveBrowser = true
+                        } else {
+                            showFolderPicker = true
+                        }
                     } label: {
                         HStack(spacing: 12) {
                             Image(systemName: "folder.badge.plus")
@@ -234,6 +241,11 @@ struct SourceDetailView: View {
                 }
             }
         }
+        .sheet(isPresented: $showDriveBrowser) {
+            DriveFolderBrowserSheet(manager: manager, sourceId: source.id) {
+                showDriveBrowser = false
+            }
+        }
         .confirmationDialog("Disconnect \(source.label)?", isPresented: $showDisconnectConfirm, titleVisibility: .visible) {
             Button("Disconnect", role: .destructive) {
                 manager.disconnect(sourceId: source.id)
@@ -300,8 +312,15 @@ private struct AddSourceRow: View {
     let isConnected: Bool
     let manager: SourcesManager
 
-    // Only local + iCloud are available in Phase 4; cloud providers are Phase 5.
-    private var isAvailable: Bool { kind == .local || kind == .icloud }
+    // Local + iCloud are "connect directly" in Phase 4; gdrive is OAuth (Phase 5); others coming soon.
+    private var isLocalAvailable: Bool { kind == .local || kind == .icloud }
+    private var isDriveConfigured: Bool { kind == .gdrive && OAuthConfig.google.isConfigured }
+    private var isDriveNotConfigured: Bool { kind == .gdrive && !OAuthConfig.google.isConfigured }
+
+    // Drive OAuth state
+    @State private var isConnecting = false
+    @State private var connectError: String? = nil
+    @State private var navigateToDriveDetail = false
 
     var body: some View {
         HStack(spacing: 12) {
@@ -317,20 +336,100 @@ private struct AddSourceRow: View {
                 Text(kind.label)
                     .font(Theme.sans(16, .medium))
                     .foregroundStyle(Theme.text)
-                Text(isConnected ? "Already connected" : (isAvailable ? "Local storage" : "Coming soon"))
-                    .font(Theme.mono(11.5))
-                    .foregroundStyle(Theme.text3)
+                subtitleText
             }
             Spacer(minLength: 8)
 
-            if isConnected {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(Theme.statusGreen)
-                    .font(.system(size: 18))
-            } else if isAvailable {
-                // NavigationLink fires connect then pushes to the source detail.
-                // ConnectAndDetailDest is handled in SettingsSheet's navigationDestination.
-                NavigationLink(value: ConnectAndDetailDest(kind: kind)) {
+            trailingControl
+        }
+        .frame(minHeight: Theme.Layout.rowMinHeight)
+        // Drive OAuth success → push detail via programmatic navigation
+        .navigationDestination(isPresented: $navigateToDriveDetail) {
+            ConnectDetailBridge(kind: .gdrive, manager: manager)
+        }
+    }
+
+    @ViewBuilder
+    private var subtitleText: some View {
+        if isConnected {
+            Text("Already connected")
+                .font(Theme.mono(11.5))
+                .foregroundStyle(Theme.text3)
+        } else if isLocalAvailable {
+            Text("Local storage")
+                .font(Theme.mono(11.5))
+                .foregroundStyle(Theme.text3)
+        } else if isDriveConfigured {
+            if let err = connectError {
+                Text(err)
+                    .font(Theme.mono(11.5))
+                    .foregroundStyle(.red)
+            } else {
+                Text("Google account required")
+                    .font(Theme.mono(11.5))
+                    .foregroundStyle(Theme.text3)
+            }
+        } else if isDriveNotConfigured {
+            Text("Add your Google client ID (see docs/google-drive-setup.md)")
+                .font(Theme.mono(11.5))
+                .foregroundStyle(Theme.text3)
+        } else {
+            Text("Coming soon")
+                .font(Theme.mono(11.5))
+                .foregroundStyle(Theme.text3)
+        }
+    }
+
+    @ViewBuilder
+    private var trailingControl: some View {
+        if isConnected {
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(Theme.statusGreen)
+                .font(.system(size: 18))
+        } else if isLocalAvailable {
+            // NavigationLink fires connect then pushes to the source detail.
+            // ConnectAndDetailDest is handled in SettingsSheet's navigationDestination.
+            NavigationLink(value: ConnectAndDetailDest(kind: kind)) {
+                Text("Connect")
+                    .font(Theme.sans(14, .medium))
+                    .foregroundStyle(Theme.bg)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 6)
+                    .background(Theme.accent, in: Capsule())
+            }
+            .simultaneousGesture(TapGesture().onEnded {
+                manager.connect(kind: kind)
+            })
+            .accessibilityIdentifier("connect-\(kind.rawValue)")
+        } else if isDriveConfigured {
+            // Configured: show Connect pill that runs OAuth
+            if isConnecting {
+                ProgressView()
+                    .tint(Theme.accent)
+                    .padding(.horizontal, 8)
+                    .accessibilityIdentifier("connect-\(kind.rawValue)")
+            } else {
+                Button {
+                    isConnecting = true
+                    connectError = nil
+                    Task { @MainActor in
+                        defer { isConnecting = false }
+                        do {
+                            try await manager.connectOAuth(
+                                kind: .gdrive,
+                                config: .google,
+                                web: WebAuthSession(),
+                                client: OAuthClient(config: .google, http: URLSessionHTTPClient()),
+                                tokenStore: KeychainTokenStore()
+                            )
+                            navigateToDriveDetail = true
+                        } catch WebAuthSession.Error.cancelled {
+                            // User cancelled — silent
+                        } catch {
+                            connectError = error.localizedDescription
+                        }
+                    }
+                } label: {
                     Text("Connect")
                         .font(Theme.sans(14, .medium))
                         .foregroundStyle(Theme.bg)
@@ -338,21 +437,27 @@ private struct AddSourceRow: View {
                         .padding(.vertical, 6)
                         .background(Theme.accent, in: Capsule())
                 }
-                .simultaneousGesture(TapGesture().onEnded {
-                    manager.connect(kind: kind)
-                })
+                .buttonStyle(.plain)
                 .accessibilityIdentifier("connect-\(kind.rawValue)")
-            } else {
-                Text("Coming soon")
-                    .font(Theme.sans(13))
-                    .foregroundStyle(Theme.text3)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .background(Theme.bgElev2, in: Capsule())
-                    .accessibilityIdentifier("connect-\(kind.rawValue)")
             }
+        } else if isDriveNotConfigured {
+            // Not configured: disabled pill with "Needs setup" copy
+            Text("Needs setup")
+                .font(Theme.sans(13))
+                .foregroundStyle(Theme.text3)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(Theme.bgElev2, in: Capsule())
+                .accessibilityIdentifier("connect-\(kind.rawValue)")
+        } else {
+            Text("Coming soon")
+                .font(Theme.sans(13))
+                .foregroundStyle(Theme.text3)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(Theme.bgElev2, in: Capsule())
+                .accessibilityIdentifier("connect-\(kind.rawValue)")
         }
-        .frame(minHeight: Theme.Layout.rowMinHeight)
     }
 }
 
@@ -440,6 +545,205 @@ private extension SourceState {
         case .connected:   Theme.statusGreen
         case .needsReauth: Theme.accent
         default:           Theme.text3
+        }
+    }
+}
+
+// MARK: - Drive folder browser (Task 9)
+
+/// A sheet that lets the user browse Drive folders and pick one as a root.
+/// Opened from SourceDetailView when kind == .gdrive instead of the system FolderPicker.
+struct DriveFolderBrowserSheet: View {
+    let manager: SourcesManager
+    let sourceId: String
+    let onDismiss: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            DriveFolderBrowserView(
+                manager: manager,
+                sourceId: sourceId,
+                parentId: "root",
+                parentName: "My Drive",
+                onPick: { _ in onDismiss() }
+            )
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { onDismiss() }
+                }
+            }
+        }
+        .preferredColorScheme(.dark)
+    }
+}
+
+/// Lists Drive folders under `parentId`, lets the user drill or pick a folder as root.
+struct DriveFolderBrowserView: View {
+    let manager: SourcesManager
+    let sourceId: String
+    let parentId: String
+    let parentName: String
+    let onPick: (DriveFile) -> Void
+
+    @State private var folders: [DriveFile] = []
+    @State private var isLoading = true
+    @State private var loadError: String? = nil
+    @State private var isEnumerating = false
+    @State private var enumerationError: String? = nil
+
+    var body: some View {
+        List {
+            if isLoading {
+                HStack {
+                    ProgressView().tint(Theme.accent)
+                    Text("Loading folders…")
+                        .font(Theme.sans(14))
+                        .foregroundStyle(Theme.text3)
+                }
+                .listRowBackground(Color.clear)
+            } else if let err = loadError {
+                Text("Error: \(err)")
+                    .font(Theme.sans(13))
+                    .foregroundStyle(.red)
+                    .listRowBackground(Color.clear)
+            } else if folders.isEmpty {
+                Text("No folders found.")
+                    .font(Theme.sans(14))
+                    .foregroundStyle(Theme.text3)
+                    .listRowBackground(Color.clear)
+            } else {
+                Section {
+                    ForEach(folders, id: \.id) { folder in
+                        NavigationLink(destination: DriveFolderBrowserView(
+                            manager: manager,
+                            sourceId: sourceId,
+                            parentId: folder.id,
+                            parentName: folder.name,
+                            onPick: onPick
+                        )) {
+                            HStack(spacing: 12) {
+                                Image(systemName: "folder")
+                                    .font(.system(size: 16))
+                                    .foregroundStyle(Theme.accent)
+                                    .frame(width: 24)
+                                Text(folder.name)
+                                    .font(Theme.sans(15))
+                                    .foregroundStyle(Theme.text)
+                            }
+                            .frame(minHeight: 44)
+                        }
+                        .listRowBackground(Color.clear)
+                    }
+                }
+            }
+
+            if let enumErr = enumerationError {
+                Section {
+                    Text("Error adding root: \(enumErr)")
+                        .font(Theme.sans(13))
+                        .foregroundStyle(.red)
+                        .listRowBackground(Color.clear)
+                }
+            }
+
+            if !isLoading {
+                Section {
+                    if isEnumerating {
+                        HStack {
+                            ProgressView().tint(Theme.accent)
+                            Text("Adding root folder…")
+                                .font(Theme.sans(14))
+                                .foregroundStyle(Theme.text3)
+                        }
+                        .listRowBackground(Color.clear)
+                    } else {
+                        Button {
+                            pickFolder(DriveFile(id: parentId, name: parentName,
+                                                 mimeType: "application/vnd.google-apps.folder"))
+                        } label: {
+                            HStack(spacing: 10) {
+                                Image(systemName: "checkmark.circle")
+                                    .font(.system(size: 16))
+                                    .foregroundStyle(Theme.accent)
+                                Text("Use \"\(parentName)\" as Root")
+                                    .font(Theme.sans(15))
+                                    .foregroundStyle(Theme.accent)
+                            }
+                            .frame(minHeight: 44)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("useDriveFolder-\(parentId)")
+                        .listRowBackground(Color.clear)
+                    }
+                }
+            }
+        }
+        .scrollContentBackground(.hidden)
+        .navigationTitle(parentName)
+        .navigationBarTitleDisplayMode(.inline)
+        .task { await loadFolders() }
+    }
+
+    private func loadFolders() async {
+        isLoading = true
+        loadError = nil
+        do {
+            let config = OAuthConfig.google
+            let client = OAuthClient(config: config, http: URLSessionHTTPClient())
+            let tokenStore = KeychainTokenStore()
+            let token = try await manager.accessToken(
+                for: .gdrive,
+                config: config,
+                client: client,
+                tokenStore: tokenStore
+            )
+            let api = DriveAPIClient(http: URLSessionHTTPClient())
+            let (drivefolders, _) = try await api.listChildren(parentId: parentId, accessToken: token)
+            folders = drivefolders
+        } catch {
+            loadError = error.localizedDescription
+        }
+        isLoading = false
+    }
+
+    private func pickFolder(_ folder: DriveFile) {
+        isEnumerating = true
+        enumerationError = nil
+        Task { @MainActor in
+            defer { isEnumerating = false }
+            do {
+                let config = OAuthConfig.google
+                let client = OAuthClient(config: config, http: URLSessionHTTPClient())
+                let tokenStore = KeychainTokenStore()
+                let provider = GoogleDriveProvider(
+                    api: DriveAPIClient(http: URLSessionHTTPClient()),
+                    accessToken: {
+                        try await manager.accessToken(
+                            for: .gdrive,
+                            config: config,
+                            client: client,
+                            tokenStore: tokenStore
+                        )
+                    }
+                )
+                let result = try await provider.enumerate(
+                    rootBookmark: nil,
+                    providerFolderId: folder.id,
+                    rootName: folder.name,
+                    rootId: folder.id
+                )
+                manager.applyEnumeration(
+                    result,
+                    sourceId: sourceId,
+                    rootName: folder.name,
+                    rootNodeId: folder.id,
+                    rootBookmark: nil,
+                    providerFolderId: folder.id
+                )
+                onPick(folder)
+            } catch {
+                enumerationError = error.localizedDescription
+            }
         }
     }
 }

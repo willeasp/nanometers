@@ -97,18 +97,32 @@ final class SourcesSettingsUITests: XCTestCase {
         XCTAssertTrue(connectICloud.waitForExistence(timeout: 8),
                       "Add Source list should contain a 'connect-icloud' connect pill\n\(app.debugDescription)")
 
-        // Google Drive: Phase 4 shows "Coming soon" — assert the text is visible.
-        // The connect-gdrive element is a static Text capsule (not a tappable NavigationLink),
-        // so we assert the "Coming soon" label appears rather than checking hittability.
+        // Google Drive (Phase 5): the placeholder client ID is NOT configured, so Drive shows
+        // the "needs setup" state — a disabled "Needs setup" pill and setup instructions.
+        // (Dropbox/OneDrive still show "Coming soon"; we assert that below too.)
+
+        // connect-gdrive element must exist (it's the "Needs setup" pill in not-configured state).
+        let connectGdrive = app.descendants(matching: .any)["connect-gdrive"].firstMatch
+        XCTAssertTrue(connectGdrive.waitForExistence(timeout: 5),
+                      "connect-gdrive element should exist in Add Source list\n\(app.debugDescription)")
+
+        // The "Needs setup" pill text should be visible (not "Coming soon", not "Connect").
+        let needsSetupText = app.staticTexts["Needs setup"].firstMatch
+        XCTAssertTrue(needsSetupText.waitForExistence(timeout: 5),
+                      "Drive should show 'Needs setup' pill (placeholder client id, not configured)\n\(app.debugDescription)")
+
+        // The setup instruction sub-label should mention the client ID.
+        let setupInstructions = app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'Google client ID'")).firstMatch
+        XCTAssertTrue(setupInstructions.waitForExistence(timeout: 5),
+                      "Drive row should show setup instructions sub-label\n\(app.debugDescription)")
+
+        // Dropbox and OneDrive still show "Coming soon".
         let comingSoonText = app.staticTexts["Coming soon"].firstMatch
         XCTAssertTrue(comingSoonText.waitForExistence(timeout: 5),
-                      "Add Source list should show 'Coming soon' text for Google Drive\n\(app.debugDescription)")
+                      "Add Source list should show 'Coming soon' text for Dropbox/OneDrive\n\(app.debugDescription)")
 
-        // Confirm connect-gdrive exists but is NOT a NavigationLink button (i.e. it is a Text,
-        // not an interactive control). Tapping it should not navigate anywhere.
-        let connectGdrive = app.descendants(matching: .any)["connect-gdrive"].firstMatch
-        // Only assert it's present; the fact it is a StaticText (not a Button) confirms it's non-interactive.
-        XCTAssertTrue(connectGdrive.waitForExistence(timeout: 3),
-                      "connect-gdrive element should exist in Add Source list\n\(app.debugDescription)")
+        // connect-gdrive is the non-interactive "Needs setup" capsule — not a tappable NavigationLink.
+        // (The live Connect button is only shown when OAuthConfig.google.isConfigured == true,
+        //  which requires a real client id in project.yml / Info.plist.)
     }
 }

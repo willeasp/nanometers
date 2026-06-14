@@ -51,6 +51,10 @@ struct SettingsSheet: View {
                 // manager.connect was already called via simultaneousGesture; fetch the source row.
                 ConnectDetailBridge(kind: dest.kind, manager: manager)
             }
+            .navigationDestination(for: DriveOAuthDest.self) { _ in
+                // After successful Drive OAuth, push the gdrive source detail (root-picker ready).
+                ConnectDetailBridge(kind: .gdrive, manager: manager)
+            }
         }
         .nmSheetGlass()
         .preferredColorScheme(.dark)
