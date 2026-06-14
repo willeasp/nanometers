@@ -114,6 +114,24 @@ final class SourcesManager {
         index.rebuild(from: ctx)
     }
 
+    // MARK: - Provider registry (Task 11)
+
+    /// Returns the `SourceProvider` for `kind`, injecting `accessToken` for cloud providers.
+    /// Local/iCloud providers ignore `accessToken` (they use security-scoped bookmarks instead).
+    func provider(for kind: SourceKind,
+                  accessToken: @escaping () async throws -> String) -> any SourceProvider {
+        switch kind {
+        case .local, .icloud:
+            return LocalSourceProvider(kind: kind)
+        case .gdrive:
+            return GoogleDriveProvider(api: DriveAPIClient(http: URLSessionHTTPClient()),
+                                       accessToken: accessToken)
+        case .onedrive, .dropbox:
+            // Future providers — fall back to a no-op local provider stub.
+            return LocalSourceProvider(kind: .local)
+        }
+    }
+
     // MARK: - OAuth (Task 8)
 
     /// Full OAuth Authorization-Code + PKCE flow for a cloud source (handoff §08.2).

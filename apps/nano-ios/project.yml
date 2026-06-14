@@ -27,6 +27,15 @@ targets:
         UILaunchScreen: {}
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         UIBackgroundModes: [audio]
+        # Google Drive OAuth — set BOTH values to your real iOS client id to enable Drive Connect.
+        # See docs/google-drive-setup.md for the exact Google Cloud Console steps.
+        # The scheme is the reversed client id (Google iOS convention):
+        #   e.g. client id  = 123456-abc.apps.googleusercontent.com
+        #        scheme      = com.googleusercontent.apps.123456-abc
+        GoogleOAuthClientID: "YOUR_GOOGLE_IOS_CLIENT_ID"
+        CFBundleURLTypes:
+          - CFBundleURLSchemes:
+              - "com.googleusercontent.apps.YOUR_GOOGLE_IOS_CLIENT_ID"
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.willeasp.nanometers.ios
