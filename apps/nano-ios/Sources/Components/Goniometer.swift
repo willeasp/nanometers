@@ -44,17 +44,20 @@ struct Goniometer: View {
         let w = size.width, h = size.height
         guard w > 2, h > 2 else { return }
         let cx = w / 2, cy = h / 2
-        let radius = min(w, h) / 2 - 8
-        // Plot scale: m=(L+R)/√2, s=(L−R)/√2 is an energy-preserving 45° rotation, so the |L|,|R|≤1 input
-        // square maps to a diamond whose far corners (full-scale mono / anti-phase) sit at √2·radius. Scale
-        // the plot by 1/√2 so those corners land exactly on the diamond guide (drawn at `radius`) — nothing
-        // ever escapes the view, and the diamond reads as the true full-scale boundary.
-        let plotR = radius * 0.70710677
+        let radius = min(w, h) / 2 - 8           // usable radius: the VIEW edge, inset 8 px so dots don't clip
+        // Cloud scale: m=(L+R)/√2, s=(L−R)/√2 is an energy-preserving 45° rotation, so the |L|,|R|≤1 input
+        // square maps to a diamond whose far corners (full-scale mono / anti-phase) sit at √2. Divide by √2 so
+        // those corners land on `radius` = the VIEW edge: a loud track fills the scope to the rim but never
+        // spills OUTSIDE the view. (The cloud may extend past the inner diamond guide below — that's wanted.)
+        let plotR = radius / 1.4142135
+        // Inner diamond reference, deliberately smaller than the view so the cloud breathes PAST it on loud
+        // parts instead of looking encased (≈ −3 dB mono touches a vertex; full-scale reaches the view edge).
+        let guideR = plotR
 
-        // faint diamond + cross guide (white@6%)
+        // faint inner diamond (at guideR) + full-width cross orientation axes (white@6%)
         var guide = Path()
-        guide.move(to: CGPoint(x: cx, y: cy - radius)); guide.addLine(to: CGPoint(x: cx + radius, y: cy))
-        guide.addLine(to: CGPoint(x: cx, y: cy + radius)); guide.addLine(to: CGPoint(x: cx - radius, y: cy)); guide.closeSubpath()
+        guide.move(to: CGPoint(x: cx, y: cy - guideR)); guide.addLine(to: CGPoint(x: cx + guideR, y: cy))
+        guide.addLine(to: CGPoint(x: cx, y: cy + guideR)); guide.addLine(to: CGPoint(x: cx - guideR, y: cy)); guide.closeSubpath()
         guide.move(to: CGPoint(x: cx, y: cy - radius)); guide.addLine(to: CGPoint(x: cx, y: cy + radius))
         guide.move(to: CGPoint(x: cx - radius, y: cy)); guide.addLine(to: CGPoint(x: cx + radius, y: cy))
         ctx.stroke(guide, with: .color(.white.opacity(0.06)), lineWidth: 1)
