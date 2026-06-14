@@ -47,3 +47,40 @@ cd apps/nano-ios && xcodebuild test -project NanoMeters.xcodeproj -scheme NanoMe
   -destination 'platform=iOS Simulator,name=iPhone 16 Pro'
 ```
 Unit tests cover PKCE/token/refresh, Drive enumeration + parsing, the LRU cache, `LibraryIndex`/`LibraryNav`/`LibraryBrowse`, migration, and availability. UI tests cover the folder browser, scoped search, Go-to-Source, Settings Sources, and the full mock-Drive flow.
+
+---
+
+## Update — live Drive verified + post-launch hardening
+
+Live Google Drive was verified **end-to-end on the simulator**: real OAuth consent → token in Keychain →
+folder enumeration → streamed playback. The work this added:
+
+- **Library drill-down on a real `NavigationStack`** — native push/pop + interactive left-to-right
+  swipe-back (the system bar is hidden to keep the custom chrome; the edge gesture is reinstated by a
+  small `interactivePopGestureRecognizer` shim). Replaces the old in-place content swap.
+- **Keychain works on the Simulator** — an unsigned app gets `errSecMissingEntitlement (-34018)` on
+  `SecItemAdd`, which blocked the live token save. Fixed with `NanoMeters.entitlements`
+  (`keychain-access-groups`) + local "Sign to Run Locally" signing for the app target in `project.yml`
+  (test bundles stay unsigned). Guarded by `KeychainTokenStoreTests`.
+- **Client ID kept out of git** — it's injected from a gitignored `Secrets.xcconfig` via Info.plist
+  `$(GOOGLE_OAUTH_CLIENT_ID)` substitution; the committed tree only holds the placeholder, and the
+  generated `Sources/Info.plist` is now gitignored. See `docs/google-drive-setup.md` Step 4.
+- **Remote-track LUFS + waveform** — a Drive track is analyzed from its downloaded cache file
+  (`WaveformAnalyzer.TrackRef.directURL` + `WaveformStore.analyzeDownloaded`); views re-fetch bins via a
+  composite `binsTaskID`. A **download spinner** (`AudioEngine.isPreparing`) now shows in the rows, mini
+  player, and Now Playing transport.
+- **OAuth/Drive robustness** (adversarial review): `authorize` now sends `access_type=offline` +
+  `prompt=consent` (guarantees a refresh token — otherwise the source died ~1h after connecting);
+  `needsReauth` is no longer a one-way trap (a successful auth/refresh restores `connected`); transient
+  network failures degrade to `.offline` instead of `needsReauth`; the `RemoteFileCache` is a single
+  shared instance (its in-flight dedup actually works) and writes atomically.
+
+### Still deferred (post-merge, documented)
+
+- **Resolve-failure UX** — a Drive track that can't be fetched (offline / revoked / 404) docks silently
+  with only a console log; no user-facing error toast yet (the spinner does clear, so it's not stuck).
+- **Cache eviction of an in-use file** — LRU protects only the just-written file; a large session could
+  evict the currently-playing track (re-downloads on replay). Needs a pinned-set of in-use URLs.
+- **Drive shortcuts** — `DriveAPIClient.parseList` doesn't follow shortcut entries, so shortcut-linked
+  audio doesn't enumerate.
+- **iCloud non-resident files** + the cosmetic `scheme:/oauth` single slash (unchanged from above).

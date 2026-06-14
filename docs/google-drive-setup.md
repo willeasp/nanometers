@@ -54,27 +54,27 @@ it takes about five minutes to create one. PKCE means there is no client secret 
 
 ---
 
-## Step 4 — Set the client ID in project.yml (two edits)
+## Step 4 — Put the client ID in a local, gitignored `Secrets.xcconfig`
 
-Open `apps/nano-ios/project.yml`. Find the two placeholder lines and replace
-`YOUR_GOOGLE_IOS_CLIENT_ID` with your real client ID in **both** places:
+The client ID is **never committed** (this is a public repo). It lives in a local
+`apps/nano-ios/Secrets.xcconfig`, which is gitignored; `project.yml` references it via build-setting
+substitution (`$(GOOGLE_OAUTH_CLIENT_ID)`), so the committed tree only ever holds the placeholder.
 
-```yaml
-# Before:
-GoogleOAuthClientID: "YOUR_GOOGLE_IOS_CLIENT_ID"
-CFBundleURLTypes:
-  - CFBundleURLSchemes:
-      - "com.googleusercontent.apps.YOUR_GOOGLE_IOS_CLIENT_ID"
-
-# After (example — use your actual client ID):
-GoogleOAuthClientID: "123456789-abcdefghijklmnopqrstuvwxyz012345.apps.googleusercontent.com"
-CFBundleURLTypes:
-  - CFBundleURLSchemes:
-      - "com.googleusercontent.apps.123456789-abcdefghijklmnopqrstuvwxyz012345"
+```sh
+cd apps/nano-ios
+cp Secrets.example.xcconfig Secrets.xcconfig
 ```
 
-The scheme is the **reversed client ID** — drop `.apps.googleusercontent.com` from the end and
-prepend `com.googleusercontent.apps.`. Google uses this as the callback URL for iOS apps.
+Open `Secrets.xcconfig` and set **both** values from your one client ID:
+
+```
+GOOGLE_OAUTH_CLIENT_ID = 123456789-abcdefghijklmnopqrstuvwxyz012345.apps.googleusercontent.com
+GOOGLE_OAUTH_REVERSED_SCHEME = com.googleusercontent.apps.123456789-abcdefghijklmnopqrstuvwxyz012345
+```
+
+The reversed scheme is the **reversed client ID** — drop `.apps.googleusercontent.com` and prepend
+`com.googleusercontent.apps.`. Google uses it as the callback URL for iOS apps. There is no client
+secret — PKCE handles the exchange.
 
 ---
 
@@ -95,9 +95,21 @@ Google OAuth consent screen. After authorising, add a Drive folder as a root to 
 ## Notes
 
 - **No client secret** — PKCE (RFC 7636) handles the exchange; the client ID alone is sufficient.
+- **Kept out of git** — the client ID lives only in `Secrets.xcconfig` (gitignored) and is substituted
+  into the built app's Info.plist at build time. This is a public repo, so the placeholder is what's
+  committed. It's a PKCE public client (no secret), but there's no reason to publish your personal id.
+- **Keychain** — the app must be signed for `SecItemAdd` to store the token (Simulator included). This
+  is handled by `NanoMeters.entitlements` + local signing in `project.yml`; no action needed.
 - **Free Apple personal team** — device installs work on the free personal team (7-day expiry;
   re-install with `run-on-device.sh`). TestFlight / App Store distribution requires a paid team.
-- **Test users only** — while the OAuth consent screen is in "Testing" mode (not "Published"),
-  only the test users you added in Step 2 can sign in. That's fine for personal use.
-- **`GoogleOAuthClientID` is not a secret** — it's embedded in the app binary and is safe to commit
-  to a personal or private repository. Never commit a client secret; there isn't one here.
+
+## Troubleshooting
+
+- **`403 access_denied` / "Google hasn't verified this app … only approved testers have access"** —
+  your account isn't a **test user**. In the console: **APIs & Services → OAuth consent screen →
+  Audience** (publishing status **Testing**) → **Test users → + Add users** → add your email → Save.
+  (Scopes live on the adjacent **Data Access** tab — add `…/auth/drive.readonly` there.) Then retry Connect.
+- **"Google hasn't verified this app" interstitial** (after you're a test user) — expected for a
+  test-mode client. Tap **Advanced → Go to <app> → Continue** and grant access.
+- **Drive row shows "Add your Google client ID"** — `Secrets.xcconfig` is missing or still has the
+  placeholder; fill it in and re-run `xcodegen generate`.
