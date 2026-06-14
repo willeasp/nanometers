@@ -98,6 +98,89 @@ final class SourcesManagerTests: XCTestCase {
                        "FolderNode.trackIds must not contain duplicate UUIDs after re-enumeration")
     }
 
+    // MARK: - FIX B: refresh failure flips source to needsReauth
+
+    func test_accessToken_refreshFailure_flipsSourceToNeedsReauth() async throws {
+        let ctx = try TestDB.context()
+        let idx = LibraryIndex()
+        let mgr = SourcesManager(ctx: ctx, index: idx)
+
+        // Plant a connected gdrive Source row.
+        mgr.connect(kind: .gdrive, authRef: SourceKind.gdrive.rawValue)
+        // Manually set state to connected so we start from a clean slate.
+        if let s = try LibraryStore.source(id: "gdrive", ctx) { s.state = SourceState.connected.rawValue }
+
+        // Seed an expiring token into an InMemoryTokenStore.
+        let store = InMemoryTokenStore()
+        let expiring = OAuthToken(accessToken: "OLD", refreshToken: "RT",
+                                  expiry: Date(timeIntervalSinceNow: 30))
+        try store.save(expiring, account: SourceKind.gdrive.rawValue)
+
+        let config = OAuthConfig(
+            clientID: "cid",
+            redirectScheme: "com.googleusercontent.apps.cid",
+            authEndpoint: URL(string: "https://auth")!,
+            tokenEndpoint: URL(string: "https://token")!,
+            scopes: []
+        )
+        // MockHTTPClient returns 400 → OAuthClient.refresh throws → coordinator propagates.
+        let http = MockHTTPClient(responses: [.init(status: 400, json: #"{"error":"invalid_grant"}"#)])
+        let client = OAuthClient(config: config, http: http)
+
+        // Call must throw.
+        do {
+            _ = try await mgr.accessToken(for: .gdrive, config: config, client: client, tokenStore: store)
+            XCTFail("Expected accessToken to throw on 400 refresh response")
+        } catch {
+            // expected
+        }
+
+        // Source row must now be in needsReauth state.
+        let sourceState = try LibraryStore.source(id: "gdrive", ctx)?.state
+        XCTAssertEqual(sourceState, SourceState.needsReauth.rawValue,
+                       "Source state must be 'needsReauth' after a failed token refresh")
+    }
+
+    // MARK: - FIX D: disconnect deletes Keychain creds + best-effort revoke
+
+    func test_disconnect_deletesTokenStoreEntry_andFiresRevokePost() async throws {
+        let ctx = try TestDB.context()
+        let idx = LibraryIndex()
+        let mgr = SourcesManager(ctx: ctx, index: idx)
+
+        // Connect gdrive with an authRef.
+        mgr.connect(kind: .gdrive, authRef: SourceKind.gdrive.rawValue)
+
+        // Seed a token into the InMemoryTokenStore.
+        let store = InMemoryTokenStore()
+        let token = OAuthToken(accessToken: "AT", refreshToken: "RT",
+                               expiry: Date(timeIntervalSinceNow: 3600))
+        try store.save(token, account: SourceKind.gdrive.rawValue)
+        XCTAssertNotNil(try store.load(account: SourceKind.gdrive.rawValue), "pre-condition: token is stored")
+
+        // A mock HTTP client to verify the revoke POST is fired.
+        let http = MockHTTPClient(responses: [.init(status: 200, json: "{}")])
+
+        // Disconnect.
+        mgr.disconnect(sourceId: SourceKind.gdrive.rawValue, tokenStore: store, http: http)
+
+        // Give the detached Task a moment to fire (it's fire-and-forget, not awaited by disconnect).
+        try await Task.sleep(for: .milliseconds(100))
+
+        // Token must be gone from the store.
+        XCTAssertNil(try store.load(account: SourceKind.gdrive.rawValue),
+                     "Token must be deleted from the store on disconnect")
+
+        // Source row must be gone.
+        XCTAssertNil(try LibraryStore.source(id: SourceKind.gdrive.rawValue, ctx),
+                     "Source row must be deleted on disconnect")
+
+        // The revoke POST should have been fired (with the refresh token in the body).
+        XCTAssertNotNil(http.lastBody, "A revoke POST must have been sent to oauth2.googleapis.com/revoke")
+        XCTAssertTrue(http.lastBody?.contains("RT") ?? false,
+                      "Revoke POST body should contain the refresh token; got: \(http.lastBody ?? "nil")")
+    }
+
     func test_applyEnumeration_setsFolderBookmarkAndProviderFileId() throws {
         let ctx = try TestDB.context()
         let idx = LibraryIndex(); let mgr = SourcesManager(ctx: ctx, index: idx)
