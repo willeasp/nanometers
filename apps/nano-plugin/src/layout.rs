@@ -19,6 +19,7 @@ pub mod module_type {
     pub const WAVEFORM: &str = "waveform";
     pub const LOUDNESS: &str = "loudness";
     pub const STEREOMETER: &str = "stereometer";
+    pub const SPECTRUM: &str = "spectrum";
 }
 
 // The Loudness column's fixed width isn't a magic number here — it comes from

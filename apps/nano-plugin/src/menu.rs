@@ -57,6 +57,7 @@ impl MenuModel {
                 label: "Add Stereometer".into(),
                 action: MenuAction::Add(module_type::STEREOMETER),
             },
+            MenuItem { label: "Add Spectrum".into(), action: MenuAction::Add(module_type::SPECTRUM) },
         ];
         if column.is_some() {
             items.push(MenuItem { label: "Remove".into(), action: MenuAction::Remove });
@@ -130,11 +131,11 @@ mod tests {
     #[test]
     fn items_over_a_column_include_remove() {
         let over = MenuModel::for_context(Some(2));
-        assert_eq!(over.len(), 5, "4 Add rows + Remove");
-        assert_eq!(over.items[4].label, "Remove");
+        assert_eq!(over.len(), 6, "5 Add rows + Remove");
+        assert_eq!(over.items[5].label, "Remove");
 
         let empty = MenuModel::for_context(None);
-        assert_eq!(empty.len(), 4, "no column → no Remove");
+        assert_eq!(empty.len(), 5, "no column → no Remove");
         assert!(empty.items.iter().all(|i| i.label.starts_with("Add")));
     }
 
@@ -150,8 +151,12 @@ mod tests {
             over.to_edit(3),
             Some(LayoutEdit::Insert { after: 2, module_type: module_type::STEREOMETER.into() })
         );
-        // Row 4 = "Remove" → remove column 2.
-        assert_eq!(over.to_edit(4), Some(LayoutEdit::Remove { index: 2 }));
+        // Row 4 = "Add Spectrum"; row 5 = "Remove".
+        assert_eq!(
+            over.to_edit(4),
+            Some(LayoutEdit::Insert { after: 2, module_type: module_type::SPECTRUM.into() })
+        );
+        assert_eq!(over.to_edit(5), Some(LayoutEdit::Remove { index: 2 }));
         assert_eq!(over.to_edit(9), None, "out of range");
 
         // Empty strip: Add appends via the usize::MAX sentinel insert_column clamps.
@@ -179,16 +184,16 @@ mod tests {
 
     #[test]
     fn edit_at_cursor_selects_a_row_or_dismisses() {
-        let model = MenuModel::for_context(Some(0)); // 5 rows (4 Add + Remove), anchored at (100,100)
+        let model = MenuModel::for_context(Some(0)); // 6 rows (5 Add + Remove), anchored at (100,100)
         let anchor = (100.0, 100.0);
         // Click on row 0 ("Add Waveform") → insert after column 0.
         assert_eq!(
             model.edit_at_cursor(anchor, 800.0, 600.0, 1.0, (120.0, 108.0)),
             Some(LayoutEdit::Insert { after: 0, module_type: module_type::WAVEFORM.into() })
         );
-        // Click on row 4 ("Remove") → remove column 0 (5 rows × 24px → row 4 spans y [196,220)).
+        // Click on row 5 ("Remove") → remove column 0 (6 rows × 24px → row 5 spans y [220,244)).
         assert_eq!(
-            model.edit_at_cursor(anchor, 800.0, 600.0, 1.0, (120.0, 205.0)),
+            model.edit_at_cursor(anchor, 800.0, 600.0, 1.0, (120.0, 230.0)),
             Some(LayoutEdit::Remove { index: 0 })
         );
         // Click outside the panel → dismiss (no edit).
