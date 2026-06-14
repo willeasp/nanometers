@@ -1,94 +1,153 @@
 import SwiftUI
 
-/// DJ-style close-up waveform (handoff §05A / prototype `NMScrollWave`): a ~9 s window of the cached
-/// bins scrolling right→left past a FIXED center playhead. Pure: it windows the same cached `[WaveBin]`
-/// the overview uses (never re-analyzed) and reuses the continuous `WaveBins.color`; the played side
-/// dims to 0.42 and both edges fade out. The playhead is advanced by `ScrollClock` (below) — the plugin's
-/// "subway-sign" model: a frame-counted, reservoir-controlled step once per `TimelineView` vsync tick
-/// whose RATE slews toward the sample-accurate `centerTime`, rather than reading the clock straight into
-/// the position each frame (which staircases to the audio render cadence — the "low FPS" look this view
-/// was rebuilt to avoid).
+/// Close-up scope (handoff §06D.1) — the flip card's signature meter. A window of the cached **stereo**
+/// bins scrolling right→left past a FIXED center playhead. ONE waveform around a single center line:
+/// the **upper half is the LEFT channel, the lower half is the RIGHT** (rectified peak envelope filled
+/// from the center), spectrally colored. Uniform brightness (no played/upcoming dimming), a soft
+/// edge-fade, and scrub-anywhere-to-seek. The
+/// playhead is advanced by `ScrollClock` — the plugin's "subway-sign" model: a frame-counted,
+/// reservoir-controlled step once per `TimelineView` vsync tick whose RATE slews toward the
+/// sample-accurate `centerTime`, rather than reading the clock straight into the position each frame
+/// (which staircases to the audio render cadence). Transparent, chrome-free — it draws straight onto
+/// the card-back (§06C: no label, no box).
 struct CloseUpWaveform: View {
-    var bins: [WaveBin]
+    var bins: [StereoWaveBin]
     var currentTime: () -> Double      // the audio sample clock (seconds) the ScrollClock slews its rate toward
     var duration: Double
     var coloringOn: Bool = true
     var isPlaying: Bool
     /// Observed seek/elapsed value (pass `engine.elapsed`). While PAUSED the `TimelineView` schedule is
     /// frozen and `ScrollClock` holds at `currentTime()`, so this value changing on a scrub is what forces
-    /// a re-render to re-center the held playhead (handoff §05: a scrub re-centers the close-up even when
-    /// paused). Not read in `draw` — its change alone re-renders the view.
+    /// a re-render to re-center the held playhead (§06: a scrub re-centers the close-up even when paused).
     var redrawTrigger: Double
-    var height: CGFloat = 56           // §05: 56pt strip
+    var windowSec: Double = 4          // §06D.1 close-up window (3/4/5 s)
+    var active: Bool = true            // flipped && open — no scroll work behind the cover (§06B)
+    var onScrub: (Double) -> Void = { _ in }
 
-    private let secVisible: CGFloat = 9
     @State private var clock = ScrollClock()
 
     var body: some View {
-        TimelineView(.animation(paused: !isPlaying)) { timeline in
-            Canvas { ctx, size in
-                // Scroll by a frame-COUNTED step, never by sampling a clock per frame. `centerTime` only
-                // advances once per audio render cycle (tens of ms), so reading it each frame staircases the
-                // motion — the Canvas redraws at 60 Hz but the position moves ~12–47×/s ("low FPS"). Instead
-                // `clock` advances the playhead a smooth, reservoir-controlled amount once per vsync tick and
-                // absorbs audio↔display clock drift into the RATE, never the motion (forward-only — never a
-                // backward correction). This is the plugin's "subway-sign" scroll + `consume_samples` law
-                // (apps/nano-plugin/src/module/waveform, nano_dsp::waveform). `timeline.date` is used ONLY to
-                // tell a genuine new frame from a parent-driven re-render between ticks.
-                let now = timeline.date.timeIntervalSinceReferenceDate
-                let center = clock.present(now: now, audio: currentTime(), playing: isPlaying)
-                draw(ctx, size, center: center)
+        GeometryReader { geo in
+            TimelineView(.animation(paused: !(isPlaying && active))) { timeline in
+                Canvas { ctx, size in
+                    let now = timeline.date.timeIntervalSinceReferenceDate
+                    let center = clock.present(now: now, audio: currentTime(), playing: isPlaying)
+                    _ = redrawTrigger   // referenced so a paused scrub re-renders (see doc)
+                    draw(ctx, size, center: center)
+                }
             }
-        }
-        .frame(height: height)
-        .background(.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(.white.opacity(0.07), lineWidth: 0.5))
-        .overlay(alignment: .topLeading) {
-            Text("CLOSE-UP").font(Theme.mono(8.5, .semibold)).tracking(1.4)
-                .foregroundStyle(.white.opacity(0.42)).padding(.top, 7).padding(.leading, 10)  // §05 left:10 top:7
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0).onChanged { v in
+                    guard duration > 0, geo.size.width > 0 else { return }
+                    let off = Double((v.location.x - geo.size.width / 2) / geo.size.width) * windowSec
+                    onScrub(min(1, max(0, (currentTime() + off) / duration)))
+                }
+            )
         }
         .accessibilityElement()
         .accessibilityIdentifier("closeUpWaveform")
     }
 
     private func draw(_ ctx: GraphicsContext, _ size: CGSize, center: Double) {
-        guard !bins.isEmpty, duration > 0 else { return }
         let w = size.width, h = size.height
-        let barsPerSec = Double(bins.count) / duration
-        let playIdx = CloseUpMath.playIndex(centerTime: center, binCount: bins.count, duration: duration)
-        let pxPerBar = (w / secVisible) / CGFloat(barsPerSec)
-        guard pxPerBar > 0 else { return }
-        let centerX = w / 2, centerY = h / 2
-        let bw = max(1.4, pxPerBar * 0.6)
-        let span = Int((Double(centerX / pxPerBar)).rounded(.up)) + 2
-        let lo = max(0, Int(playIdx.rounded(.down)) - span)
-        let hi = min(bins.count, Int(playIdx.rounded(.up)) + span)
-        guard lo < hi else { return }
+        guard w > 1, h > 1 else { return }
+        let centerX = w / 2
 
-        for i in lo..<hi {
-            let b = bins[i]
-            let x = centerX + CGFloat(Double(i) - playIdx) * pxPerBar
-            if x < -3 || x > w + 3 { continue }
-            let bh = max(2, CGFloat(b.peak) * (h - 6))
-            let played = Double(i) < playIdx
-            let edge = min(1, (centerX - abs(x - centerX)) / (w * 0.14))     // §05 edge fade
-            let alpha = (played ? 0.42 : 1.0) * Double(max(0, edge))
-            let base = coloringOn ? WaveBins.color(b) : Theme.accent
-            let rect = CGRect(x: x - bw / 2, y: centerY - bh / 2, width: bw, height: bh)
-            ctx.fill(Path(roundedRect: rect, cornerRadius: min(bw / 2, 1.6)), with: .color(base.opacity(alpha)))
+        // whisper-faint center axis (white@5%) at the L/R divider
+        ctx.fill(Path(CGRect(x: 0, y: (h / 2).rounded(), width: w, height: 1)), with: .color(.white.opacity(0.05)))
+
+        drawContour(ctx, w: w, h: h, centerX: centerX, center: center)
+
+        // soft center playhead — vertical white gradient (transparent → 0.7 → transparent), §06D.1.
+        ctx.fill(Path(CGRect(x: centerX - 1, y: 0, width: 2, height: h)),
+                 with: .linearGradient(
+                    Gradient(stops: [.init(color: .white.opacity(0), location: 0),
+                                     .init(color: .white.opacity(0.7), location: 0.5),
+                                     .init(color: .white.opacity(0), location: 1)]),
+                    startPoint: CGPoint(x: centerX, y: 0), endPoint: CGPoint(x: centerX, y: h)))
+    }
+
+    /// The nano-plugin Waveform look, ported to a scrubbable cache (apps/nano-plugin/src/module/waveform):
+    /// each cache bin keeps its own pre-analyzed min/max envelope and is placed at an **affine** x —
+    /// `x(i) = centerX + (binTime − center)·pxPerSec`. Only `center` changes frame to frame, so every
+    /// bin's x shifts by the SAME delta: the contour rigidly translates left, never re-binning (the old
+    /// per-pixel re-aggregation against a sub-pixel offset is what shimmered/"morphed").
+    ///
+    /// ONE waveform on a SINGLE center line: L is the upper silhouette, R the lower — each the rectified
+    /// peak `max(|min|, |max|)` filled from the center. Color is a horizontal spectral gradient with one
+    /// stop PER BIN: each stop is anchored to its bin's pixel `x(i)`, so the color rigidly translates with
+    /// the contour. (The old ≤64-stop subsample re-bucketed which bins became stops every frame, so the
+    /// interpolated color at each fixed pixel drifted — that was the back-and-forth color flicker.)
+    private func drawContour(_ ctx: GraphicsContext, w: CGFloat, h: CGFloat, centerX: CGFloat, center: Double) {
+        guard bins.count > 1, duration > 0 else { return }
+        let binsPerSec = Double(bins.count) / duration
+        let pxPerSec = w / CGFloat(max(0.5, windowSec))
+        let zero = h / 2                             // single center line: L above, R below
+        let halfAmp = (h / 2) * 0.95                 // one-sided from the divider: a ±1 sample fills 95% of the
+                                                     // half-lane (5% edge margin), matching the plugin's NDC +0.95
+                                                     // outer reach. (The plugin stacks TWO bipolar lanes centered
+                                                     // at NDC ±0.5; consolidating to one center line halved the look
+                                                     // at 0.45 — amp is clamped to ±1 so 0.95 still can't overflow.)
+
+        // Visible bin window (a one-bin margin so the contour enters/leaves cleanly under the edge fade).
+        func binAtX(_ x: CGFloat) -> Double { (center + Double((x - centerX) / pxPerSec)) * binsPerSec }
+        let firstBin = max(0, Int(binAtX(0).rounded(.down)) - 1)
+        let lastBin = min(bins.count - 1, Int(binAtX(w).rounded(.up)) + 1)
+        guard lastBin > firstBin else { return }
+
+        func x(_ i: Int) -> CGFloat { centerX + CGFloat(Double(i) / binsPerSec - center) * pxPerSec }
+        let x0 = x(firstBin), x1 = x(lastBin)
+        let span = max(1, x1 - x0)
+
+        // Rectified peak per channel: the upper silhouette is L, the lower is R, hinged on the center.
+        func ampL(_ b: StereoWaveBin) -> CGFloat { CGFloat(max(b.lMax, -b.lMin)) }
+        func ampR(_ b: StereoWaveBin) -> CGFloat { CGFloat(max(b.rMax, -b.rMin)) }
+        func silhouette(up: Bool, _ amp: (StereoWaveBin) -> CGFloat) -> Path {
+            var p = Path()
+            let sign: CGFloat = up ? -1 : 1
+            p.move(to: CGPoint(x: x(firstBin), y: zero))
+            for i in firstBin...lastBin { p.addLine(to: CGPoint(x: x(i), y: zero + sign * amp(bins[i]) * halfAmp)) }
+            p.addLine(to: CGPoint(x: x(lastBin), y: zero))
+            p.closeSubpath()
+            return p
         }
+        let lPath = silhouette(up: true, ampL)
+        let rPath = silhouette(up: false, ampR)
 
-        // Fixed center playhead: 2pt line + 2.6pt cap dots (§05 / NMScrollWave).
-        ctx.fill(Path(CGRect(x: centerX - 1, y: 1, width: 2, height: h - 2)), with: .color(.white.opacity(0.92)))
-        ctx.fill(Path(ellipseIn: CGRect(x: centerX - 2.6, y: 4 - 2.6, width: 5.2, height: 5.2)), with: .color(.white))
-        ctx.fill(Path(ellipseIn: CGRect(x: centerX - 2.6, y: h - 4 - 2.6, width: 5.2, height: 5.2)), with: .color(.white))
+        // Horizontal spectral gradient, ONE stop per visible bin (no moving subsample grid → no shimmer).
+        var stops: [Gradient.Stop] = []
+        stops.reserveCapacity(lastBin - firstBin + 1)
+        for i in firstBin...lastBin {
+            let loc = min(1, max(0, (x(i) - x0) / span))
+            let base = coloringOn ? Self.scopeColor(bins[i]) : Theme.accent
+            stops.append(.init(color: base.opacity(edgeAlpha(loc)), location: loc))
+        }
+        let shading = GraphicsContext.Shading.linearGradient(
+            Gradient(stops: stops), startPoint: CGPoint(x: x0, y: 0), endPoint: CGPoint(x: x1, y: 0))
+        ctx.fill(lPath, with: shading)
+        ctx.fill(rPath, with: shading)
+    }
+
+    /// §06 edge fade: full brightness in the middle, easing to transparent within the outer ~10%.
+    private func edgeAlpha(_ loc: CGFloat) -> Double {
+        let e: CGFloat = 0.10
+        return Double(min(1, max(0, min(loc, 1 - loc) / e)))
+    }
+
+    /// Band color from the stored continuous RGB, mixed 18% toward white — the plugin's COLOR_WHITE_MIX,
+    /// applied to the close-up only (the overview keeps the raw band color).
+    static func scopeColor(_ b: StereoWaveBin) -> Color {
+        let mix: Float = 0.18
+        return Color(.sRGB,
+                     red: Double(b.r + (1 - b.r) * mix),
+                     green: Double(b.g + (1 - b.g) * mix),
+                     blue: Double(b.b + (1 - b.b) * mix), opacity: 1)
     }
 }
 
 /// Pure time→bar-index math for the close-up (testable without a view). `barsPerSec` is derived from
-/// the actual cached density (handoff: ~7/sec target; cache is 10/sec), so short tracks (floored at
-/// 150 bins) map correctly without assuming a constant.
+/// the actual cached density, so short tracks map correctly without assuming a constant.
 enum CloseUpMath {
     /// Fractional bar index at the playhead for a sample-accurate `centerTime` (seconds).
     static func playIndex(centerTime: Double, binCount: Int, duration: Double) -> Double {
@@ -117,9 +176,13 @@ final class ScrollClock {
     private let seedRate = 1.0 / 60.0  // nominal per-frame advance to start at, so motion never freezes while the
                                        // rate EMA warms up (the plugin seeds its rate to the first arrival, not 0)
     private let rateBeta = 0.05     // EMA weight for the per-frame arrival rate
-    private let gain = 0.1          // reservoir gain — slews the per-frame advance toward target ("slew, never step")
-    private let target = 0.05       // FLOOR on how far the playhead trails the rendered clock; the actual hold settles
-                                    // near target + (audio-update interval)/2, i.e. larger when `centerTime` updates coarsely
+    private let gain = 0.01         // reservoir gain — slews the per-frame advance toward target ("slew, never step").
+                                    // Deliberately tiny (cf. the plugin's 0.005): the audio clock only updates once per
+                                    // ~21 ms render block, so `reservoir = audio − pres` sawtooths every frame; a large
+                                    // gain pumps that sawtooth straight into the MOTION (visible judder). Keeping it tiny
+                                    // lets the smoothed `rate` carry the motion and the reservoir only trim slow drift.
+    private let target = 0.06       // how far the playhead trails the rendered clock; ≥ one audio block so the sawtooth
+                                    // reservoir stays positive (never starves the contour at the edge)
     private let snapGap = 0.5       // |audio − pres| beyond this ⇒ seek / discontinuity ⇒ snap
 
     /// `now` = TimelineView frame date, used ONLY to detect a new frame (so parent re-renders between vsync

@@ -12,9 +12,20 @@ final class WaveformAnalyzerTests: XCTestCase {
         let ref = TrackRef(bundledName: nil, bookmark: try url.bookmarkData())
         let result = try await WaveformAnalyzer().analyze(ref)
 
-        XCTAssertEqual(result.bins.count, max(150, Int((3.0 * 10).rounded())))  // 10 bins/sec
+        XCTAssertEqual(result.bins.count, max(150, Int((3.0 * 10).rounded())))  // 10 bins/sec (overview)
         XCTAssertTrue(result.bins.allSatisfy { $0.peak >= 0 && $0.peak <= 1 }, "peaks normalized")
         XCTAssertTrue(result.bins.contains { $0.peak > 0.5 }, "tone should produce a loud bin")
+        // Close-up: denser stereo pass (150/sec), RAW min/max envelope in -1…1 (no per-track norm).
+        XCTAssertEqual(result.closeUpBins.count, max(900, Int((3.0 * 150).rounded())))
+        XCTAssertTrue(result.closeUpBins.allSatisfy {
+            (-1...1).contains($0.lMin) && (-1...1).contains($0.lMax)
+                && (-1...1).contains($0.rMin) && (-1...1).contains($0.rMax)
+        }, "stereo envelopes out of the ±1 range")
+        // A 0.5-amplitude tone reaches ~±0.5 (raw) and must NOT be scaled up to ±1.
+        XCTAssertTrue(result.closeUpBins.contains { $0.lMax > 0.4 && $0.lMin < -0.4 },
+                      "tone should reach ~±0.5 (raw amplitude)")
+        XCTAssertTrue(result.closeUpBins.allSatisfy { $0.lMax <= 0.55 && $0.lMin >= -0.55 },
+                      "0.5 tone reached beyond ±0.55 — per-track normalization regressed")
         XCTAssertNotNil(result.integratedLUFS)
         XCTAssertEqual(result.durationSec, 3.0, accuracy: 0.05)
         XCTAssertFalse(result.key.isEmpty, "content-hash key computed")

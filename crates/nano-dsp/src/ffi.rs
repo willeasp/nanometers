@@ -98,6 +98,91 @@ pub unsafe extern "C" fn nano_dsp_analyze(
     0
 }
 
+/// One analyzed stereo bin: per-channel raw min/max envelope (−1..1, clamped) + continuous band
+/// color (ADR 0001). Feeds the close-up scope's filled min/max contour (L top half, R bottom half)
+/// — the plugin Waveform look.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct NanoStereoBin {
+    pub l_min: f32,
+    pub l_max: f32,
+    pub r_min: f32,
+    pub r_max: f32,
+    pub r: f32,
+    pub g: f32,
+    pub b: f32,
+}
+
+/// Analyze a whole stereo track into `n_bins` per-channel `(min, max)` + color bins. `l`/`r` each
+/// point at `len` samples; `out` must point at room for `n_bins` `NanoStereoBin`. Min/max are the
+/// RAW sample envelope per channel (clamped to ±1) — NOT normalized to the track's peak. This
+/// matches the plugin Waveform, which draws raw amplitude × HALF_SCALE: a quiet track reads small,
+/// a loud one fills the lane, exactly as in the plugin.
+/// Returns 0 on success, -1 on a null/zero-argument error.
+///
+/// # Safety
+/// `l` and `r` must each be valid for `len` reads; `out` valid for `n_bins` writes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nano_dsp_analyze_stereo(
+    l: *const f32,
+    r: *const f32,
+    len: usize,
+    sample_rate: f32,
+    n_bins: usize,
+    out: *mut NanoStereoBin,
+) -> i32 {
+    if l.is_null() || r.is_null() || out.is_null() || len == 0 || n_bins == 0 || sample_rate <= 0.0 {
+        return -1;
+    }
+    let ls = unsafe { std::slice::from_raw_parts(l, len) };
+    let rs = unsafe { std::slice::from_raw_parts(r, len) };
+    let out_slice = unsafe { std::slice::from_raw_parts_mut(out, n_bins) };
+
+    // Size the ring to hold every closed bin for the whole track (offline, one-shot).
+    let spb = (sample_rate * BIN_SECONDS).round().max(1.0) as usize;
+    let total_bins = (len / spb).saturating_add(1);
+    let mut store = WaveStore::new(total_bins.max(n_bins), BAND_LOW_HZ, BAND_HIGH_HZ);
+    store.set_sample_rate(sample_rate);
+    for i in 0..len {
+        store.push(san(ls[i]), san(rs[i])); // guard NaN/inf — panic across extern "C" is UB
+    }
+
+    let closed = store.closed_samples();
+    if closed == 0 {
+        // All silence — flat contour, the same dim tint the normal path uses for silence.
+        let c = band_color([0.0; 3]);
+        for b in out_slice.iter_mut() {
+            *b = NanoStereoBin {
+                l_min: 0.0, l_max: 0.0, r_min: 0.0, r_max: 0.0, r: c[0], g: c[1], b: c[2],
+            };
+        }
+        return 0;
+    }
+
+    let spc = closed as f64 / n_bins as f64;
+    let cols = store.build_columns(n_bins, spc, n_bins as i64 - 1);
+
+    // Raw envelope, no per-track normalization — the plugin draws raw amplitude × HALF_SCALE, so a
+    // sample at ±1 reaches the lane edge and quieter material reads proportionally smaller. Clamp to
+    // ±1 (an over-unity sample would just draw past the lane) and guard any non-finite.
+    let norm = |v: f32| -> f32 { if v.is_finite() { v.clamp(-1.0, 1.0) } else { 0.0 } };
+
+    for (i, b) in out_slice.iter_mut().enumerate() {
+        let col = &cols[i];
+        let c = band_color(col.band_ms);
+        *b = NanoStereoBin {
+            l_min: norm(col.env[0].min),
+            l_max: norm(col.env[0].max),
+            r_min: norm(col.env[1].min),
+            r_max: norm(col.env[1].max),
+            r: c[0],
+            g: c[1],
+            b: c[2],
+        };
+    }
+    0
+}
+
 /// Integrated (gated) BS.1770 loudness over a stereo track. `l`/`r` each point at `len` samples.
 /// Returns the LUFS value, or `f64::NEG_INFINITY` on a null/zero-argument error.
 ///

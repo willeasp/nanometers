@@ -19,7 +19,8 @@ struct TrackRef: Sendable {
 actor WaveformAnalyzer {
     struct AnalysisResult: Sendable {
         let key: String
-        let bins: [WaveBin]
+        let bins: [WaveBin]                  // overview (mono, 10/s)
+        let closeUpBins: [StereoWaveBin]     // close-up scope (stereo min/max, ~50/s)
         let integratedLUFS: Double?
         let sampleRate: Double
         let durationSec: Double
@@ -28,6 +29,10 @@ actor WaveformAnalyzer {
     enum AnalyzeError: Error { case noFile, emptyAudio, ffiFailed }
 
     static let binsPerSecond = 10.0
+    /// Denser stereo pass for the close-up scope so the filled min/max contour reads crisply at the
+    /// 3–5 s window (≈ pixel-per-column on a phone). The plugin folds at 2000 bins/s; 150/s is the
+    /// cache-size/fidelity trade. Tunable.
+    static let closeUpBinsPerSecond = 150.0
 
     func analyze(_ ref: TrackRef) throws -> AnalysisResult {
         let (url, scoped) = try Self.resolve(ref)
@@ -63,8 +68,13 @@ actor WaveformAnalyzer {
         guard let bins = NanoDSPBridge.analyze(mono: mono, sampleRate: sr, binCount: binCount) else {
             throw AnalyzeError.ffiFailed
         }
+        let closeUpCount = max(900, Int((durationSec * Self.closeUpBinsPerSecond).rounded()))
+        guard let closeUpBins = NanoDSPBridge.analyzeStereo(l: left, r: right, sampleRate: sr, binCount: closeUpCount) else {
+            throw AnalyzeError.ffiFailed
+        }
         let lufs = NanoDSPBridge.integratedLUFS(l: left, r: right, sampleRate: sr)
-        return AnalysisResult(key: key, bins: bins, integratedLUFS: lufs, sampleRate: sr, durationSec: durationSec)
+        return AnalysisResult(key: key, bins: bins, closeUpBins: closeUpBins, integratedLUFS: lufs,
+                              sampleRate: sr, durationSec: durationSec)
     }
 
     /// Resolve a track URL the same way AudioEngine does — bundled by name, else bookmark — but

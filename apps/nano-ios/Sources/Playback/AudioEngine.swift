@@ -52,6 +52,9 @@ final class AudioEngine {
     private var file: AVAudioFile?
     /// Streaming momentary loudness, fed from `installOutputMeter`'s tap. Off-main + lock-guarded.
     private let liveMeter = LiveLUFSMeter()
+    /// Ring of recent stereo frames, fed from the same tap — drives the live analysis meters
+    /// (goniometer + spectrum) on the flip-card B-side. Off-main + lock-guarded.
+    private let scopeTap = LiveScopeTap()
     /// Eased value behind `momentaryLUFS` — display ballistics so the badge reads calmly (see updateProgress).
     @ObservationIgnored private var smoothedLUFS: Double?
     /// Counts 20 Hz ticks so the visible LUFS number refreshes once per second, not every tick (see updateProgress).
@@ -86,6 +89,7 @@ final class AudioEngine {
     /// dies with this engine instance (no self capture, no global state to clean).
     private func installOutputMeter() {
         let meter = liveMeter        // capture the off-main, lock-guarded handle for the tap thread
+        let scope = scopeTap         // same: raw-frame ring for the live analysis meters
         engine.mainMixerNode.installTap(onBus: 0, bufferSize: 1024, format: nil) { buffer, _ in
             guard let data = buffer.floatChannelData, buffer.frameLength > 0 else { return }
             let frames = Int(buffer.frameLength)
@@ -94,7 +98,24 @@ final class AudioEngine {
             let stereo = buffer.format.channelCount > 1
             meter.feed(left: data[0], right: stereo ? data[1] : data[0],
                        frames: frames, sampleRate: buffer.format.sampleRate, level: rms)
+            scope.feed(left: data[0], right: stereo ? data[1] : data[0],
+                       frames: frames, sampleRate: buffer.format.sampleRate)
         }
+    }
+
+    /// Most recent `count` stereo frames for the live analysis meters (oldest→newest). Empty before
+    /// the first audio renders / after a reset. Read on the main actor from the meters' `TimelineView`.
+    func liveScope(_ count: Int) -> (l: [Float], r: [Float], sampleRate: Double) { scopeTap.snapshot(count) }
+
+    /// Smooth-scan accessors for the goniometer (which plots raw samples, so it'd stutter at the tap's
+    /// ~10 Hz delivery if it only read the newest chunk). `scopeWritten` is the monotonic frame clock;
+    /// `scopeWindow` reads a window ending at an absolute frame the meter's `ScopeCursor` advances at
+    /// display rate. See `LiveScopeTap`.
+    var scopeWritten: Int { scopeTap.written }
+    var scopeBuffered: Int { scopeTap.buffered }
+    var scopeRate: Double { scopeTap.sampleRate }
+    func scopeWindow(endingAt end: Int, count: Int) -> (l: [Float], r: [Float], sampleRate: Double) {
+        scopeTap.window(endingAt: end, count: count)
     }
 
     deinit {
@@ -186,7 +207,8 @@ final class AudioEngine {
         player.stop()
         releaseScope()
         progress = 0; elapsed = 0; seekOffsetFrames = 0; lastKnownFrame = 0; outputLevel = 0
-        liveMeter.requestReset(); momentaryLUFS = nil
+        liveMeter.requestReset(); momentaryLUFS = nil          // drop the stale meter window for the new track
+        scopeTap.reset()                                       // and the live-scope sample ring
 
         guard let url = resolveURL(track) else {
             // Unresolved file: reflect the selection, but don't fake audio.
@@ -361,7 +383,7 @@ final class AudioEngine {
         } else {                       // end of queue, repeat off → stop
             player.stop(); stopTicker(); releaseScope()
             isPlaying = false; progress = 0; elapsed = 0; lastKnownFrame = 0; outputLevel = 0
-            liveMeter.stop(); momentaryLUFS = nil
+            liveMeter.stop(); momentaryLUFS = nil; scopeTap.reset()
             updateNowPlayingInfo()
         }
     }
@@ -397,7 +419,7 @@ final class AudioEngine {
 
     func seek(toFraction f: Double) {
         guard let file, totalFrames > 0 else { return }
-        liveMeter.requestReset(); momentaryLUFS = nil
+        liveMeter.requestReset(); momentaryLUFS = nil; scopeTap.reset()
         let target = AVAudioFramePosition(Double(totalFrames) * min(1, max(0, f)))
         let wasPlaying = isPlaying
         player.stop()

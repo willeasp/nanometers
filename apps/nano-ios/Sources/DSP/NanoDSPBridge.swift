@@ -17,6 +17,22 @@ enum NanoDSPBridge {
         return out.map { WaveBin(peak: $0.peak, r: $0.r, g: $0.g, b: $0.b) }
     }
 
+    /// Analyze stereo `l`/`r` into `binCount` per-channel min/max + color bins (the close-up scope's
+    /// filled contour). nil on bad arguments (rc != 0). `l` and `r` must be the same length.
+    static func analyzeStereo(l: [Float], r: [Float], sampleRate: Double, binCount: Int) -> [StereoWaveBin]? {
+        guard binCount > 0, !l.isEmpty, l.count == r.count else { return nil }
+        var out = [NanoStereoBin](repeating: NanoStereoBin(l_min: 0, l_max: 0, r_min: 0, r_max: 0, r: 0, g: 0, b: 0),
+                                  count: binCount)
+        let rc = l.withUnsafeBufferPointer { lp in
+            r.withUnsafeBufferPointer { rp in
+                nano_dsp_analyze_stereo(lp.baseAddress, rp.baseAddress, lp.count, Float(sampleRate), binCount, &out)
+            }
+        }
+        guard rc == 0 else { return nil }
+        return out.map { StereoWaveBin(lMin: $0.l_min, lMax: $0.l_max, rMin: $0.r_min, rMax: $0.r_max,
+                                       r: $0.r, g: $0.g, b: $0.b) }
+    }
+
     /// Integrated BS.1770 LUFS over stereo L/R. nil = "no reading" (-inf / non-finite).
     static func integratedLUFS(l: [Float], r: [Float], sampleRate: Double) -> Double? {
         guard !l.isEmpty, l.count == r.count else { return nil }

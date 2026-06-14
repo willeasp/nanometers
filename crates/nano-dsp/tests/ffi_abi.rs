@@ -3,8 +3,9 @@
 #![cfg(feature = "ffi")]
 
 use nano_dsp::ffi::{
-    nano_dsp_analyze, nano_dsp_integrated_lufs, nano_meter_free, nano_meter_momentary,
-    nano_meter_new, nano_meter_push, nano_meter_short_term, NanoBin,
+    nano_dsp_analyze, nano_dsp_analyze_stereo, nano_dsp_integrated_lufs, nano_meter_free,
+    nano_meter_momentary, nano_meter_new, nano_meter_push, nano_meter_short_term, NanoBin,
+    NanoStereoBin,
 };
 
 fn tone(sr: f32, secs: f32) -> Vec<f32> {
@@ -34,6 +35,66 @@ fn analyze_fills_normalized_bins() {
 fn analyze_rejects_null_and_zero_args() {
     let mut out = vec![NanoBin { peak: 0.0, r: 0.0, g: 0.0, b: 0.0 }; 4];
     assert_eq!(unsafe { nano_dsp_analyze(std::ptr::null(), 0, 48_000.0, 4, out.as_mut_ptr()) }, -1);
+}
+
+#[test]
+fn analyze_stereo_fills_normalized_envelopes() {
+    const SR: f32 = 48_000.0;
+    let l = tone(SR, 2.0);
+    let r = tone(SR, 2.0); // L = R
+    let n_bins = 200usize;
+    let mut out =
+        vec![NanoStereoBin { l_min: 9.0, l_max: 9.0, r_min: 9.0, r_max: 9.0, r: -1.0, g: -1.0, b: -1.0 }; n_bins];
+    let rc =
+        unsafe { nano_dsp_analyze_stereo(l.as_ptr(), r.as_ptr(), l.len(), SR, n_bins, out.as_mut_ptr()) };
+    assert_eq!(rc, 0, "stereo analyze should succeed");
+    // Envelopes normalized into -1..=1; colors in gamut.
+    assert!(
+        out.iter().all(|b| (-1.0..=1.0).contains(&b.l_min)
+            && (-1.0..=1.0).contains(&b.l_max)
+            && (-1.0..=1.0).contains(&b.r_min)
+            && (-1.0..=1.0).contains(&b.r_max)),
+        "envelopes normalized to -1..1"
+    );
+    assert!(
+        out.iter().all(|b| (0.0..=1.0).contains(&b.r) && (0.0..=1.0).contains(&b.g) && (0.0..=1.0).contains(&b.b)),
+        "colors in gamut"
+    );
+    // A loud tone: positive max and negative min somewhere; L == R for identical channels.
+    assert!(out.iter().any(|b| b.l_max > 0.5), "loud tone peaks near full scale");
+    assert!(out.iter().any(|b| b.l_min < -0.5), "loud tone has negative excursion");
+    assert!(out.iter().all(|b| (b.l_max - b.r_max).abs() < 1e-6 && (b.l_min - b.r_min).abs() < 1e-6),
+        "L and R identical for L = R input");
+}
+
+#[test]
+fn analyze_stereo_survives_non_finite_input() {
+    const SR: f32 = 48_000.0;
+    let mut l = tone(SR, 1.0);
+    let mut r = tone(SR, 1.0);
+    l[100] = f32::NAN;
+    r[200] = f32::INFINITY;
+    l[300] = f32::NEG_INFINITY;
+    let n_bins = 100usize;
+    let mut out =
+        vec![NanoStereoBin { l_min: 9.0, l_max: 9.0, r_min: 9.0, r_max: 9.0, r: -1.0, g: -1.0, b: -1.0 }; n_bins];
+    let rc =
+        unsafe { nano_dsp_analyze_stereo(l.as_ptr(), r.as_ptr(), l.len(), SR, n_bins, out.as_mut_ptr()) };
+    assert_eq!(rc, 0, "non-finite input must be sanitized, not rejected or panicked");
+    assert!(
+        out.iter().all(|b| b.l_min.is_finite() && b.l_max.is_finite() && b.r_min.is_finite()
+            && b.r_max.is_finite() && b.r.is_finite() && b.g.is_finite() && b.b.is_finite()),
+        "all fields finite"
+    );
+}
+
+#[test]
+fn analyze_stereo_rejects_null_and_zero_args() {
+    let mut out = vec![NanoStereoBin { l_min: 0.0, l_max: 0.0, r_min: 0.0, r_max: 0.0, r: 0.0, g: 0.0, b: 0.0 }; 4];
+    assert_eq!(
+        unsafe { nano_dsp_analyze_stereo(std::ptr::null(), std::ptr::null(), 0, 48_000.0, 4, out.as_mut_ptr()) },
+        -1
+    );
 }
 
 #[test]

@@ -34,6 +34,7 @@ targets:
         CFBundleURLTypes:
           - CFBundleURLSchemes:
               - "$(GOOGLE_OAUTH_REVERSED_SCHEME)"
+        CADisableMinimumFrameDurationOnPhone: true   # allow the live meters to run >60 Hz (ProMotion 120 Hz)
     configFiles:
       Debug: Config.xcconfig
       Release: Config.xcconfig

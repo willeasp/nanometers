@@ -18,6 +18,7 @@ final class Track {
     var durationSec: Double
     var format: String
     var sampleRate: String
+    var bitDepth: Int?            // PCM bit depth (FLAC/WAV/AIFF); nil for lossy/unknown. Title format line.
     var hasEmbeddedArt: Bool
     var artworkData: Data?        // small embedded artwork, if any
     var bundledName: String?      // resource filename for tracks that ship in the app bundle
@@ -50,6 +51,7 @@ final class Track {
         durationSec: Double = 0,
         format: String = "",
         sampleRate: String = "",
+        bitDepth: Int? = nil,
         hasEmbeddedArt: Bool = false,
         artworkData: Data? = nil,
         bundledName: String? = nil,
@@ -72,6 +74,7 @@ final class Track {
         self.durationSec = durationSec
         self.format = format
         self.sampleRate = sampleRate
+        self.bitDepth = bitDepth
         self.hasEmbeddedArt = hasEmbeddedArt
         self.artworkData = artworkData
         self.bundledName = bundledName

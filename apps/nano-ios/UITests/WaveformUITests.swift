@@ -33,16 +33,28 @@ final class WaveformUITests: XCTestCase {
     }
 
     @MainActor
-    func test_closeUpAppearsWhenZoomWaveEnabled() {
+    func test_flipRevealsCloseUpScopeAndBack() {
         let app = XCUIApplication()
-        // -autoplay docks a track, -expand opens Now Playing; -zoomWave YES lands in the UserDefaults
-        // argument domain so @AppStorage("zoomWave") reads true without touching app code.
-        app.launchArguments += ["-autoplay", "-expand", "-zoomWave", "YES"]
+        app.launchArguments += ["-autoplay", "-expand"]   // dock a track + open Now Playing on the cover
         app.launch()
 
-        XCTAssertTrue(app.otherElements["nowPlaying"].waitForExistence(timeout: 8),
-                      "Now Playing should auto-open")
+        XCTAssertTrue(app.otherElements["nowPlaying"].waitForExistence(timeout: 8), "Now Playing should auto-open")
+        let artwork = app.descendants(matching: .any)["npArtwork"]
+        XCTAssertTrue(artwork.waitForExistence(timeout: 5), "the cover front should be present")
+        artwork.tap()                                                  // flip to the analysis B-side
+
+        XCTAssertTrue(app.otherElements["analysisArea"].waitForExistence(timeout: 5), "flip reveals the analysis rack")
         XCTAssertTrue(app.otherElements["closeUpWaveform"].waitForExistence(timeout: 5),
-                      "close-up should render when zoomWave is on")
+                      "the close-up scope renders (default module)")
+
+        app.buttons["npFlipBack"].tap()                                // flip back to the cover
+        expect(artwork.isHittable, within: 5, "the cover front should be interactive again after flipping back")
+    }
+
+    /// Poll a UI condition (spring animations settle asynchronously).
+    @MainActor
+    private func expect(_ condition: @escaping @autoclosure () -> Bool, within timeout: TimeInterval, _ message: String) {
+        let exp = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in condition() }, object: nil)
+        XCTAssertEqual(XCTWaiter().wait(for: [exp], timeout: timeout), .completed, message)
     }
 }
