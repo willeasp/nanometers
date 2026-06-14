@@ -47,7 +47,7 @@ struct LibraryScreen: View {
 
     @ViewBuilder
     private func rootView(content: BrowseContent) -> some View {
-        // Header
+        // Header — search + gear only (handoff locks two trailing controls; per-file import lives on All Songs)
         HStack {
             Text("Library")
                 .font(Theme.sans(32, .bold))
@@ -55,13 +55,12 @@ struct LibraryScreen: View {
                 .foregroundStyle(Theme.text)
             Spacer()
             GlassRoundButton(systemName: "magnifyingglass") { onSearch() }
-            GlassRoundButton(systemName: "folder") { importing = true }
             GlassRoundButton(systemName: "gearshape") { showSettings = true }
                 .accessibilityIdentifier("settingsButton")
         }
         .padding(.bottom, 16)
 
-        // All Songs accent row
+        // All Songs accent row — two-line SourceRow-style (title + mono subtitle), no trailing count.
         Button {
             nav.openAllSongs()
         } label: {
@@ -74,24 +73,21 @@ struct LibraryScreen: View {
                         .font(.system(size: 20, weight: .medium))
                         .foregroundStyle(Theme.accent)
                 }
-                Text("All Songs")
-                    .font(Theme.sans(16, .medium))
-                    .tracking(-0.2)
-                    .foregroundStyle(Theme.text)
-                if content.allSongsCount > 0 {
-                    Spacer(minLength: 8)
-                    Text("\(content.allSongsCount)")
-                        .font(Theme.mono(12))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("All Songs")
+                        .font(Theme.sans(16, .medium))
+                        .tracking(-0.2)
+                        .foregroundStyle(Theme.text)
+                        .lineLimit(1)
+                    Text("\(content.allSongsCount) tracks · everything, flat")
+                        .font(Theme.mono(11.5))
                         .foregroundStyle(Theme.text3)
-                    Image(systemName: "chevron.right")
-                        .font(Theme.sans(13, .semibold))
-                        .foregroundStyle(Theme.text3)
-                } else {
-                    Spacer(minLength: 8)
-                    Image(systemName: "chevron.right")
-                        .font(Theme.sans(13, .semibold))
-                        .foregroundStyle(Theme.text3)
+                        .lineLimit(1)
                 }
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.right")
+                    .font(Theme.sans(13, .semibold))
+                    .foregroundStyle(Theme.text3)
             }
             .frame(minHeight: Theme.Layout.rowMinHeight)
             .contentShape(Rectangle())
@@ -99,10 +95,7 @@ struct LibraryScreen: View {
         .buttonStyle(.plain)
 
         if !content.sources.isEmpty {
-            Divider().background(Theme.hair)
-                .padding(.leading, 78)
-
-            // Sources section
+            // Sources section — no Divider between All Songs row and the header (handoff §3.1)
             sectionHeader("Sources")
 
             LazyVStack(spacing: 0) {
@@ -133,31 +126,48 @@ struct LibraryScreen: View {
 
     @ViewBuilder
     private func folderView(content: BrowseContent) -> some View {
-        // Breadcrumb
-        LibraryBreadcrumb(
-            crumbs: content.crumbs,
-            onCrumb: { depth in mapCrumb(depth) },
-            onBack: { nav.up() }
-        )
-        .padding(.bottom, 4)
+        // (1) Back-link row: ‹ {destination} in Theme.accent
+        let backDestination = nav.folderIds.isEmpty
+            ? "Library"
+            : (content.crumbs.dropLast().last?.label ?? "Library")
+        Button(action: { nav.up() }) {
+            HStack(spacing: 4) {
+                Image(systemName: "chevron.left")
+                    .font(Theme.sans(14, .semibold))
+                Text(backDestination)
+                    .font(Theme.sans(15))
+            }
+            .foregroundStyle(Theme.accent)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .buttonStyle(.plain)
+        .padding(.bottom, 2)
 
-        // Big title
+        // (2) Big title
         Text(content.title)
             .font(Theme.sans(28, .bold))
             .tracking(-0.4)
             .foregroundStyle(Theme.text)
-            .padding(.bottom, 12)
+            .padding(.bottom, 6)
 
-        // Play All + Shuffle row
+        // (3) Mono breadcrumb — below the title (handoff §3.2 order)
+        if !content.crumbs.isEmpty {
+            crumbTrail(crumbs: content.crumbs)
+                .padding(.bottom, 10)
+        }
+
+        // Play All / Play + Shuffle row
         if content.showsPlayAll {
             let playCtx = folderPlayContext(content: content)
+            // Title: "Play" when leaf folder (no sub-folders), "Play All" otherwise (handoff §3.2)
+            let playTitle = content.folders.isEmpty ? "Play" : "Play All"
             HStack(spacing: 12) {
                 Button {
                     if let first = content.playAll.first {
                         engine.play(first, in: content.playAll, context: playCtx)
                     }
                 } label: {
-                    Label("Play All", systemImage: "play.fill")
+                    Label(playTitle, systemImage: "play.fill")
                         .font(Theme.sans(15, .semibold))
                         .foregroundStyle(Theme.text)
                         .frame(maxWidth: .infinity)
@@ -228,19 +238,39 @@ struct LibraryScreen: View {
                 }
             }
         }
+
+        // Source-root footer: quiet inert label at source root (Phase 4 will wire the deep-link)
+        if nav.folderIds.isEmpty {
+            Text("Add or manage root folders…")
+                .font(Theme.sans(12))
+                .foregroundStyle(Theme.text3)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.top, 20)
+                .padding(.bottom, 8)
+        }
     }
 
     // MARK: - All Songs level
 
     @ViewBuilder
     private func allSongsView(content: BrowseContent) -> some View {
-        // Breadcrumb back to root
-        LibraryBreadcrumb(
-            crumbs: [],
-            onCrumb: { _ in nav.reset() },
-            onBack: { nav.reset() }
-        )
-        .padding(.bottom, 4)
+        // Header: back to Library + import button
+        // handoff deviation: per-file import lives on All Songs, not the locked root header
+        HStack {
+            Button(action: { nav.reset() }) {
+                HStack(spacing: 4) {
+                    Image(systemName: "chevron.left")
+                        .font(Theme.sans(14, .semibold))
+                    Text("Library")
+                        .font(Theme.sans(15))
+                }
+                .foregroundStyle(Theme.accent)
+            }
+            .buttonStyle(.plain)
+            Spacer()
+            GlassRoundButton(systemName: "square.and.arrow.down") { importing = true }
+        }
+        .padding(.bottom, 2)
 
         Text("All Songs")
             .font(Theme.sans(28, .bold))
@@ -265,13 +295,50 @@ struct LibraryScreen: View {
 
     // MARK: - Helpers
 
+    /// Micro-label section header — uppercase, bold, tight tracking, Theme.text3 (handoff §3.1).
     private func sectionHeader(_ title: String) -> some View {
         Text(title)
-            .font(Theme.sans(13, .semibold))
+            .font(Theme.sans(10.5, .bold))
+            .textCase(.uppercase)
+            .tracking(0.6)
             .foregroundStyle(Theme.text3)
             .padding(.top, 20)
             .padding(.bottom, 6)
             .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Inline mono breadcrumb trail — ancestors `Theme.text3`, separators `Theme.text3`.
+    /// All labels `Theme.text2` regular weight (no accent tint on crumbs — handoff §3.2).
+    @ViewBuilder
+    private func crumbTrail(crumbs: [BrowseContent.Crumb]) -> some View {
+        HStack(spacing: 0) {
+            ForEach(Array(crumbs.enumerated()), id: \.offset) { idx, crumb in
+                let isLast = idx == crumbs.count - 1
+                if idx > 0 {
+                    Text(" / ")
+                        .font(Theme.mono(11))
+                        .foregroundStyle(Theme.text3)
+                }
+                if isLast {
+                    Text(crumb.label)
+                        .font(Theme.mono(11))
+                        .foregroundStyle(Theme.text2)
+                        .accessibilityIdentifier("crumb-\(crumb.label)")
+                } else {
+                    // Ancestor crumbs dimmed to text3 (not accent-tinted — handoff §3.2)
+                    Button(crumb.label) {
+                        mapCrumb(crumb.folderDepth)
+                    }
+                    .buttonStyle(.plain)
+                    .font(Theme.mono(11))
+                    .foregroundStyle(Theme.text3)
+                    .accessibilityIdentifier("crumb-\(crumb.label)")
+                }
+            }
+        }
+        .lineLimit(1)
+        .accessibilityIdentifier("breadcrumb")
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     /// Map a breadcrumb `folderDepth` to a LibraryNav mutation.

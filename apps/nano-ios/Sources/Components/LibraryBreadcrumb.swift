@@ -31,13 +31,15 @@ struct LibraryBreadcrumb: View {
                         Text(crumb.label)
                             .font(Theme.mono(11))
                             .foregroundStyle(Theme.text2)
+                            .accessibilityIdentifier("crumb-\(crumb.label)")
                     } else {
+                        // Ancestor crumbs dimmed to text3 (not accent-tinted — handoff §3.2)
                         Button(crumb.label) {
                             onCrumb(crumb.folderDepth)
                         }
                         .buttonStyle(.plain)
                         .font(Theme.mono(11))
-                        .foregroundStyle(Theme.accent.opacity(0.8))
+                        .foregroundStyle(Theme.text3)
                         .accessibilityIdentifier("crumb-\(crumb.label)")
                     }
                 }
