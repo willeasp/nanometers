@@ -115,9 +115,13 @@ final class SourcesManager {
         if let tokenStore, let source = (try? LibraryStore.source(id: sourceId, ctx)) ?? nil,
            source.authRef != nil,
            let stored = try? tokenStore.load(account: sourceId) {
-            // Fire-and-forget revoke POST (ignore failure — local delete always proceeds).
-            let revokeToken = stored.refreshToken ?? stored.accessToken
-            if let http {
+            // Fire-and-forget revoke POST (ignore failure — local delete always proceeds). Only Google
+            // exposes a standard OAuth revocation endpoint; Microsoft's /consumers authority has none, so
+            // for OneDrive we'd just be shipping a (rotated) Microsoft refresh token to Google's endpoint
+            // for a guaranteed no-op. Revoke only for Drive; other providers' tokens expire/rotate server-
+            // side on their own once the local Keychain credential is dropped below.
+            if SourceKind(rawValue: source.kind) == .gdrive, let http {
+                let revokeToken = stored.refreshToken ?? stored.accessToken
                 Task.detached {
                     _ = try? await Self.revokeToken(revokeToken, http: http)
                 }
@@ -133,6 +137,7 @@ final class SourcesManager {
     }
 
     /// POST https://oauth2.googleapis.com/revoke?token=<token> — best-effort, result ignored by callers.
+    /// Google-specific: only `disconnect` for `.gdrive` calls this (Microsoft has no equivalent endpoint).
     private static func revokeToken(_ token: String, http: any HTTPClient) async throws {
         var req = URLRequest(url: URL(string: "https://oauth2.googleapis.com/revoke")!)
         req.httpMethod = "POST"

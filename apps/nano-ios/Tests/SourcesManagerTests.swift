@@ -211,6 +211,31 @@ final class SourcesManagerTests: XCTestCase {
                       "Revoke POST body should contain the refresh token; got: \(http.lastBody ?? "nil")")
     }
 
+    /// Regression: disconnecting a OneDrive source must NOT POST its Microsoft refresh token to Google's
+    /// revoke endpoint (Microsoft's /consumers authority has no revocation endpoint — the POST would be a
+    /// no-op that ships an MS credential to Google). The local Keychain credential is still deleted.
+    func test_disconnect_onedrive_deletesToken_butDoesNotFireRevoke() async throws {
+        let ctx = try TestDB.context()
+        let mgr = SourcesManager(ctx: ctx, index: LibraryIndex())
+        mgr.connect(kind: .onedrive, authRef: SourceKind.onedrive.rawValue)
+
+        let store = InMemoryTokenStore()
+        try store.save(OAuthToken(accessToken: "AT", refreshToken: "RT",
+                                  expiry: Date(timeIntervalSinceNow: 3600)),
+                       account: SourceKind.onedrive.rawValue)
+
+        let http = MockHTTPClient(responses: [.init(status: 200, json: "{}")])
+        mgr.disconnect(sourceId: SourceKind.onedrive.rawValue, tokenStore: store, http: http)
+        try await Task.sleep(for: .milliseconds(100))
+
+        XCTAssertNil(try store.load(account: SourceKind.onedrive.rawValue),
+                     "OneDrive token must still be deleted from the local store on disconnect")
+        XCTAssertNil(try LibraryStore.source(id: SourceKind.onedrive.rawValue, ctx),
+                     "OneDrive source row must be deleted on disconnect")
+        XCTAssertEqual(http.callCount, 0,
+                       "No revoke POST may be sent for OneDrive (no Microsoft revocation endpoint)")
+    }
+
     func test_applyEnumeration_setsFolderBookmarkAndProviderFileId() throws {
         let ctx = try TestDB.context()
         let idx = LibraryIndex(); let mgr = SourcesManager(ctx: ctx, index: idx)
