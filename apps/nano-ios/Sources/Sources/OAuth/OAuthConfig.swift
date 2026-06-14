@@ -1,6 +1,8 @@
 import Foundation
 
-/// THE credential-injection seam. One value to set (GoogleOAuthClientID in project.yml); nothing else.
+/// THE credential-injection seam. Two synced placeholders in project.yml: GoogleOAuthClientID (the iOS
+/// client id) + the reversed-id CFBundleURLTypes scheme. Change both, then run `xcodegen generate`
+/// (see docs/google-drive-setup.md).
 struct OAuthConfig {
     var clientID: String; var redirectScheme: String
     var authEndpoint: URL; var tokenEndpoint: URL; var scopes: [String]
@@ -8,7 +10,7 @@ struct OAuthConfig {
     static let placeholder = "YOUR_GOOGLE_IOS_CLIENT_ID"
     var isConfigured: Bool { !clientID.isEmpty && clientID != Self.placeholder }
     /// Reads the iOS OAuth client id from Info.plist key `GoogleOAuthClientID` (set in project.yml). The
-    /// redirect scheme is the reversed client id (Google iOS convention). One value to set; nothing else.
+    /// redirect scheme is the reversed client id (Google iOS convention); both are set together in project.yml.
     static var google: OAuthConfig {
         let id = (Bundle.main.object(forInfoDictionaryKey: "GoogleOAuthClientID") as? String) ?? placeholder
         return OAuthConfig(clientID: id, redirectScheme: reversedScheme(for: id),
