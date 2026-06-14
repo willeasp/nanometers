@@ -75,9 +75,9 @@ private extension SourceKind {
 private extension SourceState {
     var dotColor: Color {
         switch self {
-        case .connected:  Color(hex: "#4ADE80")   // green
-        case .needsReauth: Color(hex: "#FBBF24")  // amber
-        default:          Theme.text3              // grey
+        case .connected:   Theme.statusGreen   // #57D986 — locked handoff
+        case .needsReauth: Theme.accent        // brand amber #EFA869 — locked handoff
+        default:           Theme.text3         // grey
         }
     }
 }

@@ -14,6 +14,8 @@ enum Theme {
     // Accent (locked)
     static let accent = Color(hex: 0xEFA869)
     static let accentHex = "#EFA869"
+    // Status dot — locked handoff #57D986 (connected), distinct from bandMid which is the same hex but a different semantic token.
+    static let statusGreen = Color(hex: "#57D986")
     // Frequency bands (handoff §01) — used by the waveforms in Phase 3; defined now for completeness.
     static let bandBass   = Color(hex: 0xFF6B6B)
     static let bandMid    = Color(hex: 0x57D986)
