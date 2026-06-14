@@ -73,4 +73,51 @@ final class LibraryBrowseTests: XCTestCase {
         XCTAssertEqual(Set(c.tracks.map(\.title)), ["local1", "h1", "h2"])   // reachable only
         XCTAssertEqual(c.playAll.count, 3)
     }
+
+    // MARK: - isAvailable (FIX 1)
+
+    func test_isAvailable_bundledTrack_availableEvenWhenNotReachable() throws {
+        let ctx = try TestDB.context()
+        // A bundled track has no sourceId / index presence — it lives in the app bundle.
+        let t = Track(title: "Demo", artist: "", album: "", bundledName: "demo.mp3")
+        ctx.insert(t)
+        let idx = LibraryIndex(); idx.rebuild(from: ctx)   // empty index; no sources
+        XCTAssertTrue(LibraryBrowse.isAvailable(t, index: idx),
+                      "Bundled track must be available regardless of index state")
+    }
+
+    func test_isAvailable_localBookmarkTrack_availableEvenWhenNotReachable() throws {
+        let ctx = try TestDB.context()
+        let t = Track(title: "Local", artist: "", album: "", bookmark: Data([0xDE, 0xAD]))
+        ctx.insert(t)
+        let idx = LibraryIndex(); idx.rebuild(from: ctx)
+        XCTAssertTrue(LibraryBrowse.isAvailable(t, index: idx),
+                      "Track with a file bookmark must be available regardless of index state")
+    }
+
+    func test_isAvailable_cloudTrack_disconnectedSource_unavailable() throws {
+        let ctx = try TestDB.context()
+        // A cloud track whose source was disconnected: source row deleted, node deleted, track row kept.
+        let t = Track(title: "Cloud", artist: "", album: "")
+        t.sourceId = "gdrive"
+        t.providerFileId = "file-123"
+        // No source row, no folder nodes — index is empty.
+        ctx.insert(t)
+        let idx = LibraryIndex(); idx.rebuild(from: ctx)
+        XCTAssertFalse(LibraryBrowse.isAvailable(t, index: idx),
+                       "Cloud track with no reachable source must be unavailable")
+    }
+
+    func test_isAvailable_cloudTrack_connectedSource_available() throws {
+        let ctx = try TestDB.context()
+        ctx.insert(Source(id: "gdrive", kind: .gdrive, state: .connected))
+        ctx.insert(RootFolder(sourceId: "gdrive", name: "Mine", providerFolderId: "root"))
+        let t = Track(title: "Cloud", artist: "", album: "")
+        t.sourceId = "gdrive"; t.providerFileId = "file-123"
+        ctx.insert(t)
+        ctx.insert(FolderNode(id: "root", sourceId: "gdrive", name: "Mine", parentId: nil, trackIds: [t.id]))
+        let idx = LibraryIndex(); idx.rebuild(from: ctx)
+        XCTAssertTrue(LibraryBrowse.isAvailable(t, index: idx),
+                      "Cloud track under a connected source must be available")
+    }
 }

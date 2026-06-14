@@ -123,6 +123,14 @@ enum LibraryBrowse {
         return c
     }
 
+    /// A track is playable if it has a local file handle (bundled/imported/enumerated) OR its cloud source
+    /// is currently reachable. Orphaned cloud tracks (source disconnected) are unavailable (handoff §10).
+    @MainActor
+    static func isAvailable(_ track: Track, index: LibraryIndex) -> Bool {
+        if track.bundledName != nil || track.bookmark != nil || track.folderBookmark != nil { return true }
+        return index.reachableTrackIds.contains(track.id)
+    }
+
     /// Filter the already-recursive `scope` tracks by `query` (case-insensitive over title/artist/album),
     /// each hit annotated with its folder path. Empty/whitespace query → no hits (search is opt-in).
     @MainActor
