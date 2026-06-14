@@ -74,6 +74,40 @@ final class LibraryBrowserUITests: XCTestCase {
                       "Edge swipe-back should pop to the source level (folder row visible again)\n\(app.debugDescription)")
     }
 
+    /// Scoped search clears on navigation (handoff §04): toggling search at a level, drilling away, and
+    /// popping back must NOT reveal a stale search field — even though each level now owns its search state.
+    @MainActor
+    func test_scopedSearch_clearsWhenLeavingLevel() {
+        let app = XCUIApplication()
+        app.launch()
+
+        let sourceRow = app.descendants(matching: .any)["sourceRow-local"].firstMatch
+        XCTAssertTrue(sourceRow.waitForExistence(timeout: 10), "Root should show the local source row")
+        sourceRow.tap()
+
+        // Toggle scoped search at the source level (empty query keeps folder rows tappable).
+        let toggle = app.descendants(matching: .any)["searchToggle"].firstMatch
+        XCTAssertTrue(toggle.waitForExistence(timeout: 10), "Source level should offer a search toggle")
+        toggle.tap()
+        XCTAssertTrue(app.textFields["scopedSearchField"].waitForExistence(timeout: 5),
+                      "Scoped search field should appear after toggling")
+
+        // Drill into a folder, then edge-swipe back to the source level.
+        let folderRow = app.descendants(matching: .any)["folderRow-On My iPhone"].firstMatch
+        XCTAssertTrue(folderRow.waitForExistence(timeout: 5))
+        folderRow.tap()
+        XCTAssertTrue(app.staticTexts["Biljam"].waitForExistence(timeout: 5), "Should be inside the folder")
+
+        let edge = app.coordinate(withNormalizedOffset: CGVector(dx: 0.0, dy: 0.5))
+        let target = app.coordinate(withNormalizedOffset: CGVector(dx: 0.92, dy: 0.5))
+        edge.press(forDuration: 0.1, thenDragTo: target)
+
+        // Back at the source level — search must have cleared (field gone).
+        XCTAssertTrue(folderRow.waitForExistence(timeout: 5), "Should be back at the source level")
+        XCTAssertFalse(app.textFields["scopedSearchField"].exists,
+                       "Scoped search should clear when leaving the level\n\(app.debugDescription)")
+    }
+
     /// All Songs lists both demo tracks.
     @MainActor
     func test_allSongs_listsDemoTracks() {

@@ -19,6 +19,20 @@ final class LibraryNavTests: XCTestCase {
         n.up(); XCTAssertEqual(n.folderIds, [])           // at source root
         n.up(); XCTAssertTrue(n.isRoot)                   // pops to Library root
     }
+    func test_openFolder_ignoresDuplicateOfCurrentLeaf() {
+        // A fast double-tap fires openFolder twice with the same id; the second must be a no-op so the
+        // NavigationStack doesn't stack a bogus `[…, a, a]` duplicate level.
+        let n = LibraryNav(); n.openSource("gdrive")
+        n.openFolder("mine"); n.openFolder("mine")
+        XCTAssertEqual(n.folderIds, ["mine"])
+        n.openFolder("house"); n.openFolder("house")
+        XCTAssertEqual(n.folderIds, ["mine", "house"])
+        XCTAssertEqual(n.routePath, [
+            .source("gdrive"),
+            .folder(source: "gdrive", ids: ["mine"]),
+            .folder(source: "gdrive", ids: ["mine", "house"]),
+        ])
+    }
     func test_jumpTo_breadcrumbAncestor() {
         let n = LibraryNav(); n.openSource("gdrive"); n.openFolder("mine"); n.openFolder("house")
         n.jumpTo(folderDepth: 1)                          // keep first folder only

@@ -89,6 +89,7 @@ private struct LibraryRootLevel: View {
 
                 // All Songs accent row — two-line SourceRow-style (title + mono subtitle), no trailing count.
                 Button {
+                    guard nav.isRoot else { return }   // ignore a double-tap once we've already pushed
                     nav.openAllSongs()
                 } label: {
                     HStack(spacing: 12) {
@@ -128,7 +129,7 @@ private struct LibraryRootLevel: View {
                             SourceRow(
                                 source: source,
                                 counts: index.sourceCounts[source.id] ?? .init(),
-                                onTap: { nav.openSource(source.id) }
+                                onTap: { if nav.isRoot { nav.openSource(source.id) } }
                             )
                             if source.id != content.sources.last?.id {
                                 Divider().background(Theme.hair)
@@ -268,6 +269,9 @@ private struct LibraryFolderLevel: View {
         .background(Theme.bg)
         .toolbar(.hidden, for: .navigationBar)
         .interactiveSwipeBack()
+        // Scoped search clears on navigation (handoff §04): reset when this level is left, so popping back
+        // to it doesn't reveal a stale search field. Sheets don't trigger onDisappear, so they're unaffected.
+        .onDisappear { searchActive = false; searchQuery = "" }
         .sheet(item: $detailTrack) { TrackContextSheet(track: $0) }
     }
 
@@ -323,7 +327,13 @@ private struct LibraryFolderLevel: View {
                             name: node.name,
                             tint: content.sourceTint,
                             counts: index.folderCounts[node.id] ?? .init(),
-                            onTap: { nav.openFolder(node.id) }
+                            // Only drill while this level is still the top of the stack — blocks a
+                            // double-tap (same or different row) from stacking a bogus extra level.
+                            onTap: {
+                                guard nav.sourceId == location.sourceId,
+                                      nav.folderIds == location.folderIds else { return }
+                                nav.openFolder(node.id)
+                            }
                         )
                         if node.id != content.folders.last?.id {
                             Divider().background(Theme.hair)
@@ -536,6 +546,7 @@ private struct LibraryAllSongsLevel: View {
         .background(Theme.bg)
         .toolbar(.hidden, for: .navigationBar)
         .interactiveSwipeBack()
+        .onDisappear { searchActive = false; searchQuery = "" }   // scoped search clears on navigation (handoff §04)
         .fileImporter(isPresented: $importing, allowedContentTypes: [.audio], allowsMultipleSelection: true) { result in
             if case .success(let urls) = result {
                 Task { _ = await TrackImporter.importFiles(urls, into: ctx) }

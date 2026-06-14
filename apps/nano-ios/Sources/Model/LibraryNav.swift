@@ -52,7 +52,13 @@ final class LibraryNav {
     func reset() { smart = nil; sourceId = nil; folderIds = [] }
     func openAllSongs() { smart = .allSongs; sourceId = nil; folderIds = [] }
     func openSource(_ id: String) { smart = nil; sourceId = id; folderIds = [] }
-    func openFolder(_ folderId: String) { folderIds.append(folderId) }
+    /// Drill into a child folder. Ignores a re-push of the folder we're already in — a fast double-tap on
+    /// a row fires twice before the covering view stops hit-testing, and an unguarded append would stack a
+    /// duplicate `[…, a, a]` level (the view also guards on top-of-stack; this is the model-level backstop).
+    func openFolder(_ folderId: String) {
+        guard folderIds.last != folderId else { return }
+        folderIds.append(folderId)
+    }
 
     /// Pop one level: a folder → its parent; at a source root → Library root.
     func up() {
