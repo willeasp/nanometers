@@ -65,6 +65,9 @@ struct SourceDetailView: View {
     @State private var showDisconnectConfirm = false
     @State private var enumerationError: Error?
     @State private var isEnumerating = false
+    // FIX E — needsReauth re-auth affordance
+    @State private var isReconnecting = false
+    @State private var reconnectError: String? = nil
 
     private var kind: SourceKind { SourceKind(rawValue: source.kind) ?? .local }
     private var state: SourceState { SourceState(rawValue: source.state) ?? .offline }
@@ -92,8 +95,18 @@ struct SourceDetailView: View {
                             .font(Theme.mono(11.5))
                             .foregroundStyle(Theme.text3)
                     }
+                    Spacer(minLength: 8)
+                    // FIX E: Reconnect button appears only when the source needs re-authentication.
+                    if state == .needsReauth && kind == .gdrive && OAuthConfig.google.isConfigured {
+                        reconnectButton
+                    }
                 }
                 .padding(.vertical, 4)
+                if let err = reconnectError {
+                    Text(err)
+                        .font(Theme.mono(11))
+                        .foregroundStyle(.red)
+                }
             }
             .listRowBackground(Color.clear)
 
@@ -248,12 +261,54 @@ struct SourceDetailView: View {
         }
         .confirmationDialog("Disconnect \(source.label)?", isPresented: $showDisconnectConfirm, titleVisibility: .visible) {
             Button("Disconnect", role: .destructive) {
-                manager.disconnect(sourceId: source.id)
+                // Pass tokenStore + http so disconnect can revoke the OAuth token and delete
+                // the Keychain credential before removing the Source row (FIX D / spec §14).
+                manager.disconnect(sourceId: source.id,
+                                   tokenStore: KeychainTokenStore(),
+                                   http: URLSessionHTTPClient())
                 dismiss()
             }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Root folders and cached tracks will be removed from the Library. Tracks in playlists are kept.")
+        }
+    }
+
+    // FIX E: "Reconnect" button for the needsReauth state — re-runs the full OAuth flow.
+    @ViewBuilder
+    private var reconnectButton: some View {
+        if isReconnecting {
+            ProgressView().tint(Theme.accent)
+        } else {
+            Button {
+                isReconnecting = true
+                reconnectError = nil
+                Task { @MainActor in
+                    defer { isReconnecting = false }
+                    do {
+                        try await manager.connectOAuth(
+                            kind: kind,
+                            config: .google,
+                            web: WebAuthSession(),
+                            client: OAuthClient(config: .google, http: URLSessionHTTPClient()),
+                            tokenStore: KeychainTokenStore()
+                        )
+                    } catch WebAuthSession.Error.cancelled {
+                        // User cancelled — silent
+                    } catch {
+                        reconnectError = error.localizedDescription
+                    }
+                }
+            } label: {
+                Text("Reconnect")
+                    .font(Theme.sans(13, .medium))
+                    .foregroundStyle(Theme.bg)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 5)
+                    .background(Theme.accent, in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("reconnectSource")
         }
     }
 
@@ -717,12 +772,13 @@ struct DriveFolderBrowserView: View {
                 let tokenStore = KeychainTokenStore()
                 let provider = GoogleDriveProvider(
                     api: DriveAPIClient(http: URLSessionHTTPClient()),
-                    accessToken: {
+                    accessToken: { force in
                         try await manager.accessToken(
                             for: .gdrive,
                             config: config,
                             client: client,
-                            tokenStore: tokenStore
+                            tokenStore: tokenStore,
+                            forceRefresh: force
                         )
                     }
                 )

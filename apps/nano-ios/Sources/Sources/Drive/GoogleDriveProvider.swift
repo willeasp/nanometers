@@ -2,10 +2,15 @@ import Foundation
 
 /// Enumerates a Drive subtree into provider-agnostic descriptors (handoff §08.5). `accessToken` is supplied
 /// by the caller (SourcesManager refreshes via OAuthClient), so this stays testable with a static token.
+///
+/// The `accessToken` closure now accepts a `forceRefresh: Bool` parameter.  Passing `false` returns the
+/// cached / just-refreshed token; passing `true` forces a new refresh POST.  This lets `walk` implement
+/// a single 401 → forced-refresh → retry cycle (FIX C).
 struct GoogleDriveProvider: SourceProvider {
     var kind: SourceKind { .gdrive }
     let api: DriveAPIClient
-    let accessToken: () async throws -> String
+    /// `(_ forceRefresh: Bool) async throws -> String`
+    let accessToken: (_ forceRefresh: Bool) async throws -> String
 
     func enumerate(rootBookmark: Data?, providerFolderId: String?, rootName: String, rootId: String) async throws -> EnumerationResult {
         var folders: [FolderDescriptor] = []; var tracks: [TrackDescriptor] = []
@@ -14,13 +19,23 @@ struct GoogleDriveProvider: SourceProvider {
                        visited: &visited, folders: &folders, tracks: &tracks)
         return EnumerationResult(folders: folders, tracks: tracks)
     }
+
     private func walk(folderId: String, name: String, parentId: String?, depth: Int,
                       visited: inout Set<String>,
                       folders: inout [FolderDescriptor], tracks: inout [TrackDescriptor]) async throws {
         guard visited.insert(folderId).inserted else { return }   // cycle / multi-parent — skip duplicate
         guard depth <= 64 else { return }                          // depth backstop (shortcuts-to-ancestor)
-        let token = try await accessToken()
-        let (subFolders, subTracks) = try await api.listChildren(parentId: folderId, accessToken: token)
+
+        let token = try await accessToken(false)
+        let (subFolders, subTracks): ([DriveFile], [DriveFile])
+        do {
+            (subFolders, subTracks) = try await api.listChildren(parentId: folderId, accessToken: token)
+        } catch DriveError.unauthorized {
+            // Token expired mid-enumeration → force a single refresh and retry once.
+            let fresh = try await accessToken(true)
+            (subFolders, subTracks) = try await api.listChildren(parentId: folderId, accessToken: fresh)
+        }
+
         var childIds: [String] = []; var trackIds: [String] = []
         for f in subFolders { childIds.append(f.id) }
         for t in subTracks {

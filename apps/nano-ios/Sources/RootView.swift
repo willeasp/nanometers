@@ -159,26 +159,43 @@ private func makeRemoteURLProvider(ctx: ModelContext, index: LibraryIndex) -> (T
         let cache = RemoteFileCache(directory: dir)
 
         // Build a fresh SourcesManager / OAuthClient / token store each call (stateless);
-        // SourcesManager serialises concurrent refreshes via its refreshTasks dict.
+        // TokenRefreshCoordinator.shared serialises concurrent refreshes across all SourcesManager instances.
         let mgr = SourcesManager(ctx: ctx, index: index)
         let config = OAuthConfig.google
         let oauthClient = OAuthClient(config: config, http: URLSessionHTTPClient())
         let tokenStore = KeychainTokenStore()
+
+        /// Helper: download `fileId` with `accessToken`, returning raw Data.
+        /// Throws an NSError on non-200; callers detect 401 to trigger a forced refresh+retry.
+        func download(accessToken: String) async throws -> Data {
+            let req = DriveAPIClient.mediaRequest(fileId: fileId, accessToken: accessToken, offset: 0)
+            let (data, response) = try await URLSession.shared.data(for: req)
+            guard let http = response as? HTTPURLResponse else {
+                throw NSError(domain: "RemoteURLProvider", code: -1,
+                              userInfo: [NSLocalizedDescriptionKey: "No HTTP response downloading \(fileId)"])
+            }
+            guard (200..<300).contains(http.statusCode) else {
+                throw NSError(domain: "RemoteURLProvider", code: http.statusCode,
+                              userInfo: [NSLocalizedDescriptionKey: "HTTP \(http.statusCode) downloading \(fileId)"])
+            }
+            return data
+        }
 
         do {
             let token = try await mgr.accessToken(for: kind, config: config,
                                                    client: oauthClient,
                                                    tokenStore: tokenStore)
             let url = try await cache.localURL(sourceId: sourceId, fileId: fileId) {
-                let req = DriveAPIClient.mediaRequest(fileId: fileId, accessToken: token, offset: 0)
-                let (data, response) = try await URLSession.shared.data(for: req)
-                guard let http = response as? HTTPURLResponse,
-                      (200..<300).contains(http.statusCode) else {
-                    let code = (response as? HTTPURLResponse)?.statusCode ?? -1
-                    throw NSError(domain: "RemoteURLProvider", code: code,
-                                  userInfo: [NSLocalizedDescriptionKey: "HTTP \(code) downloading \(fileId)"])
+                do {
+                    return try await download(accessToken: token)
+                } catch let err as NSError where err.code == 401 {
+                    // Token expired mid-download → force a single refresh and retry once.
+                    let fresh = try await mgr.accessToken(for: kind, config: config,
+                                                          client: oauthClient,
+                                                          tokenStore: tokenStore,
+                                                          forceRefresh: true)
+                    return try await download(accessToken: fresh)
                 }
-                return data
             }
             return url
         } catch {
