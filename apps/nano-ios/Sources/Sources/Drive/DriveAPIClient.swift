@@ -15,14 +15,6 @@ enum DriveError: Error, LocalizedError {
     }
 }
 
-enum DriveAudioMime {
-    static func isAudio(_ m: String) -> Bool { m.hasPrefix("audio/") }
-    private static let audioExtensions: Set<String> = ["mp3","m4a","aac","wav","aif","aiff","flac","alac","ogg","caf"]
-    static func isAudioByExtension(_ name: String) -> Bool {
-        let ext = (name as NSString).pathExtension.lowercased()
-        return audioExtensions.contains(ext)
-    }
-}
 struct DriveFile: Decodable, Equatable { var id: String; var name: String; var mimeType: String }
 struct DriveListPage: Equatable { var folders: [DriveFile]; var tracks: [DriveFile]; var nextPageToken: String? }
 
@@ -39,7 +31,7 @@ struct DriveAPIClient {
             guard f.mimeType != folderMime, !f.mimeType.hasPrefix("application/vnd.google-apps.") else { return false }
             // Accept if the mimeType is audio/* OR the filename carries a known audio extension
             // (Drive often reports uploaded audio files as application/octet-stream).
-            return DriveAudioMime.isAudio(f.mimeType) || DriveAudioMime.isAudioByExtension(f.name)
+            return AudioMime.isAudio(f.mimeType) || AudioMime.isAudioByExtension(f.name)
         }
         return DriveListPage(folders: folders, tracks: tracks, nextPageToken: r.nextPageToken)
     }

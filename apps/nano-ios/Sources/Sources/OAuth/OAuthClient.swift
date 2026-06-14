@@ -8,11 +8,10 @@ struct OAuthClient {
         c.queryItems = [.init(name: "client_id", value: config.clientID), .init(name: "redirect_uri", value: redirectURI),
                         .init(name: "response_type", value: "code"), .init(name: "scope", value: config.scopes.joined(separator: " ")),
                         .init(name: "code_challenge", value: challenge), .init(name: "code_challenge_method", value: "S256"),
-                        // access_type=offline → Google issues a refresh_token; prompt=consent forces the
-                        // consent screen so re-auth (Reconnect) re-issues one (Google only returns a refresh
-                        // token on first consent otherwise). Without these the source dies ~1h after connecting.
-                        .init(name: "access_type", value: "offline"), .init(name: "prompt", value: "consent"),
                         .init(name: "state", value: state)]
+        // Provider-specific params (Google: access_type=offline + prompt=consent; Microsoft:
+        // prompt=select_account). Sorted by key so the URL is deterministic for tests.
+        c.queryItems! += config.extraAuthParams.sorted { $0.key < $1.key }.map { URLQueryItem(name: $0.key, value: $0.value) }
         return c.url!
     }
     func exchange(code: String, verifier: String, redirectURI: String) async throws -> OAuthToken {
