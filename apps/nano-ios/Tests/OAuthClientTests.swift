@@ -1,0 +1,40 @@
+import XCTest
+@testable import NanoMeters
+
+final class OAuthClientTests: XCTestCase {
+    func test_exchange_postsCodeVerifierAndParsesTokens() async throws {
+        let http = MockHTTPClient(responses: [
+            .init(json: #"{"access_token":"AT","refresh_token":"RT","expires_in":3600}"#)])
+        let cfg = OAuthConfig(clientID: "cid", redirectScheme: "com.googleusercontent.apps.cid",
+                              authEndpoint: URL(string: "https://auth")!, tokenEndpoint: URL(string: "https://token")!,
+                              scopes: ["drive.readonly"])
+        let client = OAuthClient(config: cfg, http: http)
+        let tok = try await client.exchange(code: "CODE", verifier: "VER", redirectURI: "com.googleusercontent.apps.cid:/oauth")
+        XCTAssertEqual(tok.accessToken, "AT"); XCTAssertEqual(tok.refreshToken, "RT")
+        XCTAssertGreaterThan(tok.expiry, Date())
+        // Verify the POST body carried grant_type=authorization_code, code, code_verifier, client_id, redirect_uri.
+        let body = http.lastBody ?? ""
+        XCTAssertTrue(body.contains("grant_type=authorization_code"))
+        XCTAssertTrue(body.contains("code_verifier=VER")); XCTAssertTrue(body.contains("code=CODE"))
+    }
+    func test_refresh_usesRefreshToken_keepsOldRefreshIfOmitted() async throws {
+        let http = MockHTTPClient(responses: [.init(json: #"{"access_token":"AT2","expires_in":3600}"#)])
+        let cfg = OAuthConfig(clientID: "cid", redirectScheme: "s", authEndpoint: URL(string: "https://a")!,
+                              tokenEndpoint: URL(string: "https://token")!, scopes: [])
+        let client = OAuthClient(config: cfg, http: http)
+        let tok = try await client.refresh(refreshToken: "RT")
+        XCTAssertEqual(tok.accessToken, "AT2"); XCTAssertEqual(tok.refreshToken, "RT")  // reused
+        XCTAssertTrue((http.lastBody ?? "").contains("grant_type=refresh_token"))
+    }
+    func test_authorizeURL_carriesPKCEAndState() {
+        let cfg = OAuthConfig(clientID: "cid", redirectScheme: "s", authEndpoint: URL(string: "https://auth")!,
+                              tokenEndpoint: URL(string: "https://t")!, scopes: ["drive.readonly"])
+        let url = OAuthClient(config: cfg, http: MockHTTPClient(responses: []))
+            .authorizeURL(challenge: "CH", state: "ST", redirectURI: "s:/oauth")
+        let q = URLComponents(url: url, resolvingAgainstBaseURL: false)!.queryItems!
+        XCTAssertEqual(q.first { $0.name == "code_challenge" }?.value, "CH")
+        XCTAssertEqual(q.first { $0.name == "code_challenge_method" }?.value, "S256")
+        XCTAssertEqual(q.first { $0.name == "state" }?.value, "ST")
+        XCTAssertEqual(q.first { $0.name == "client_id" }?.value, "cid")
+    }
+}
