@@ -4,6 +4,36 @@ import SwiftData
 
 @MainActor
 final class SourcesManagerTests: XCTestCase {
+    // MARK: - needsReauth recovery + error classification (review fixes)
+
+    func test_degradedState_classifiesAuthVsTransient() {
+        XCTAssertEqual(SourcesManager.degradedState(for: OAuthError.noRefreshToken(account: "x")), .needsReauth)
+        XCTAssertEqual(SourcesManager.degradedState(for: OAuthError.noStoredToken(account: "x")), .needsReauth)
+        XCTAssertEqual(SourcesManager.degradedState(for: NSError(domain: "OAuth", code: 400)), .needsReauth)
+        XCTAssertEqual(SourcesManager.degradedState(for: NSError(domain: "OAuth", code: 401)), .needsReauth)
+        XCTAssertEqual(SourcesManager.degradedState(for: URLError(.notConnectedToInternet)), .offline)
+        XCTAssertEqual(SourcesManager.degradedState(for: NSError(domain: "OAuth", code: 500)), .offline)
+    }
+
+    func test_accessToken_recoversFromNeedsReauthOnSuccess() async throws {
+        let ctx = try TestDB.context()
+        let mgr = SourcesManager(ctx: ctx, index: LibraryIndex())
+        // A source stranded in needsReauth, but it has a root and a valid (non-expiring) token.
+        ctx.insert(Source(id: "gdrive", kind: .gdrive, state: .needsReauth, authRef: "gdrive"))
+        ctx.insert(RootFolder(sourceId: "gdrive", name: "P", providerFolderId: "root"))
+        let store = InMemoryTokenStore()
+        try store.save(OAuthToken(accessToken: "AT", refreshToken: "RT",
+                                  expiry: Date(timeIntervalSinceNow: 3600)), account: "gdrive")
+        let cfg = OAuthConfig(clientID: "cid", redirectScheme: "s", authEndpoint: URL(string: "https://a")!,
+                              tokenEndpoint: URL(string: "https://t")!, scopes: [])
+        let token = try await mgr.accessToken(for: .gdrive, config: cfg,
+                                              client: OAuthClient(config: cfg, http: MockHTTPClient(responses: [])),
+                                              tokenStore: store)
+        XCTAssertEqual(token, "AT")
+        XCTAssertEqual(try LibraryStore.source(id: "gdrive", ctx)?.state, SourceState.connected.rawValue,
+                       "a successful token fetch must clear needsReauth")
+    }
+
     func test_connectAndAddRoot_createsSourceFoldersTracks_andReachable() throws {
         let ctx = try TestDB.context()
         let idx = LibraryIndex()

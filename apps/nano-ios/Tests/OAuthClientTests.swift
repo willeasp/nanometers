@@ -37,4 +37,15 @@ final class OAuthClientTests: XCTestCase {
         XCTAssertEqual(q.first { $0.name == "state" }?.value, "ST")
         XCTAssertEqual(q.first { $0.name == "client_id" }?.value, "cid")
     }
+    func test_authorizeURL_requestsOfflineAccessAndConsent() {
+        // Without access_type=offline Google never issues a refresh token (the source dies ~1h after
+        // connect); without prompt=consent a re-auth can't re-issue one.
+        let cfg = OAuthConfig(clientID: "cid", redirectScheme: "s", authEndpoint: URL(string: "https://auth")!,
+                              tokenEndpoint: URL(string: "https://t")!, scopes: ["drive.readonly"])
+        let url = OAuthClient(config: cfg, http: MockHTTPClient(responses: []))
+            .authorizeURL(challenge: "CH", state: "ST", redirectURI: "s:/oauth")
+        let q = URLComponents(url: url, resolvingAgainstBaseURL: false)!.queryItems!
+        XCTAssertEqual(q.first { $0.name == "access_type" }?.value, "offline")
+        XCTAssertEqual(q.first { $0.name == "prompt" }?.value, "consent")
+    }
 }

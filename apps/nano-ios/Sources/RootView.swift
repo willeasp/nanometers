@@ -140,6 +140,9 @@ private func makeRemoteURLProvider(ctx: ModelContext, index: LibraryIndex) -> (T
     let cacheDir = (try? FileManager.default.url(
         for: .cachesDirectory, in: .userDomainMask, appropriateFor: nil, create: true))
         .map { $0.appendingPathComponent("remote", isDirectory: true) }
+    // One shared cache captured by the closure — built once, not per call. A per-call instance made the
+    // actor's in-flight dedup a no-op, so rapid re-selection raced two downloads onto the same file.
+    let cache = cacheDir.map { RemoteFileCache(directory: $0) }
 
     return { track in
         guard let fileId = track.providerFileId,
@@ -155,8 +158,7 @@ private func makeRemoteURLProvider(ctx: ModelContext, index: LibraryIndex) -> (T
             return nil
         }
 
-        guard let dir = cacheDir else { return nil }
-        let cache = RemoteFileCache(directory: dir)
+        guard let cache else { return nil }
 
         // Build a fresh SourcesManager / OAuthClient / token store each call (stateless);
         // TokenRefreshCoordinator.shared serialises concurrent refreshes across all SourcesManager instances.

@@ -26,7 +26,9 @@ actor RemoteFileCache {
         // New download: create, register, run, then always unregister.
         let task = Task<URL, Error> {
             let data = try await downloader()
-            try data.write(to: url)
+            // Atomic: a disk-full / mid-write failure must not leave a truncated file that fileExists()
+            // would then serve forever as a false cache hit (matches sibling WaveformCache).
+            try data.write(to: url, options: .atomic)
             touch(url)
             evictIfNeeded(keepURL: url)
             return url

@@ -180,7 +180,24 @@ final class SourcesManager {
                                               redirectURI: config.redirectURI)
         let account = kind.rawValue
         try tokenStore.save(token, account: account)
-        connect(kind: kind, authRef: account)
+        // Fresh source → create it; existing source (e.g. a Reconnect from .needsReauth) → connect() would
+        // no-op, so restore its state here (FIX: needsReauth was a one-way trap).
+        if (try? LibraryStore.source(id: account, ctx)) ?? nil != nil {
+            markReachable(account)
+        } else {
+            connect(kind: kind, authRef: account)
+        }
+    }
+
+    /// Restore a degraded (`.needsReauth` / `.offline`) source to a healthy state after a successful
+    /// auth or token refresh: `.connected` if it has roots, else `.noRoots`. No-op when already healthy.
+    private func markReachable(_ sourceId: String) {
+        guard let s = (try? LibraryStore.source(id: sourceId, ctx)) ?? nil else { return }
+        let state = SourceState(rawValue: s.state)
+        guard state == .needsReauth || state == .offline else { return }
+        let hasRoots = !((try? LibraryStore.rootFolders(of: sourceId, ctx))?.isEmpty ?? true)
+        s.state = (hasRoots ? SourceState.connected : SourceState.noRoots).rawValue
+        index.rebuild(from: ctx)
     }
 
     /// Returns a valid access token for `kind`, refreshing via the shared `TokenRefreshCoordinator`
@@ -198,16 +215,31 @@ final class SourcesManager {
         do {
             let token = try await TokenRefreshCoordinator.shared.validToken(
                 account: account, store: tokenStore, client: client, forceRefresh: forceRefresh)
+            markReachable(account)   // success after a degraded state → back to connected (FIX: recovery)
             return token.accessToken
         } catch {
-            // Flip the source to needsReauth on any refresh / token-missing failure so the amber
-            // dot appears. Missing-token errors (first launch before OAuth) also land here; the
-            // source won't exist yet in that case so the optional chain is a no-op.
+            // Classify: a definitive auth failure (no/expired refresh token, invalid_grant) → needsReauth;
+            // a transient failure (network offline, timeout) → .offline, which is recoverable and doesn't
+            // strand the source amber. Missing-token on first launch is a no-op (source doesn't exist yet).
             if let s = (try? LibraryStore.source(id: account, ctx)) ?? nil {
-                s.state = SourceState.needsReauth.rawValue
+                s.state = Self.degradedState(for: error).rawValue
                 index.rebuild(from: ctx)
             }
             throw error
+        }
+    }
+
+    /// Map a token-acquisition error to the source state it should leave behind.
+    static func degradedState(for error: Error) -> SourceState {
+        switch error {
+        case OAuthError.noRefreshToken, OAuthError.noStoredToken:
+            return .needsReauth
+        case let ns as NSError where ns.domain == "OAuth" && (ns.code == 400 || ns.code == 401):
+            return .needsReauth   // invalid_grant / unauthorized — the refresh token is dead
+        case is URLError:
+            return .offline       // network blip — recoverable, don't strand the source
+        default:
+            return .offline       // unknown → assume transient rather than permanently wedge
         }
     }
 
