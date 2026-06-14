@@ -1,6 +1,13 @@
 import Foundation
 
-enum DriveAudioMime { static func isAudio(_ m: String) -> Bool { m.hasPrefix("audio/") } }
+enum DriveAudioMime {
+    static func isAudio(_ m: String) -> Bool { m.hasPrefix("audio/") }
+    private static let audioExtensions: Set<String> = ["mp3","m4a","aac","wav","aif","aiff","flac","alac","ogg","caf"]
+    static func isAudioByExtension(_ name: String) -> Bool {
+        let ext = (name as NSString).pathExtension.lowercased()
+        return audioExtensions.contains(ext)
+    }
+}
 struct DriveFile: Decodable, Equatable { var id: String; var name: String; var mimeType: String }
 struct DriveListPage: Equatable { var folders: [DriveFile]; var tracks: [DriveFile]; var nextPageToken: String? }
 
@@ -11,13 +18,20 @@ struct DriveAPIClient {
         struct R: Decodable { var nextPageToken: String?; var files: [DriveFile]? }
         let r = try JSONDecoder().decode(R.self, from: data)
         let files = r.files ?? []
-        return DriveListPage(folders: files.filter { $0.mimeType == folderMime },
-                             tracks: files.filter { DriveAudioMime.isAudio($0.mimeType) },
-                             nextPageToken: r.nextPageToken)
+        let folders = files.filter { $0.mimeType == folderMime }
+        let tracks = files.filter { f in
+            // Drop folder type and all Google-native doc types.
+            guard f.mimeType != folderMime, !f.mimeType.hasPrefix("application/vnd.google-apps.") else { return false }
+            // Accept if the mimeType is audio/* OR the filename carries a known audio extension
+            // (Drive often reports uploaded audio files as application/octet-stream).
+            return DriveAudioMime.isAudio(f.mimeType) || DriveAudioMime.isAudioByExtension(f.name)
+        }
+        return DriveListPage(folders: folders, tracks: tracks, nextPageToken: r.nextPageToken)
     }
     static func listRequest(parentId: String, pageToken: String?, accessToken: String) -> URLRequest {
+        let p = parentId.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
         var c = URLComponents(string: "https://www.googleapis.com/drive/v3/files")!
-        c.queryItems = [.init(name: "q", value: "'\(parentId)' in parents and trashed=false"),
+        c.queryItems = [.init(name: "q", value: "'\(p)' in parents and trashed=false"),
                         .init(name: "fields", value: "nextPageToken,files(id,name,mimeType)"),
                         .init(name: "pageSize", value: "1000")]
         if let pageToken { c.queryItems?.append(.init(name: "pageToken", value: pageToken)) }
