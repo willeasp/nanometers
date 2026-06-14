@@ -45,6 +45,11 @@ struct Goniometer: View {
         guard w > 2, h > 2 else { return }
         let cx = w / 2, cy = h / 2
         let radius = min(w, h) / 2 - 8
+        // Plot scale: m=(L+R)/√2, s=(L−R)/√2 is an energy-preserving 45° rotation, so the |L|,|R|≤1 input
+        // square maps to a diamond whose far corners (full-scale mono / anti-phase) sit at √2·radius. Scale
+        // the plot by 1/√2 so those corners land exactly on the diamond guide (drawn at `radius`) — nothing
+        // ever escapes the view, and the diamond reads as the true full-scale boundary.
+        let plotR = radius * 0.70710677
 
         // faint diamond + cross guide (white@6%)
         var guide = Path()
@@ -75,8 +80,8 @@ struct Goniometer: View {
         for i in 0..<n {
             let m = (l[i] + r[i]) * 0.7071
             let s = (l[i] - r[i]) * 0.7071
-            let x = cx + CGFloat(s) * radius * fade
-            let y = cy - CGFloat(m) * radius * fade
+            let x = cx + CGFloat(s) * plotR * fade
+            let y = cy - CGFloat(m) * plotR * fade
             let b = 0.16 + 0.45 * Double(abs(m) + abs(s))     // pre-fade brightness
             let t = min(1, max(0, (b - bMin) / (bMax - bMin)))
             let bi = min(buckets - 1, Int(t * Double(buckets)))
