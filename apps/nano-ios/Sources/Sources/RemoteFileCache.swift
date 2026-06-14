@@ -5,6 +5,8 @@ import Foundation
 /// the cache is testable without network.
 actor RemoteFileCache {
     private let dir: URL; private let maxBytes: Int
+    /// Dedup map: collapses concurrent downloads of the same (sourceId, fileId) to a single Task.
+    private var inFlight: [String: Task<URL, Error>] = [:]
     init(directory: URL, maxBytes: Int = 512 * 1024 * 1024) {
         self.dir = directory; self.maxBytes = maxBytes
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -14,24 +16,42 @@ actor RemoteFileCache {
     nonisolated func isCached(sourceId: String, fileId: String) -> Bool {
         FileManager.default.fileExists(atPath: dir.appendingPathComponent(("\(sourceId)__\(fileId)".addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "")).path)
     }
-    func localURL(sourceId: String, fileId: String, downloader: () async throws -> Data) async throws -> URL {
+    func localURL(sourceId: String, fileId: String, downloader: @escaping () async throws -> Data) async throws -> URL {
         let url = fileURL(sourceId, fileId)
+        // Cache hit: touch to update LRU order and return immediately.
         if FileManager.default.fileExists(atPath: url.path) { touch(url); return url }
-        let data = try await downloader()
-        try data.write(to: url)
-        touch(url)
-        evictIfNeeded()
-        return url
+        // Dedup: if a download for this key is already in flight, piggyback on it.
+        let k = key(sourceId, fileId)
+        if let existing = inFlight[k] { return try await existing.value }
+        // New download: create, register, run, then always unregister.
+        let task = Task<URL, Error> {
+            let data = try await downloader()
+            try data.write(to: url)
+            touch(url)
+            evictIfNeeded(keepURL: url)
+            return url
+        }
+        inFlight[k] = task
+        defer { inFlight[k] = nil }
+        return try await task.value
     }
     private func touch(_ url: URL) { try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: url.path) }
-    private func evictIfNeeded() {
+    private func evictIfNeeded(keepURL: URL) {
         let fm = FileManager.default
         var files = (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey])) ?? []
         func size(_ u: URL) -> Int { (try? u.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0 }
         func mtime(_ u: URL) -> Date { (try? u.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast }
         var total = files.reduce(0) { $0 + size($1) }
+        // If a single file already exceeds the entire budget, skip eviction — there's nothing to evict.
+        guard total > maxBytes else { return }
         files.sort { mtime($0) < mtime($1) }   // oldest first
         var i = 0
-        while total > maxBytes, i < files.count { total -= size(files[i]); try? fm.removeItem(at: files[i]); i += 1 }
+        while total > maxBytes, i < files.count {
+            let candidate = files[i]; i += 1
+            // Never evict the file we just wrote.
+            guard candidate.standardizedFileURL != keepURL.standardizedFileURL else { continue }
+            total -= size(candidate)
+            try? fm.removeItem(at: candidate)
+        }
     }
 }
