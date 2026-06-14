@@ -38,8 +38,8 @@ const OUT_POINTS: usize = (POINTS - 1) * SUBDIV + 1;
 /// inside.
 const GAIN: f32 = 1.0;
 /// Fraction of the column height reserved at the BOTTOM for the correlation meter; the goniometer
-/// square fills the area above it.
-const BAND_FRAC: f32 = 0.14;
+/// square fills the area above it. Sized so the track clears the diamond above and the number below.
+const BAND_FRAC: f32 = 0.18;
 /// Additive glow instances for the signal: layer 0 is the crisp core, the rest a dim offset ring.
 const GLOW_LAYERS: u32 = 5;
 
@@ -49,8 +49,9 @@ const FRAME_RGBA: [f32; 4] = [0.24, 0.28, 0.36, 0.5]; // diamond + center line +
 const VALUE_RGBA: [f32; 4] = [0.55, 0.85, 1.0, 0.95]; // the correlation value tick
 const TEXT_COLOR: [f32; 4] = [0.78, 0.84, 0.95, 1.0];
 
-/// Correlation meter, in raw clip space: a track along the bottom band.
-const METER_Y: f32 = -0.9;
+/// Correlation meter, in raw clip space: a track in the UPPER part of the bottom band — high enough to
+/// clear the number sitting at the very bottom edge.
+const METER_Y: f32 = -0.78;
 const METER_HALF: f32 = 0.82; // track spans clip x ∈ [−METER_HALF, +METER_HALF]
 
 #[repr(C)]
@@ -358,7 +359,7 @@ impl Module for StereometerModule {
         }
         let text = format!("{:+.2}", self.corr_value);
         let section = Section::default()
-            .with_screen_position((w * 0.5, h - 11.0 * scale))
+            .with_screen_position((w * 0.5, h - 10.0 * scale))
             .with_layout(
                 Layout::default_single_line()
                     .h_align(HorizontalAlign::Center)
