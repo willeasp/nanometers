@@ -7,14 +7,17 @@ import SwiftData
 /// Shows connected sources → NavigationLink to detail; "Add Source…" row.
 struct SourcesSettingsSection: View {
     @Query(sort: \Source.canonicalOrder) private var sources: [Source]
+    @Query private var allRoots: [RootFolder]
     @Environment(LibraryIndex.self) private var index
     let manager: SourcesManager
 
     var body: some View {
         Section {
             ForEach(sources) { source in
+                let n = allRoots.filter { $0.sourceId == source.id }.count
+                let t = index.sourceCounts[source.id]?.tracks ?? 0
                 NavigationLink(value: SourceDetailDest(source: source)) {
-                    SourceSettingsRow(source: source, counts: index.sourceCounts[source.id] ?? .init())
+                    SourceSettingsRow(source: source, rootCount: n, trackCount: t)
                 }
                 .listRowBackground(Color.clear)
             }
@@ -94,21 +97,41 @@ struct SourceDetailView: View {
             // Root Folders
             Section {
                 if roots.isEmpty {
-                    Text("No root folders added yet.")
+                    Text("Add a root folder to start browsing this source.")
                         .font(Theme.sans(14))
                         .foregroundStyle(Theme.text3)
                         .listRowBackground(Color.clear)
                 } else {
                     ForEach(roots) { root in
+                        let rootNodeId = root.providerFolderId ?? root.nodeId ?? ""
+                        let fc = index.folderCounts[rootNodeId]
                         HStack {
                             Image(systemName: "folder")
                                 .font(.system(size: 16))
                                 .foregroundStyle(Color(hex: source.tintHex))
                                 .frame(width: 24)
-                            Text(root.name)
-                                .font(Theme.sans(15))
-                                .foregroundStyle(Theme.text)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(root.name)
+                                    .font(Theme.sans(15))
+                                    .foregroundStyle(Theme.text)
+                                if let fc {
+                                    let f = fc.folders, t = fc.tracks
+                                    Text("\(f) \(f == 1 ? "folder" : "folders") · \(t) \(t == 1 ? "track" : "tracks")")
+                                        .font(Theme.mono(11))
+                                        .foregroundStyle(Theme.text3)
+                                }
+                            }
                             Spacer()
+                            // Always-visible inline trash (confirmation via role: .destructive alert).
+                            Button(role: .destructive) {
+                                manager.removeRoot(root)
+                            } label: {
+                                Image(systemName: "trash")
+                                    .font(.system(size: 15))
+                                    .foregroundStyle(Theme.text3)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Remove \(root.name)")
                         }
                         .frame(minHeight: 44)
                         .swipeActions(edge: .trailing) {
@@ -184,6 +207,8 @@ struct SourceDetailView: View {
             FolderPicker { url, bookmark in
                 showFolderPicker = false
                 let rootName = url.lastPathComponent
+                // Use the same deterministic id as DirectoryEnumerator (stable across relaunches).
+                let rootId = DirectoryEnumerator.stableId(url.standardizedFileURL.path)
                 let provider = LocalSourceProvider(kind: kind)
                 isEnumerating = true
                 enumerationError = nil
@@ -194,13 +219,13 @@ struct SourceDetailView: View {
                             rootBookmark: bookmark,
                             providerFolderId: nil,
                             rootName: rootName,
-                            rootId: "local:\(String(url.path.hashValue, radix: 16))"
+                            rootId: rootId
                         )
                         manager.applyEnumeration(
                             result,
                             sourceId: source.id,
                             rootName: rootName,
-                            rootNodeId: "local:\(String(url.path.hashValue, radix: 16))",
+                            rootNodeId: rootId,
                             rootBookmark: bookmark
                         )
                     } catch {
@@ -247,7 +272,7 @@ struct AddSourceView: View {
     var body: some View {
         List {
             Section {
-                ForEach(SourceKind.allCases, id: \.rawValue) { kind in
+                ForEach(SourceKind.allCases.sorted { $0.canonicalOrder < $1.canonicalOrder }, id: \.rawValue) { kind in
                     let isConnected = connectedKinds.contains(kind)
                     AddSourceRow(kind: kind, isConnected: isConnected, manager: manager)
                         .listRowBackground(Color.clear)
@@ -357,7 +382,8 @@ struct ConnectDetailBridge: View {
 
 private struct SourceSettingsRow: View {
     let source: Source
-    var counts: LibraryIndex.Counts = .init()
+    var rootCount: Int = 0
+    var trackCount: Int = 0
 
     private var kind: SourceKind { SourceKind(rawValue: source.kind) ?? .local }
     private var state: SourceState { SourceState(rawValue: source.state) ?? .offline }
@@ -389,9 +415,8 @@ private struct SourceSettingsRow: View {
     }
 
     private var subtitleText: String {
-        let f = counts.folders, t = counts.tracks
-        if f == 0 { return "\(t) tracks" }
-        return "\(f) folders · \(t) tracks"
+        let n = rootCount, t = trackCount
+        return "\(n) root \(n == 1 ? "folder" : "folders") · \(t) \(t == 1 ? "track" : "tracks")"
     }
 }
 
