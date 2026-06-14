@@ -100,6 +100,68 @@ final class AudioEngineTests: XCTestCase {
         engine.setVolume(-0.3); XCTAssertEqual(engine.volume, 0.0, accuracy: 1e-6)
     }
 
+    /// Regression (FIX 5): a slow remote download for track A must not start playback of A if
+    /// the user has already switched to track B. The load-generation guard detects the superseded
+    /// load and bails; `current` must be B (not A) and A's `isPreparing` must not have cleared B's.
+    ///
+    /// We use a real-file B (bundled-name path, synchronous) to ensure B is actually loaded when
+    /// A's slow provider resolves. A has a slow provider that resolves AFTER we've loaded B.
+    func test_loadGeneration_staleRemoteLoad_doesNotSupersedeCurrent() async throws {
+        // Write a silent WAV for track B that AudioEngine can open synchronously.
+        let urlB = FileManager.default.temporaryDirectory
+            .appendingPathComponent("GenGuard_B_\(UUID().uuidString).wav")
+        defer { try? FileManager.default.removeItem(at: urlB) }
+        try Self.writeSine(to: urlB, seconds: 2.0, frequency: 220)
+        let bmB = try urlB.bookmarkData()
+
+        let engine = AudioEngine()
+
+        // Track A: a cloud track (needsRemotePrep → true); its provider is slow.
+        let trackA = Track(title: "CloudA", artist: "", album: "")
+        trackA.providerFileId = "a1"
+        trackA.sourceId = "gdrive"
+
+        // Track B: a local track with a real bookmark; loads synchronously.
+        let trackB = Track(title: "LocalB", artist: "", album: "", bookmark: bmB)
+
+        // Continuation to signal that A's provider has been entered (we can then load B).
+        let aContinuation = AsyncStream<Void>.makeStream()
+        var aContinuationIterator = aContinuation.stream.makeAsyncIterator()
+
+        // Wire a slow provider: yields to let the test proceed, then resolves to nil
+        // (we don't have a real file for A; nil means "selection only", which is fine — the
+        // generation guard fires before reaching loadFromURL regardless).
+        engine.remoteURLProvider = { track in
+            aContinuation.continuation.yield(())   // signal: A's download has started
+            // Pause long enough for the test to load B (B loads synchronously, no delay needed).
+            try? await Task.sleep(nanoseconds: 100_000_000)   // 100 ms
+            return nil   // provider resolves; generation guard must block this from applying
+        }
+
+        // Start loading A (async, hits the slow provider).
+        engine.play(trackA, in: [trackA, trackB], context: .library)
+        XCTAssertEqual(engine.current?.id, trackA.id, "A must be reflected as current immediately")
+
+        // Wait until A's remote Task has actually called the provider (it's in flight now).
+        await aContinuationIterator.next()
+
+        // Switch to B while A is still downloading.
+        engine.play(trackB, in: [trackA, trackB], context: .library)
+
+        // B loads synchronously; current must already be B.
+        XCTAssertEqual(engine.current?.id, trackB.id, "B must be current after play(B)")
+
+        // Let A's slow provider finish and the generation guard do its job.
+        try await Task.sleep(nanoseconds: 200_000_000)   // 200 ms > A's 100 ms delay
+
+        // B must still be current — A's stale completion must not have overwritten it.
+        XCTAssertEqual(engine.current?.id, trackB.id,
+                       "A's stale remote load must not overwrite B as current")
+        // isPreparing must be false: B is a local track, no prep in flight.
+        XCTAssertFalse(engine.isPreparing,
+                       "isPreparing must be false after B (local) is loaded")
+    }
+
     /// Writes `seconds` of a mono 44.1k float-WAV sine. The `AVAudioFile` writer is out of scope on
     /// return, so the file's header is finalized and it's immediately readable.
     private static func writeSine(to url: URL, seconds: Double, frequency: Double) throws {

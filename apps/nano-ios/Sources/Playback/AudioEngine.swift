@@ -34,6 +34,10 @@ final class AudioEngine {
     /// Injected by the app wiring to download a cloud track to a local cache URL. Nil in tests.
     /// Called only for tracks where `needsRemotePrep` is true.
     var remoteURLProvider: ((Track) async -> URL?)? = nil
+    /// Monotonic counter incremented on every `loadAndStart` call. The remote Task captures
+    /// its generation at launch and bails (without touching isPreparing or playback) if it
+    /// discovers a newer load has superseded it — prevents A→B rapid-switch from playing A.
+    private var loadGeneration = 0
 
     var isRepeat: Bool {
         get { queue.isRepeat }
@@ -139,6 +143,13 @@ final class AudioEngine {
     // MARK: Loading / scheduling
 
     private func loadAndStart(_ track: Track) {
+        // Bump the generation counter so any previously-launched remote Task can detect it's stale.
+        loadGeneration &+= 1
+        let gen = loadGeneration
+        // A new load always supersedes any prior remote prep — clear it immediately so the local/
+        // synchronous path doesn't inherit a stale isPreparing=true from a previous cloud load.
+        isPreparing = false
+
         // Remote cloud track: hand off to the async download path if a provider is set.
         if Self.needsRemotePrep(track), let provider = remoteURLProvider {
             // Reflect the selection immediately so the UI shows which track is loading.
@@ -153,6 +164,9 @@ final class AudioEngine {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 let url = await provider(track)
+                // Guard: if the user switched tracks while we were downloading, this load is stale —
+                // bail WITHOUT clearing isPreparing (the new load set it; we must not reset it).
+                guard gen == self.loadGeneration else { return }
                 self.isPreparing = false
                 if let url {
                     self.loadFromURL(url, track: track)
