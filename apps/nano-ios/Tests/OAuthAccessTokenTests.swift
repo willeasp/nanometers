@@ -9,7 +9,7 @@ final class OAuthAccessTokenTests: XCTestCase {
 
     private let config = OAuthConfig(
         clientID: "cid",
-        redirectScheme: "com.googleusercontent.apps.cid",
+        redirectURI: "com.googleusercontent.apps.cid:/oauth",
         authEndpoint: URL(string: "https://auth")!,
         tokenEndpoint: URL(string: "https://token")!,
         scopes: []

@@ -8,7 +8,7 @@ import XCTest
 /// `store.save(refreshed, ...)`; this locks that in.
 final class TokenRefreshRotationTests: XCTestCase {
     private let config = OAuthConfig(
-        clientID: "cid", redirectScheme: "s",
+        clientID: "cid", redirectURI: "s:/oauth",
         authEndpoint: URL(string: "https://auth")!,
         tokenEndpoint: URL(string: "https://token")!,
         scopes: [])

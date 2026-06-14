@@ -24,7 +24,7 @@ final class SourcesManagerTests: XCTestCase {
         let store = InMemoryTokenStore()
         try store.save(OAuthToken(accessToken: "AT", refreshToken: "RT",
                                   expiry: Date(timeIntervalSinceNow: 3600)), account: "gdrive")
-        let cfg = OAuthConfig(clientID: "cid", redirectScheme: "s", authEndpoint: URL(string: "https://a")!,
+        let cfg = OAuthConfig(clientID: "cid", redirectURI: "s:/oauth", authEndpoint: URL(string: "https://a")!,
                               tokenEndpoint: URL(string: "https://t")!, scopes: [])
         let token = try await mgr.accessToken(for: .gdrive, config: cfg,
                                               client: OAuthClient(config: cfg, http: MockHTTPClient(responses: [])),
@@ -148,7 +148,7 @@ final class SourcesManagerTests: XCTestCase {
 
         let config = OAuthConfig(
             clientID: "cid",
-            redirectScheme: "com.googleusercontent.apps.cid",
+            redirectURI: "com.googleusercontent.apps.cid:/oauth",
             authEndpoint: URL(string: "https://auth")!,
             tokenEndpoint: URL(string: "https://token")!,
             scopes: []

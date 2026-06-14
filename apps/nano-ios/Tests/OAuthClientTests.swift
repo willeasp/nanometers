@@ -5,7 +5,7 @@ final class OAuthClientTests: XCTestCase {
     func test_exchange_postsCodeVerifierAndParsesTokens() async throws {
         let http = MockHTTPClient(responses: [
             .init(json: #"{"access_token":"AT","refresh_token":"RT","expires_in":3600}"#)])
-        let cfg = OAuthConfig(clientID: "cid", redirectScheme: "com.googleusercontent.apps.cid",
+        let cfg = OAuthConfig(clientID: "cid", redirectURI: "com.googleusercontent.apps.cid:/oauth",
                               authEndpoint: URL(string: "https://auth")!, tokenEndpoint: URL(string: "https://token")!,
                               scopes: ["drive.readonly"])
         let client = OAuthClient(config: cfg, http: http)
@@ -19,7 +19,7 @@ final class OAuthClientTests: XCTestCase {
     }
     func test_refresh_usesRefreshToken_keepsOldRefreshIfOmitted() async throws {
         let http = MockHTTPClient(responses: [.init(json: #"{"access_token":"AT2","expires_in":3600}"#)])
-        let cfg = OAuthConfig(clientID: "cid", redirectScheme: "s", authEndpoint: URL(string: "https://a")!,
+        let cfg = OAuthConfig(clientID: "cid", redirectURI: "s:/oauth", authEndpoint: URL(string: "https://a")!,
                               tokenEndpoint: URL(string: "https://token")!, scopes: [])
         let client = OAuthClient(config: cfg, http: http)
         let tok = try await client.refresh(refreshToken: "RT")
@@ -27,7 +27,7 @@ final class OAuthClientTests: XCTestCase {
         XCTAssertTrue((http.lastBody ?? "").contains("grant_type=refresh_token"))
     }
     func test_authorizeURL_carriesPKCEAndState() {
-        let cfg = OAuthConfig(clientID: "cid", redirectScheme: "s", authEndpoint: URL(string: "https://auth")!,
+        let cfg = OAuthConfig(clientID: "cid", redirectURI: "s:/oauth", authEndpoint: URL(string: "https://auth")!,
                               tokenEndpoint: URL(string: "https://t")!, scopes: ["drive.readonly"])
         let url = OAuthClient(config: cfg, http: MockHTTPClient(responses: []))
             .authorizeURL(challenge: "CH", state: "ST", redirectURI: "s:/oauth")
@@ -41,7 +41,7 @@ final class OAuthClientTests: XCTestCase {
         // Without access_type=offline Google never issues a refresh token (the source dies ~1h after
         // connect); without prompt=consent a re-auth can't re-issue one. These now ride through
         // extraAuthParams rather than being hardcoded in authorizeURL.
-        let cfg = OAuthConfig(clientID: "cid", redirectScheme: "s", authEndpoint: URL(string: "https://auth")!,
+        let cfg = OAuthConfig(clientID: "cid", redirectURI: "s:/oauth", authEndpoint: URL(string: "https://auth")!,
                               tokenEndpoint: URL(string: "https://t")!, scopes: ["drive.readonly"],
                               extraAuthParams: ["access_type": "offline", "prompt": "consent"])
         let url = OAuthClient(config: cfg, http: MockHTTPClient(responses: []))
@@ -52,7 +52,7 @@ final class OAuthClientTests: XCTestCase {
     }
     func test_authorizeURL_microsoft_noAccessType_hasSelectAccount() {
         // Microsoft uses prompt=select_account and must NOT carry Google's access_type param.
-        let cfg = OAuthConfig(clientID: "cid", redirectScheme: "s", authEndpoint: URL(string: "https://auth")!,
+        let cfg = OAuthConfig(clientID: "cid", redirectURI: "s:/oauth", authEndpoint: URL(string: "https://auth")!,
                               tokenEndpoint: URL(string: "https://t")!, scopes: ["Files.Read"],
                               extraAuthParams: ["prompt": "select_account"])
         let url = OAuthClient(config: cfg, http: MockHTTPClient(responses: []))

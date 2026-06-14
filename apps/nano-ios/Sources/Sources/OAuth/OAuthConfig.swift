@@ -4,13 +4,16 @@ import Foundation
 /// client id) + the reversed-id CFBundleURLTypes scheme. Change both, then run `xcodegen generate`
 /// (see docs/google-drive-setup.md). Microsoft injects MicrosoftOAuthClientID + MicrosoftOAuthRedirectScheme.
 struct OAuthConfig {
-    var clientID: String; var redirectScheme: String
+    var clientID: String
+    /// The full OAuth `redirect_uri` and the single source of truth for the redirect. Google uses the
+    /// reversed-id `<scheme>:/oauth` form; Microsoft uses `<scheme>://auth`. `redirectScheme` (the
+    /// ASWebAuthenticationSession callback scheme) is derived from this, so the two can never drift.
+    var redirectURI: String
     var authEndpoint: URL; var tokenEndpoint: URL; var scopes: [String]
     /// Provider-specific authorize params (Google: access_type/prompt; Microsoft: prompt=select_account).
     var extraAuthParams: [String: String] = [:]
-    /// Microsoft needs a custom redirect (`scheme://auth`); Google keeps the reversed-id `:/oauth` form.
-    var redirectURIOverride: String? = nil
-    var redirectURI: String { redirectURIOverride ?? "\(redirectScheme):/oauth" }
+    /// The callback scheme is the scheme of `redirectURI` — everything before the first ':'.
+    var redirectScheme: String { String(redirectURI.prefix { $0 != ":" }) }
     static let placeholder = "YOUR_GOOGLE_IOS_CLIENT_ID"
     static let microsoftPlaceholder = "YOUR_MICROSOFT_CLIENT_ID"
     var isConfigured: Bool { !clientID.isEmpty && clientID != Self.placeholder && clientID != Self.microsoftPlaceholder }
@@ -27,7 +30,7 @@ struct OAuthConfig {
         // access_type=offline → Google issues a refresh_token; prompt=consent forces the consent screen
         // so re-auth (Reconnect) re-issues one (Google only returns a refresh token on first consent
         // otherwise). Without these the source dies ~1h after connecting.
-        return OAuthConfig(clientID: id, redirectScheme: reversedScheme(for: id),
+        return OAuthConfig(clientID: id, redirectURI: "\(reversedScheme(for: id)):/oauth",
                            authEndpoint: URL(string: "https://accounts.google.com/o/oauth2/v2/auth")!,
                            tokenEndpoint: URL(string: "https://oauth2.googleapis.com/token")!,
                            scopes: ["https://www.googleapis.com/auth/drive.readonly"],
@@ -43,12 +46,11 @@ struct OAuthConfig {
         let scheme = (Bundle.main.object(forInfoDictionaryKey: "MicrosoftOAuthRedirectScheme") as? String) ?? "msauth.com.willeasp.nanometers.ios"
         // prompt=select_account lets the user pick / switch the Microsoft account on (re)connect.
         // offline_access scope → Graph issues a refresh_token.
-        return OAuthConfig(clientID: id, redirectScheme: scheme,
+        return OAuthConfig(clientID: id, redirectURI: "\(scheme)://auth",
                            authEndpoint: URL(string: "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize")!,
                            tokenEndpoint: URL(string: "https://login.microsoftonline.com/consumers/oauth2/v2.0/token")!,
                            scopes: ["Files.Read", "offline_access"],
-                           extraAuthParams: ["prompt": "select_account"],
-                           redirectURIOverride: "\(scheme)://auth")
+                           extraAuthParams: ["prompt": "select_account"])
     }
     /// "<n>-<hash>.apps.googleusercontent.com" → "com.googleusercontent.apps.<n>-<hash>".
     static func reversedScheme(for clientID: String) -> String {
