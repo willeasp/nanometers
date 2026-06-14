@@ -61,9 +61,9 @@ struct RootView: View {
         .task {
             libIndex.rebuild(from: ctx)
             // Wire the remote URL provider so cloud tracks download to the on-disk cache before play.
-            // Guard on isConfigured: if no Google client ID is set, Drive Connect is disabled
+            // Guard on isConfigured: if neither cloud client ID is set, cloud Connect is disabled
             // anyway, so we never get a cloud track with a providerFileId to resolve.
-            if OAuthConfig.google.isConfigured {
+            if OAuthConfig.google.isConfigured || OAuthConfig.microsoft.isConfigured {
                 engine.remoteURLProvider = makeRemoteURLProvider(ctx: ctx, index: libIndex)
             }
         }
@@ -132,8 +132,9 @@ struct RootView: View {
 /// `WaveformAnalyzer` consume it exactly like a local file. Called only for tracks where
 /// `AudioEngine.needsRemotePrep` returns true (cloud tracks with `providerFileId` set).
 ///
-/// Only assembled when `OAuthConfig.google.isConfigured` so the placeholder client ID never triggers
-/// a live network call (no token exists, and Drive Connect is disabled until the user sets a real id).
+/// Only assembled when a cloud provider is configured (`OAuthConfig.google` or `.microsoft`) so a
+/// placeholder client ID never triggers a live network call (no token exists, and cloud Connect is
+/// disabled until the user sets a real id).
 @MainActor
 private func makeRemoteURLProvider(ctx: ModelContext, index: LibraryIndex) -> (Track) async -> URL? {
     // The cache directory lives in Caches/remote — eviction by the LRU (512 MB default).
@@ -153,8 +154,19 @@ private func makeRemoteURLProvider(ctx: ModelContext, index: LibraryIndex) -> (T
         if let k = SourceKind(rawValue: sourceId) { kind = k }
         else { return nil }
 
-        guard kind == .gdrive else {
-            // Non-Drive cloud providers not yet wired; return nil (AudioEngine will log).
+        // Per-kind config + content request: Drive uses the media endpoint, OneDrive the Graph /content
+        // endpoint. Everything below (token fetch, cache, 401 retry) is provider-agnostic.
+        let config: OAuthConfig
+        let makeRequest: (String, String) -> URLRequest
+        switch kind {
+        case .gdrive:
+            config = .google
+            makeRequest = { fileId, token in DriveAPIClient.mediaRequest(fileId: fileId, accessToken: token, offset: 0) }
+        case .onedrive:
+            config = .microsoft
+            makeRequest = { fileId, token in GraphAPIClient.contentRequest(fileId: fileId, accessToken: token) }
+        default:
+            // Non-cloud / unwired providers; return nil (AudioEngine will log).
             return nil
         }
 
@@ -163,14 +175,13 @@ private func makeRemoteURLProvider(ctx: ModelContext, index: LibraryIndex) -> (T
         // Build a fresh SourcesManager / OAuthClient / token store each call (stateless);
         // TokenRefreshCoordinator.shared serialises concurrent refreshes across all SourcesManager instances.
         let mgr = SourcesManager(ctx: ctx, index: index)
-        let config = OAuthConfig.google
         let oauthClient = OAuthClient(config: config, http: URLSessionHTTPClient())
         let tokenStore = KeychainTokenStore()
 
         /// Helper: download `fileId` with `accessToken`, returning raw Data.
         /// Throws an NSError on non-200; callers detect 401 to trigger a forced refresh+retry.
         func download(accessToken: String) async throws -> Data {
-            let req = DriveAPIClient.mediaRequest(fileId: fileId, accessToken: accessToken, offset: 0)
+            let req = makeRequest(fileId, accessToken)
             let (data, response) = try await URLSession.shared.data(for: req)
             guard let http = response as? HTTPURLResponse else {
                 throw NSError(domain: "RemoteURLProvider", code: -1,
