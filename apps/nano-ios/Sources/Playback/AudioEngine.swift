@@ -230,6 +230,9 @@ final class AudioEngine {
             file = f
             totalFrames = f.length
             sampleRate = f.processingFormat.sampleRate
+            if track.durationSec <= 0, sampleRate > 0 {           // backfill: Drive (and enumerated-folder) tracks carry no
+                track.durationSec = Double(f.length) / sampleRate // metadata duration, and the close-up scope gates on duration > 0
+            }
             engine.connect(player, to: engine.mainMixerNode, format: f.processingFormat)
             if !engine.isRunning { try engine.start() }
             schedule(f, from: 0)
