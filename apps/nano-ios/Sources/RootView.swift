@@ -171,7 +171,13 @@ private func makeRemoteURLProvider(ctx: ModelContext, index: LibraryIndex) -> (T
                                                    tokenStore: tokenStore)
             let url = try await cache.localURL(sourceId: sourceId, fileId: fileId) {
                 let req = DriveAPIClient.mediaRequest(fileId: fileId, accessToken: token, offset: 0)
-                let (data, _) = try await URLSession.shared.data(for: req)
+                let (data, response) = try await URLSession.shared.data(for: req)
+                guard let http = response as? HTTPURLResponse,
+                      (200..<300).contains(http.statusCode) else {
+                    let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+                    throw NSError(domain: "RemoteURLProvider", code: code,
+                                  userInfo: [NSLocalizedDescriptionKey: "HTTP \(code) downloading \(fileId)"])
+                }
                 return data
             }
             return url
