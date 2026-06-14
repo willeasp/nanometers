@@ -102,6 +102,7 @@ final class AudioEngine {
     /// `scopeWindow` reads a window ending at an absolute frame the meter's `ScopeCursor` advances at
     /// display rate. See `LiveScopeTap`.
     var scopeWritten: Int { scopeTap.written }
+    var scopeBuffered: Int { scopeTap.buffered }
     var scopeRate: Double { scopeTap.sampleRate }
     func scopeWindow(endingAt end: Int, count: Int) -> (l: [Float], r: [Float], sampleRate: Double) {
         scopeTap.window(endingAt: end, count: count)

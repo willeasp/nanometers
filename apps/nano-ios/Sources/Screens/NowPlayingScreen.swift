@@ -42,6 +42,7 @@ struct NowPlayingScreen: View {
                              onScrub: { engine.seek(toFraction: $0) },
                              liveSamples: { engine.liveScope($0) },
                              scopeWritten: { engine.scopeWritten },
+                             scopeBuffered: { engine.scopeBuffered },
                              scopeRate: { engine.scopeRate },
                              scopeWindow: { engine.scopeWindow(endingAt: $0, count: $1) },
                              isPlaying: engine.isPlaying,

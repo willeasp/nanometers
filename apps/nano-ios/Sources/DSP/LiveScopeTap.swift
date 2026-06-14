@@ -18,9 +18,10 @@ final class LiveScopeTap: @unchecked Sendable {
     }
     private let lock: OSAllocatedUnfairLock<State>
 
-    /// Capacity ≥ the largest read span. The goniometer's `ScopeCursor` can read up to ~maxLag (0.30 s)
-    /// + its window behind the head, so size for ~0.5 s of stereo frames (≈ 24k @ 48 kHz) with slack —
-    /// well above the spectrum's 2048-frame FFT window too.
+    /// Buffer depth for the smooth-scan. ~0.5 s of stereo frames at 48 kHz (and ≥ 0.25 s up to 96 kHz),
+    /// comfortably above the spectrum's 2048-frame FFT window. Correctness doesn't depend on this being
+    /// large enough for the cursor's max trailing window at any rate — the goniometer clamps its read to
+    /// the oldest buffered frame — so this only sets how much history the cursor can scan smoothly.
     init(capacity: Int = 24_000) {
         self.capacity = capacity
         lock = OSAllocatedUnfairLock(
@@ -49,6 +50,7 @@ final class LiveScopeTap: @unchecked Sendable {
     /// Total frames ever written (monotonic) and the current sample rate — the absolute clock the
     /// goniometer's `ScopeCursor` scans against so it can animate smoothly between chunky tap deliveries.
     var written: Int { lock.withLock { $0.total } }
+    var buffered: Int { lock.withLock { $0.count } }     // frames currently in the ring (≤ capacity)
     var sampleRate: Double { lock.withLock { $0.rate } }
 
     /// `count` frames ending at absolute frame `end` (exclusive), oldest→newest. Frames that have

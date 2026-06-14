@@ -10,6 +10,7 @@ struct Goniometer: View {
     /// plots raw samples, so reading "the newest N" would stutter at the tap's ~10 Hz delivery; instead
     /// it scans a window through the buffered history at display rate.
     var scopeWritten: () -> Int
+    var scopeBuffered: () -> Int     // frames currently in the ring — bounds the safe read window
     var scopeRate: () -> Double
     var scopeWindow: (_ endingAt: Int, _ count: Int) -> (l: [Float], r: [Float], sampleRate: Double)
     var isPlaying: Bool
@@ -23,8 +24,14 @@ struct Goniometer: View {
         TimelineView(.animation(paused: !active)) { timeline in
             Canvas { ctx, size in
                 let now = timeline.date.timeIntervalSinceReferenceDate
-                let end = cursor.endFrame(now: now, head: scopeWritten(), sampleRate: scopeRate())
-                let s = scopeWindow(end, windowFrames)
+                let head = scopeWritten()
+                let end = cursor.endFrame(now: now, head: head, sampleRate: scopeRate())
+                // Never read frames evicted from the ring. Rate-independent safety net: at very high
+                // sample rates the cursor's max trailing window can exceed the fixed ring depth, which
+                // would otherwise read zeros and collapse the cloud to center for a frame.
+                let oldest = head - scopeBuffered()
+                let safeEnd = max(end, min(head, oldest + windowFrames))
+                let s = scopeWindow(safeEnd, windowFrames)
                 fade.step(towardLive: isPlaying && !s.l.isEmpty)
                 draw(ctx, size, l: s.l, r: s.r, fade: CGFloat(fade.value))
             }
@@ -47,29 +54,38 @@ struct Goniometer: View {
         guide.move(to: CGPoint(x: cx - radius, y: cy)); guide.addLine(to: CGPoint(x: cx + radius, y: cy))
         ctx.stroke(guide, with: .color(.white.opacity(0.06)), lineWidth: 1)
 
-        let n = min(l.count, r.count)
-        guard n > 0, fade > 0.01 else { return }
-
-        // Bucket points by brightness and fill each bucket ONCE — keeps the per-amplitude phosphor look
-        // while collapsing ~1024 individual blended fills (slow) to a handful, so the cloud sustains the
-        // display rate even at the larger point count / on 120 Hz.
         var phosphor = ctx
         phosphor.blendMode = .plusLighter
         let dot: CGFloat = 1.6
+
+        // Center dot — the "alive but silent" idle indicator the cloud fades onto (§06D.2 idle decision).
+        phosphor.fill(Path(CGRect(x: cx - dot / 2, y: cy - dot / 2, width: dot, height: dot)),
+                      with: .color(Theme.accent.opacity(0.2)))
+
+        let n = min(l.count, r.count)
+        guard n > 0, fade > 0.01 else { return }            // idle → just the center dot
+
+        // Bucket points by brightness, fill each bucket ONCE — keeps the per-amplitude phosphor look
+        // while collapsing ~1024 individual blended fills to a handful (fast enough for 120 Hz). The
+        // representative opacity maps the bucket center back through the real brightness range AND keeps
+        // the `fade` factor, so the cloud genuinely dims (not just collapses) as it idles out.
         let buckets = 6
+        let bMin = 0.16, bMax = 0.85                          // per-point brightness floor … ~peak
         var paths = [Path](repeating: Path(), count: buckets)
         for i in 0..<n {
             let m = (l[i] + r[i]) * 0.7071
             let s = (l[i] - r[i]) * 0.7071
             let x = cx + CGFloat(s) * radius * fade
             let y = cy - CGFloat(m) * radius * fade
-            let a = (0.16 + 0.45 * Double(abs(m) + abs(s))) * Double(fade)
-            let bi = min(buckets - 1, max(0, Int(a * Double(buckets))))
+            let b = 0.16 + 0.45 * Double(abs(m) + abs(s))     // pre-fade brightness
+            let t = min(1, max(0, (b - bMin) / (bMax - bMin)))
+            let bi = min(buckets - 1, Int(t * Double(buckets)))
             paths[bi].addRect(CGRect(x: x - dot / 2, y: y - dot / 2, width: dot, height: dot))
         }
         for bi in 0..<buckets where !paths[bi].isEmpty {
-            let a = (Double(bi) + 0.5) / Double(buckets)        // bucket's representative brightness
-            phosphor.fill(paths[bi], with: .color(Theme.accent.opacity(min(1, max(0, a)))))
+            let center = (Double(bi) + 0.5) / Double(buckets)
+            let rep = (bMin + center * (bMax - bMin)) * Double(fade)   // bucket brightness, faded
+            phosphor.fill(paths[bi], with: .color(Theme.accent.opacity(min(1, max(0, rep)))))
         }
     }
 }
