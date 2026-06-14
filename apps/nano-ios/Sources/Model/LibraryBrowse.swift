@@ -1,6 +1,9 @@
 import Foundation
 import SwiftData
 
+struct SearchHit: Equatable { var track: Track; var pathLabel: String
+    static func == (a: SearchHit, b: SearchHit) -> Bool { a.track.id == b.track.id && a.pathLabel == b.pathLabel } }
+
 /// A pure, render-ready snapshot of the Library tab for the current `LibraryNav` (handoff §03). Views
 /// render this; all SwiftData reads happen here so the logic is unit-testable.
 struct BrowseContent {
@@ -113,5 +116,29 @@ enum LibraryBrowse {
         c.playAll = tracks
         c.sourceTint = Theme.accentHex
         return c
+    }
+
+    /// Filter the already-recursive `scope` tracks by `query` (case-insensitive over title/artist/album),
+    /// each hit annotated with its folder path. Empty/whitespace query → no hits (search is opt-in).
+    @MainActor
+    static func search(_ scope: [Track], query: String, nav: LibraryNav, index: LibraryIndex, ctx: ModelContext) -> [SearchHit] {
+        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !q.isEmpty else { return [] }
+        return scope.filter {
+            $0.title.lowercased().contains(q) || $0.artist.lowercased().contains(q) || $0.album.lowercased().contains(q)
+        }.map { SearchHit(track: $0, pathLabel: relativePath(for: $0, allSongs: nav.smart == .allSongs, index: index, ctx: ctx)) }
+    }
+
+    /// Folder path for a hit. Under a source scope: "Folder / Sub" (no source name). Under All Songs:
+    /// "SourceShort / Folder / Sub" (handoff §04). Names resolved from the cached FolderNodes (offline-safe).
+    @MainActor
+    static func relativePath(for track: Track, allSongs: Bool, index: LibraryIndex, ctx: ModelContext) -> String {
+        guard let p = index.trackPath[track.id] else { return "" }
+        let names = p.folderIds.compactMap { (try? LibraryStore.folderNode(id: $0, ctx))?.name }
+        if allSongs {
+            let short = (try? LibraryStore.source(id: p.sourceId, ctx)).flatMap { SourceKind(rawValue: $0.kind)?.short } ?? ""
+            return ([short] + names).filter { !$0.isEmpty }.joined(separator: " / ")
+        }
+        return names.joined(separator: " / ")
     }
 }
