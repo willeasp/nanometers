@@ -23,6 +23,7 @@ pub use nano_dsp::{FrameContext, Measurements, Rect, StereoFrame};
 /// Concrete Modules live under this namespace alongside the contract they implement.
 pub mod loudness;
 pub mod oscilloscope;
+pub mod stereometer;
 pub mod waveform;
 
 /// Embedded OFL font (JetBrains Mono, tabular figures — digits don't jitter as values change), ADR

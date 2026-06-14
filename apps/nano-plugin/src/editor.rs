@@ -26,6 +26,7 @@ use crate::input::Commit;
 use crate::layout::{Column, default_layout, reconcile_fixed_widths, remap_to_layout_order, viewports};
 use crate::module::loudness::LoudnessModule;
 use crate::module::oscilloscope::OscilloscopeModule;
+use crate::module::stereometer::StereometerModule;
 use crate::module::waveform::WaveformModule;
 use crate::module::{FrameContext, Module, Rect};
 use crate::{NanometersParams, Shared, StereoFrame};
@@ -289,6 +290,7 @@ fn build_module(
         mt::WAVEFORM => Box::new(WaveformModule::new(device, format)),
         mt::LOUDNESS => Box::new(LoudnessModule::new(device, format)),
         mt::OSCILLOSCOPE => Box::new(OscilloscopeModule::new(device, format)),
+        mt::STEREOMETER => Box::new(StereometerModule::new(device, format)),
         _ => Box::new(OscilloscopeModule::new(device, format)),
     }
 }
