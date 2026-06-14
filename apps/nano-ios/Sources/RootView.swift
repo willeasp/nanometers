@@ -80,7 +80,11 @@ struct RootView: View {
         .onAppear {   // headless self-test hooks: `-autoplay` docks a track, `-expand` opens Now Playing
             if ProcessInfo.processInfo.arguments.contains("-autoplay"), engine.current == nil {
                 let tracks = (try? ctx.fetch(FetchDescriptor<Track>(sortBy: [SortDescriptor(\.dateAdded, order: .reverse)]))) ?? []
-                if let t = tracks.first { engine.play(t, in: tracks, context: .library) }
+                // Prefer bundled tracks so -autoplay is deterministic regardless of leftover cloud
+                // tracks from other UI tests (e.g. DriveMockFlowUITests leaves orphaned rows).
+                let bundled = tracks.filter { $0.bundledName != nil }
+                let list = bundled.isEmpty ? tracks : bundled
+                if let t = list.first { engine.play(t, in: list, context: .library) }
             }
             if ProcessInfo.processInfo.arguments.contains("-expand") {
                 Task { @MainActor in try? await Task.sleep(for: .seconds(1.0)); npOpen = true }
@@ -97,12 +101,21 @@ struct RootView: View {
                                      rootBookmark: nil,
                                      providerFolderId: MockSourceProvider.rootId)
             }
-            // `-clear-cloud-sources`: remove all non-local sources and their trees (teardown for UI tests).
+            // `-clear-cloud-sources`: remove all non-local sources, their trees, and orphaned
+            // cloud Track rows (no bundledName/bookmark/folderBookmark) — teardown for UI tests.
+            // Track rows are kept on normal disconnect (playlists); tests don't care about playlists.
             if ProcessInfo.processInfo.arguments.contains("-clear-cloud-sources") {
                 let mgr = SourcesManager(ctx: ctx, index: libIndex)
                 for kind in SourceKind.allCases where kind != .local && kind != .icloud {
                     mgr.disconnect(sourceId: kind.rawValue)
                 }
+                // Delete cloud Track rows that have no local file handle so they don't
+                // pollute -autoplay or waveform analysis in subsequent tests.
+                let orphans = ((try? ctx.fetch(FetchDescriptor<Track>())) ?? []).filter {
+                    $0.bundledName == nil && $0.bookmark == nil && $0.folderBookmark == nil
+                }
+                orphans.forEach { ctx.delete($0) }
+                try? ctx.save()
             }
         }
         #endif
