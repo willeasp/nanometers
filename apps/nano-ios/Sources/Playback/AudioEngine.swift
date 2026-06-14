@@ -29,6 +29,12 @@ final class AudioEngine {
     /// Player gain, 0…1. Drives `player.volume`; NOT system volume.
     private(set) var volume: Double = 1.0
     private(set) var context: PlayContext = .library
+    /// True while an async remote download is in flight for the current track.
+    private(set) var isPreparing = false
+    /// Injected by the app wiring to download a cloud track to a local cache URL. Nil in tests.
+    /// Called only for tracks where `needsRemotePrep` is true.
+    var remoteURLProvider: ((Track) async -> URL?)? = nil
+
     var isRepeat: Bool {
         get { queue.isRepeat }
         set { queue.isRepeat = newValue; updateNowPlayingInfo() }
@@ -120,14 +126,50 @@ final class AudioEngine {
         player.volume = Float(clamped)
     }
 
+    // MARK: Remote prep
+
+    /// Returns true for a cloud track that needs a remote download before play:
+    /// providerFileId is set, but there is no local file handle of any kind
+    /// (no bundledName, no direct bookmark, no folder bookmark).
+    /// Enumerated LOCAL tracks (folderBookmark + providerFileId) return false.
+    static func needsRemotePrep(_ t: Track) -> Bool {
+        t.bundledName == nil && t.bookmark == nil && t.folderBookmark == nil && t.providerFileId != nil
+    }
+
     // MARK: Loading / scheduling
 
     private func loadAndStart(_ track: Track) {
+        // Remote cloud track: hand off to the async download path if a provider is set.
+        if Self.needsRemotePrep(track), let provider = remoteURLProvider {
+            // Reflect the selection immediately so the UI shows which track is loading.
+            stopTicker()
+            player.stop()
+            releaseScope()
+            progress = 0; elapsed = 0; seekOffsetFrames = 0; lastKnownFrame = 0; outputLevel = 0
+            liveMeter.requestReset(); momentaryLUFS = nil
+            current = track; isPlaying = false; file = nil; totalFrames = 0
+            updateNowPlayingInfo()
+            isPreparing = true
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let url = await provider(track)
+                self.isPreparing = false
+                if let url {
+                    self.loadFromURL(url, track: track)
+                } else {
+                    // No URL resolved — remain as a selection-only / unresolvable state.
+                    NSLog("[AudioEngine] remoteURLProvider returned nil for \(track.title) — selection only")
+                }
+            }
+            return
+        }
+
+        // Local / bundled path: resolve synchronously then open the file.
         stopTicker()
         player.stop()
         releaseScope()
         progress = 0; elapsed = 0; seekOffsetFrames = 0; lastKnownFrame = 0; outputLevel = 0
-        liveMeter.requestReset(); momentaryLUFS = nil          // drop the stale meter window for the new track
+        liveMeter.requestReset(); momentaryLUFS = nil
 
         guard let url = resolveURL(track) else {
             // Unresolved file: reflect the selection, but don't fake audio.
@@ -137,6 +179,12 @@ final class AudioEngine {
             NSLog("[AudioEngine] no playable file for \(track.title) — selection only")
             return
         }
+        loadFromURL(url, track: track)
+    }
+
+    /// Open `url` as an AVAudioFile, schedule it, and start playback. Shared by the synchronous
+    /// local path and the async remote-download path so scheduling logic lives in one place.
+    private func loadFromURL(_ url: URL, track: Track) {
         do {
             let f = try AVAudioFile(forReading: url)
             file = f
