@@ -9,7 +9,7 @@ settings:
     MARKETING_VERSION: "0.1.0"
     CURRENT_PROJECT_VERSION: "1"
     TARGETED_DEVICE_FAMILY: "1"          # iPhone only
-    CODE_SIGNING_ALLOWED[sdk=iphonesimulator*]: "NO"   # headless sim builds/tests stay credential-free; device builds sign normally
+    CODE_SIGNING_ALLOWED[sdk=iphonesimulator*]: "NO"   # default off (test bundles have no Info.plist to sign); the app target overrides to YES below
 targets:
   NanoMeters:
     type: application
@@ -27,20 +27,26 @@ targets:
         UILaunchScreen: {}
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         UIBackgroundModes: [audio]
-        # Google Drive OAuth — set BOTH values to your real iOS client id to enable Drive Connect.
-        # See docs/google-drive-setup.md for the exact Google Cloud Console steps.
-        # The scheme is the reversed client id (Google iOS convention):
-        #   e.g. client id  = 123456-abc.apps.googleusercontent.com
-        #        scheme      = com.googleusercontent.apps.123456-abc
-        GoogleOAuthClientID: "YOUR_GOOGLE_IOS_CLIENT_ID"
+        # Google Drive OAuth. These resolve from build settings at build time (Info.plist $(VAR)
+        # substitution); the real values live in the gitignored Secrets.xcconfig (see Config.xcconfig /
+        # Secrets.example.xcconfig). With no Secrets.xcconfig they're empty → Drive Connect stays disabled.
+        GoogleOAuthClientID: "$(GOOGLE_OAUTH_CLIENT_ID)"
         CFBundleURLTypes:
           - CFBundleURLSchemes:
-              - "com.googleusercontent.apps.YOUR_GOOGLE_IOS_CLIENT_ID"
+              - "$(GOOGLE_OAUTH_REVERSED_SCHEME)"
+    configFiles:
+      Debug: Config.xcconfig
+      Release: Config.xcconfig
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.willeasp.nanometers.ios
         CODE_SIGN_STYLE: Automatic       # free personal team: Xcode provisions on the fly
         DEVELOPMENT_TEAM: 9GX3Z9282P     # William Asp (Personal Team)
+        CODE_SIGN_ENTITLEMENTS: NanoMeters.entitlements   # keychain-access-groups → OAuth token storage
+        # App signs "to run locally" on the Simulator (ad-hoc, credential-free) so the keychain
+        # entitlement applies; the test bundles stay unsigned (project-level default), which avoids the
+        # "no Info.plist to sign" failure and is fine — unit tests inherit the signed host's entitlements.
+        CODE_SIGNING_ALLOWED[sdk=iphonesimulator*]: "YES"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
   NanoMetersTests:
     type: bundle.unit-test

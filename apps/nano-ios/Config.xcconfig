@@ -1,0 +1,13 @@
+// Base build configuration for the NanoMeters app target.
+//
+// Secrets (your Google OAuth client id) are NOT committed. They live in Secrets.xcconfig, which is
+// gitignored and optionally included below. Without it these stay empty, so OAuthConfig.isConfigured
+// is false and Google Drive Connect is disabled — the app builds and every non-Drive feature works.
+//
+// To enable Drive: copy Secrets.example.xcconfig → Secrets.xcconfig and fill in your client id
+// (see docs/google-drive-setup.md), then `xcodegen generate`.
+
+GOOGLE_OAUTH_CLIENT_ID =
+GOOGLE_OAUTH_REVERSED_SCHEME =
+
+#include? "Secrets.xcconfig"

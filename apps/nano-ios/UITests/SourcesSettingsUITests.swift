@@ -16,6 +16,9 @@ final class SourcesSettingsUITests: XCTestCase {
     @MainActor
     func test_sourcesManager_navigation() {
         let app = XCUIApplication()
+        // Force the unconfigured Drive state so this asserts "Needs setup" regardless of whether a local
+        // Secrets.xcconfig supplied a real client id to the build under test.
+        app.launchArguments += ["-force-drive-unconfigured"]
         app.launch()
 
         // Wait for Library root (migration + index ready signal).

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Default app keychain group. Required so OAuth tokens (KeychainTokenStore) can be written on the
+         Simulator: an unsigned/entitlement-less app gets errSecMissingEntitlement (-34018) from SecItemAdd.
+         $(AppIdentifierPrefix) resolves to the team prefix on device and to the local-signing prefix on
+         the Simulator's "Sign to Run Locally" build. -->
+    <key>keychain-access-groups</key>
+    <array>
+        <string>$(AppIdentifierPrefix)com.willeasp.nanometers.ios</string>
+    </array>
+</dict>
+</plist>
