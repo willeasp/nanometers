@@ -201,6 +201,47 @@ impl MultiResSpectrum {
     }
 }
 
+/// Display ballistics over the stitched dB curve: a live trace (fast attack, eased release) plus a
+/// peak-hold line that holds a transient then falls slowly. Release/attack are tunable (the knobs).
+pub struct SpectrumDisplay {
+    pub live: Vec<f32>,
+    pub peak: Vec<f32>,
+    hold_left: Vec<f32>, // seconds of peak-hold remaining per point
+}
+
+/// Seconds the peak line holds a new max before it starts falling.
+const PEAK_HOLD_S: f32 = 1.2;
+/// Peak-line fall rate once the hold expires.
+const PEAK_FALL_DB_PER_S: f32 = 24.0;
+
+impl SpectrumDisplay {
+    pub fn new(n: usize) -> Self {
+        Self { live: vec![DB_FLOOR; n], peak: vec![DB_FLOOR; n], hold_left: vec![0.0; n] }
+    }
+
+    /// Advance one frame. `mag` is the instantaneous stitched curve; `dt` seconds since the last
+    /// frame; `attack_ms`/`release_ms` set the live trace's rise/fall time constants.
+    pub fn update(&mut self, mag: &[f32], dt: f32, attack_ms: f32, release_ms: f32) {
+        let coeff = |ms: f32| 1.0 - (-dt * 1000.0 / ms.max(1.0)).exp(); // 1-pole approach per frame
+        let (a, r) = (coeff(attack_ms), coeff(release_ms));
+        for i in 0..self.live.len().min(mag.len()) {
+            let m = mag[i];
+            // Asymmetric 1-pole: fast toward a rising value, eased toward a falling one.
+            let c = if m >= self.live[i] { a } else { r };
+            self.live[i] += (m - self.live[i]) * c;
+
+            if self.live[i] >= self.peak[i] {
+                self.peak[i] = self.live[i];
+                self.hold_left[i] = PEAK_HOLD_S;
+            } else if self.hold_left[i] > 0.0 {
+                self.hold_left[i] -= dt;
+            } else {
+                self.peak[i] = (self.peak[i] - PEAK_FALL_DB_PER_S * dt).max(self.live[i]);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,6 +308,48 @@ mod tests {
             let peak = db[peak_point(&db)];
             assert!((peak - 0.0).abs() < 1.5, "{f} Hz tone read {peak} dB (want ~0)");
         }
+    }
+
+    #[test]
+    fn live_attacks_fast_releases_slow() {
+        let mut d = SpectrumDisplay::new(1);
+        let dt = 1.0 / 60.0;
+        for _ in 0..20 {
+            d.update(&[-10.0], dt, 5.0, 300.0); // settle at -10
+        }
+        assert!((d.live[0] + 10.0).abs() < 1.0, "settled near -10, got {}", d.live[0]);
+        // Attack: jump the target up; one frame gets most of the way (fast).
+        d.update(&[0.0], dt, 5.0, 300.0);
+        assert!(d.live[0] > -3.0, "fast attack should leap toward 0, got {}", d.live[0]);
+        // Release: drop the target far; one frame barely falls (slow, 300 ms).
+        d.update(&[-60.0], dt, 5.0, 300.0);
+        assert!(d.live[0] > -10.0, "slow release should still be high, got {}", d.live[0]);
+        // …and after a couple seconds it settles low.
+        for _ in 0..150 {
+            d.update(&[-60.0], dt, 5.0, 300.0);
+        }
+        assert!(d.live[0] < -50.0, "release settles low eventually, got {}", d.live[0]);
+    }
+
+    #[test]
+    fn peak_holds_then_decays() {
+        let mut d = SpectrumDisplay::new(1);
+        let dt = 1.0 / 60.0;
+        for _ in 0..15 {
+            d.update(&[0.0], dt, 5.0, 50.0); // drive live + peak up to ~0
+        }
+        let p0 = d.peak[0];
+        assert!(p0 > -1.0, "peak tracked the live up to ~0, got {p0}");
+        // Drop the signal: live falls; the peak holds above it during the hold window.
+        for _ in 0..30 {
+            d.update(&[-60.0], dt, 5.0, 50.0);
+        }
+        assert!(d.peak[0] > d.live[0] + 5.0, "peak still held above the live trace");
+        // Past the hold + decay, the peak has fallen well below its held value.
+        for _ in 0..300 {
+            d.update(&[-60.0], dt, 5.0, 50.0);
+        }
+        assert!(d.peak[0] < p0 - 10.0, "peak eventually decays from its held value");
     }
 
     #[test]
