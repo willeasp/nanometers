@@ -6,6 +6,7 @@ struct QueueSheet: View {
     @Environment(AudioEngine.self) private var engine
     @Environment(\.dismiss) private var dismiss
     @State private var bins: [WaveBin] = []
+    @State private var contextTrack: Track?
 
     /// (absolute queue index, track) for everything AFTER the current index.
     private var upcoming: [(offset: Int, track: Track)] {
@@ -35,16 +36,25 @@ struct QueueSheet: View {
                         .frame(maxWidth: .infinity).padding(.vertical, 24).listRowBackground(Color.clear)
                 } else {
                     ForEach(upcoming, id: \.offset) { item in   // positional id: a track may legitimately appear twice in the queue
-                        Button { engine.jump(to: item.offset); dismiss() } label: {
-                            HStack(spacing: 12) {
-                                NMArtwork(data: item.track.artworkData, size: 42, radius: 8)
-                                VStack(alignment: .leading) {
-                                    Text(item.track.title).font(Theme.sans(15, .medium)).foregroundStyle(Theme.text).lineLimit(1)
-                                    Text(item.track.artist).font(Theme.sans(12.5)).foregroundStyle(Theme.text2).lineLimit(1)
-                                }
-                                Spacer()
+                        HStack(spacing: 12) {
+                            NMArtwork(data: item.track.artworkData, size: 42, radius: 8)
+                            VStack(alignment: .leading) {
+                                Text(item.track.title).font(Theme.sans(15, .medium)).foregroundStyle(Theme.text).lineLimit(1)
+                                Text(item.track.artist).font(Theme.sans(12.5)).foregroundStyle(Theme.text2).lineLimit(1)
                             }
-                        }.listRowBackground(Color.clear)
+                            Spacer()
+                            Button { contextTrack = item.track } label: {
+                                Image(systemName: "ellipsis")
+                                    .font(Theme.sans(16))
+                                    .foregroundStyle(Theme.text3)
+                                    .frame(width: 34, height: 44)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("rowEllipsis")
+                        }
+                        .contentShape(Rectangle())
+                        .onTapGesture { engine.jump(to: item.offset); dismiss() }
+                        .listRowBackground(Color.clear)
                     }
                 }
             }
@@ -62,6 +72,7 @@ struct QueueSheet: View {
             .task(id: engine.current?.persistentModelID) {
                 if let c = engine.current { bins = await WaveformStore.shared.bins(for: c) ?? [] }
             }
+            .sheet(item: $contextTrack) { TrackContextSheet(track: $0) }
         }
         .nmSheetGlass()
         .preferredColorScheme(.dark)
