@@ -7,8 +7,6 @@ import SwiftData
 final class SourcesManager {
     private let ctx: ModelContext
     private let index: LibraryIndex
-    /// In-flight refresh tasks keyed by account name; prevents concurrent double-refresh for the same token.
-    private var refreshTasks: [String: Task<OAuthToken, Error>] = [:]
     init(ctx: ModelContext, index: LibraryIndex) { self.ctx = ctx; self.index = index }
 
     /// Create the Source row (state .noRoots until a root is added).
@@ -105,7 +103,27 @@ final class SourcesManager {
         index.rebuild(from: ctx)
     }
 
-    func disconnect(sourceId: String) {
+    /// Disconnect a source: best-effort revoke the OAuth token (network failure is ignored), delete
+    /// the Keychain credential, then delete the Source row + its root subtree (handoff §8.3 / spec §14).
+    ///
+    /// Pass `tokenStore` and `http` only for cloud sources that have an `authRef`. The caller in
+    /// SourceDetailView passes real implementations; tests pass in-memory stubs.
+    func disconnect(sourceId: String,
+                    tokenStore: (any TokenStore)? = nil,
+                    http: (any HTTPClient)? = nil) {
+        // Best-effort: revoke + delete Keychain token before removing the row.
+        if let tokenStore, let source = (try? LibraryStore.source(id: sourceId, ctx)) ?? nil,
+           source.authRef != nil,
+           let stored = try? tokenStore.load(account: sourceId) {
+            // Fire-and-forget revoke POST (ignore failure — local delete always proceeds).
+            let revokeToken = stored.refreshToken ?? stored.accessToken
+            if let http {
+                Task.detached {
+                    _ = try? await Self.revokeToken(revokeToken, http: http)
+                }
+            }
+            try? tokenStore.delete(account: sourceId)
+        }
         for root in (try? LibraryStore.rootFolders(of: sourceId, ctx)) ?? [] {
             if let nodeId = root.providerFolderId ?? root.nodeId { deleteSubtree(nodeId: nodeId, sourceId: sourceId) }
             ctx.delete(root)
@@ -114,12 +132,21 @@ final class SourcesManager {
         index.rebuild(from: ctx)
     }
 
+    /// POST https://oauth2.googleapis.com/revoke?token=<token> — best-effort, result ignored by callers.
+    private static func revokeToken(_ token: String, http: any HTTPClient) async throws {
+        var req = URLRequest(url: URL(string: "https://oauth2.googleapis.com/revoke")!)
+        req.httpMethod = "POST"
+        req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        req.httpBody = Data("token=\(token)".utf8)
+        _ = try await http.send(req)
+    }
+
     // MARK: - Provider registry (Task 11)
 
     /// Returns the `SourceProvider` for `kind`, injecting `accessToken` for cloud providers.
     /// Local/iCloud providers ignore `accessToken` (they use security-scoped bookmarks instead).
     func provider(for kind: SourceKind,
-                  accessToken: @escaping () async throws -> String) -> any SourceProvider {
+                  accessToken: @escaping (_ forceRefresh: Bool) async throws -> String) -> any SourceProvider {
         switch kind {
         case .local, .icloud:
             return LocalSourceProvider(kind: kind)
@@ -154,36 +181,32 @@ final class SourcesManager {
         connect(kind: kind, authRef: account)
     }
 
-    /// Returns a valid access token for `kind`, refreshing via `client` if the stored token is
-    /// within 60 s of expiry. Serializes concurrent refreshes (only one network call per account
-    /// at a time; subsequent callers await the same Task).
+    /// Returns a valid access token for `kind`, refreshing via the shared `TokenRefreshCoordinator`
+    /// if the stored token is within 60 s of expiry. Concurrent callers for the same account are
+    /// coalesced into a single refresh POST; the slot clears on both success and failure.
+    ///
+    /// On refresh failure the source row is flipped to `.needsReauth` (amber dot) before rethrowing,
+    /// so the UI reflects that re-authentication is required (handoff §8.3 / spec §14).
     func accessToken(for kind: SourceKind,
                      config: OAuthConfig,
                      client: OAuthClient,
-                     tokenStore: TokenStore) async throws -> String {
+                     tokenStore: any TokenStore,
+                     forceRefresh: Bool = false) async throws -> String {
         let account = kind.rawValue
-        guard let token = try tokenStore.load(account: account) else {
-            throw NSError(domain: "SourcesManager", code: 401,
-                          userInfo: [NSLocalizedDescriptionKey: "No stored token for \(account)"])
-        }
-        // Fast path: token is fresh enough.
-        guard token.isExpiring(skew: 60), let refreshToken = token.refreshToken else {
+        do {
+            let token = try await TokenRefreshCoordinator.shared.validToken(
+                account: account, store: tokenStore, client: client, forceRefresh: forceRefresh)
             return token.accessToken
+        } catch {
+            // Flip the source to needsReauth on any refresh / token-missing failure so the amber
+            // dot appears. Missing-token errors (first launch before OAuth) also land here; the
+            // source won't exist yet in that case so the optional chain is a no-op.
+            if let s = (try? LibraryStore.source(id: account, ctx)) ?? nil {
+                s.state = SourceState.needsReauth.rawValue
+                index.rebuild(from: ctx)
+            }
+            throw error
         }
-        // Coalesce concurrent refresh calls: if one is already in flight, await it.
-        if let existing = refreshTasks[account] {
-            let refreshed = try await existing.value
-            return refreshed.accessToken
-        }
-        let task = Task<OAuthToken, Error> { [weak self] in
-            let refreshed = try await client.refresh(refreshToken: refreshToken)
-            try tokenStore.save(refreshed, account: account)
-            await MainActor.run { self?.refreshTasks[account] = nil }
-            return refreshed
-        }
-        refreshTasks[account] = task
-        let refreshed = try await task.value
-        return refreshed.accessToken
     }
 
     /// Delete a root's FolderNode subtree (the cache). Track ROWS are kept (playlists may reference them);
