@@ -77,10 +77,23 @@ struct TrackContextSheet: View {
     }
 
     /// Short name for the source (e.g. "Drive") used in the disabled sub-label (handoff §H).
+    /// Falls back through: trackPath → track.sourceId (DB lookup) → track.sourceKind (enum) → nil.
     private var sourceDisplayLabel: String? {
-        guard let p = index.trackPath[track.id],
-              let source = try? LibraryStore.source(id: p.sourceId, ctx) else { return nil }
-        return SourceKind(rawValue: source.kind)?.short ?? source.label
+        // Fast path: track is in the index (reachable but not connected, or path cached).
+        if let p = index.trackPath[track.id],
+           let source = try? LibraryStore.source(id: p.sourceId, ctx) {
+            return SourceKind(rawValue: source.kind)?.short ?? source.label
+        }
+        // Orphaned cloud track: source row may be gone; derive the label from the track itself.
+        if let sid = track.sourceId,
+           let source = try? LibraryStore.source(id: sid, ctx) {
+            return SourceKind(rawValue: source.kind)?.short ?? source.label
+        }
+        // Source row deleted — reconstruct from the track's sourceKind field.
+        if let kind = SourceKind(rawValue: track.sourceKind) {
+            return kind.short
+        }
+        return nil
     }
 
     private func goToSourceLabel(subtitle: String?, dimmed: Bool) -> some View {
