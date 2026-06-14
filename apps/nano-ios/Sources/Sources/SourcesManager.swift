@@ -7,6 +7,8 @@ import SwiftData
 final class SourcesManager {
     private let ctx: ModelContext
     private let index: LibraryIndex
+    /// In-flight refresh tasks keyed by account name; prevents concurrent double-refresh for the same token.
+    private var refreshTasks: [String: Task<OAuthToken, Error>] = [:]
     init(ctx: ModelContext, index: LibraryIndex) { self.ctx = ctx; self.index = index }
 
     /// Create the Source row (state .noRoots until a root is added).
@@ -110,6 +112,60 @@ final class SourcesManager {
         }
         if let s = (try? LibraryStore.source(id: sourceId, ctx)) ?? nil { ctx.delete(s) }
         index.rebuild(from: ctx)
+    }
+
+    // MARK: - OAuth (Task 8)
+
+    /// Full OAuth Authorization-Code + PKCE flow for a cloud source (handoff §08.2).
+    /// Generates PKCE + state → browser consent → token exchange → Keychain save → connect.
+    func connectOAuth(kind: SourceKind,
+                      config: OAuthConfig,
+                      web: WebAuthSession,
+                      client: OAuthClient,
+                      tokenStore: TokenStore) async throws {
+        let pkce = PKCE.generate()
+        let state = PKCE.randomState()
+        let authURL = client.authorizeURL(challenge: pkce.challenge, state: state,
+                                          redirectURI: config.redirectURI)
+        let code = try await web.authorize(url: authURL, callbackScheme: config.redirectScheme,
+                                           expectedState: state)
+        let token = try await client.exchange(code: code, verifier: pkce.verifier,
+                                              redirectURI: config.redirectURI)
+        let account = kind.rawValue
+        try tokenStore.save(token, account: account)
+        connect(kind: kind, authRef: account)
+    }
+
+    /// Returns a valid access token for `kind`, refreshing via `client` if the stored token is
+    /// within 60 s of expiry. Serializes concurrent refreshes (only one network call per account
+    /// at a time; subsequent callers await the same Task).
+    func accessToken(for kind: SourceKind,
+                     config: OAuthConfig,
+                     client: OAuthClient,
+                     tokenStore: TokenStore) async throws -> String {
+        let account = kind.rawValue
+        guard let token = try tokenStore.load(account: account) else {
+            throw NSError(domain: "SourcesManager", code: 401,
+                          userInfo: [NSLocalizedDescriptionKey: "No stored token for \(account)"])
+        }
+        // Fast path: token is fresh enough.
+        guard token.isExpiring(skew: 60), let refreshToken = token.refreshToken else {
+            return token.accessToken
+        }
+        // Coalesce concurrent refresh calls: if one is already in flight, await it.
+        if let existing = refreshTasks[account] {
+            let refreshed = try await existing.value
+            return refreshed.accessToken
+        }
+        let task = Task<OAuthToken, Error> { [weak self] in
+            let refreshed = try await client.refresh(refreshToken: refreshToken)
+            try tokenStore.save(refreshed, account: account)
+            await MainActor.run { self?.refreshTasks[account] = nil }
+            return refreshed
+        }
+        refreshTasks[account] = task
+        let refreshed = try await task.value
+        return refreshed.accessToken
     }
 
     /// Delete a root's FolderNode subtree (the cache). Track ROWS are kept (playlists may reference them);
