@@ -101,11 +101,16 @@ enum LibraryBrowse {
         return out
     }
 
-    /// Convenience: flatten with a fresh cycle-guard set.
+    /// Convenience: flatten with a fresh cycle-guard set, deduplicated by id (first-occurrence order).
     @MainActor
     static func flatten(_ node: FolderNode, ctx: ModelContext) -> [Track] {
         var visited = Set<String>()
-        return flatten(node, ctx: ctx, visited: &visited)
+        return dedupeByID(flatten(node, ctx: ctx, visited: &visited))
+    }
+
+    /// Remove duplicate tracks, keeping the first occurrence (stable, id-keyed).
+    static func dedupeByID(_ tracks: [Track]) -> [Track] {
+        var seen = Set<UUID>(); return tracks.filter { seen.insert($0.id).inserted }
     }
     @MainActor
     private static func allSongsContent(index: LibraryIndex, ctx: ModelContext) -> BrowseContent {
@@ -124,20 +129,29 @@ enum LibraryBrowse {
     static func search(_ scope: [Track], query: String, nav: LibraryNav, index: LibraryIndex, ctx: ModelContext) -> [SearchHit] {
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
         guard !q.isEmpty else { return [] }
-        return scope.filter {
+        let filtered = dedupeByID(scope.filter {
             $0.title.lowercased().contains(q) || $0.artist.lowercased().contains(q) || $0.album.lowercased().contains(q)
-        }.map { SearchHit(track: $0, pathLabel: relativePath(for: $0, allSongs: nav.smart == .allSongs, index: index, ctx: ctx)) }
+        })
+        return filtered.map { SearchHit(track: $0, pathLabel: relativePath(for: $0, scopeFolderIds: nav.folderIds, allSongs: nav.smart == .allSongs, index: index, ctx: ctx)) }
     }
 
-    /// Folder path for a hit. Under a source scope: "Folder / Sub" (no source name). Under All Songs:
-    /// "SourceShort / Folder / Sub" (handoff §04). Names resolved from the cached FolderNodes (offline-safe).
+    /// Folder path for a hit. Under a source scope: path RELATIVE to the current scope (strips the scope
+    /// folder prefix). Under All Songs: "SourceShort / Folder / Sub" (handoff §04).
+    /// Names resolved from the cached FolderNodes (offline-safe).
     @MainActor
-    static func relativePath(for track: Track, allSongs: Bool, index: LibraryIndex, ctx: ModelContext) -> String {
+    static func relativePath(for track: Track, scopeFolderIds: [String] = [], allSongs: Bool, index: LibraryIndex, ctx: ModelContext) -> String {
         guard let p = index.trackPath[track.id] else { return "" }
-        let names = p.folderIds.compactMap { (try? LibraryStore.folderNode(id: $0, ctx))?.name }
+        var folderIds = p.folderIds
+        if !allSongs && !scopeFolderIds.isEmpty {
+            // Strip the current scope prefix so the label is relative to where the user is searching.
+            var i = 0
+            while i < scopeFolderIds.count, i < folderIds.count, scopeFolderIds[i] == folderIds[i] { i += 1 }
+            folderIds = Array(folderIds.dropFirst(i))
+        }
+        let names = folderIds.compactMap { (try? LibraryStore.folderNode(id: $0, ctx))?.name }
         if allSongs {
             let short = (try? LibraryStore.source(id: p.sourceId, ctx)).flatMap { SourceKind(rawValue: $0.kind)?.short } ?? ""
-            return ([short] + names).filter { !$0.isEmpty }.joined(separator: " / ")
+            return ([short] + p.folderIds.compactMap { (try? LibraryStore.folderNode(id: $0, ctx))?.name }).filter { !$0.isEmpty }.joined(separator: " / ")
         }
         return names.joined(separator: " / ")
     }

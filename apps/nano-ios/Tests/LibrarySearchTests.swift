@@ -51,4 +51,55 @@ final class LibrarySearchTests: XCTestCase {
         let scope = LibraryBrowse.content(for: n, index: idx, ctx: ctx).playAll
         XCTAssertTrue(LibraryBrowse.search(scope, query: "  ", nav: n, index: idx, ctx: ctx).isEmpty)
     }
+
+    // MARK: - Bug A regression tests
+
+    /// A track id present in TWO sibling folders → search returns ONE hit for it, playAll contains it once.
+    func test_dedupeByID_trackInTwoFolders_searchReturnsOneHit_playAllContainsOnce() throws {
+        let ctx = try TestDB.context()
+        ctx.insert(Source(id: "gdrive", kind: .gdrive, state: .connected))
+        ctx.insert(RootFolder(sourceId: "gdrive", name: "Root", providerFolderId: "root"))
+        // Insert one track and register it in TWO sibling folders (simulates DAG or multi-folder tagging).
+        let tr = Track(title: "Shared", artist: "Oso", album: ""); tr.sourceId = "gdrive"; tr.folderId = "folderA"
+        ctx.insert(tr)
+        ctx.insert(FolderNode(id: "root",    sourceId: "gdrive", name: "Root",    parentId: nil,    childFolderIds: ["folderA","folderB"]))
+        ctx.insert(FolderNode(id: "folderA", sourceId: "gdrive", name: "FolderA", parentId: "root", trackIds: [tr.id]))
+        ctx.insert(FolderNode(id: "folderB", sourceId: "gdrive", name: "FolderB", parentId: "root", trackIds: [tr.id]))
+        let idx = LibraryIndex(); idx.rebuild(from: ctx)
+
+        let n = LibraryNav(); n.openSource("gdrive")
+        let content = LibraryBrowse.content(for: n, index: idx, ctx: ctx)
+
+        // playAll must contain the track exactly once
+        XCTAssertEqual(content.playAll.filter { $0.id == tr.id }.count, 1, "playAll should dedupe cross-folder tracks")
+
+        // search must return exactly one hit
+        let hits = LibraryBrowse.search(content.playAll, query: "shared", nav: n, index: idx, ctx: ctx)
+        XCTAssertEqual(hits.count, 1, "search should return one hit even when track appears in two folders")
+        XCTAssertEqual(hits.first?.track.id, tr.id)
+    }
+
+    // MARK: - Bug C regression tests
+
+    /// Scope = a deep folder → the hit's pathLabel is the path BELOW the scope (or "" if directly in scope folder).
+    func test_relativePath_deepScope_stripsPrefix() throws {
+        let (ctx, idx) = try fixture()
+        // Scope = the "house" folder directly (which holds "Caldera")
+        let n = LibraryNav(); n.openSource("gdrive"); n.openFolder("mine"); n.openFolder("house")
+        let scope = LibraryBrowse.content(for: n, index: idx, ctx: ctx).playAll
+        let hits = LibraryBrowse.search(scope, query: "caldera", nav: n, index: idx, ctx: ctx)
+        XCTAssertEqual(hits.count, 1)
+        // "Caldera" is directly in "house" (the scope folder), so after stripping ["mine","house"] the relative path is ""
+        XCTAssertEqual(hits.first?.pathLabel, "", "pathLabel should be empty when the hit is directly in the scope folder")
+    }
+
+    /// Scope = source root (nav.folderIds == []) → pathLabel includes the full path from the root.
+    func test_relativePath_sourceRoot_includesFullPath() throws {
+        let (ctx, idx) = try fixture()
+        let n = LibraryNav(); n.openSource("gdrive")  // folderIds == []
+        let scope = LibraryBrowse.content(for: n, index: idx, ctx: ctx).playAll
+        let hits = LibraryBrowse.search(scope, query: "caldera", nav: n, index: idx, ctx: ctx)
+        XCTAssertEqual(hits.first?.pathLabel, "My Productions / House",
+                       "at source root (no scope prefix) the full folder path should be shown")
+    }
 }
