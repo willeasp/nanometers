@@ -84,7 +84,11 @@ struct CloseUpWaveform: View {
         let binsPerSec = Double(bins.count) / duration
         let pxPerSec = w / CGFloat(max(0.5, windowSec))
         let zero = h / 2                             // single center line: L above, R below
-        let halfAmp = (h / 2) * 0.45                 // plugin HALF_SCALE: sample ±1 → 0.45 of the half-lane
+        let halfAmp = (h / 2) * 0.95                 // one-sided from the divider: a ±1 sample fills 95% of the
+                                                     // half-lane (5% edge margin), matching the plugin's NDC +0.95
+                                                     // outer reach. (The plugin stacks TWO bipolar lanes centered
+                                                     // at NDC ±0.5; consolidating to one center line halved the look
+                                                     // at 0.45 — amp is clamped to ±1 so 0.95 still can't overflow.)
 
         // Visible bin window (a one-bin margin so the contour enters/leaves cleanly under the edge fade).
         func binAtX(_ x: CGFloat) -> Double { (center + Double((x - centerX) / pxPerSec)) * binsPerSec }
