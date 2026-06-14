@@ -22,7 +22,7 @@ struct NowPlayingScreen: View {
     @State private var showContext = false
     @State private var showQueue = false
     @State private var showSettings = false
-    @State private var flipped = false
+    @SceneStorage("npShowAnalysis") private var flipped = false   // album⇄analysis choice persists across closing/reopening the player
 
     @AppStorage("showWave") private var showWave = true
     @AppStorage("spectrum") private var spectrum = true     // frequency coloring (close-up); default on (§06E)
