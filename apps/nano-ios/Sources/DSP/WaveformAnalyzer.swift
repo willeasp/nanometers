@@ -69,9 +69,9 @@ actor WaveformAnalyzer {
             throw AnalyzeError.ffiFailed
         }
         let closeUpCount = max(900, Int((durationSec * Self.closeUpBinsPerSecond).rounded()))
-        guard let closeUpBins = NanoDSPBridge.analyzeStereo(l: left, r: right, sampleRate: sr, binCount: closeUpCount) else {
-            throw AnalyzeError.ffiFailed
-        }
+        // Close-up is cosmetic; never let its failure drop the load-bearing overview bins. (A cloud/Drive track
+        // gets exactly one analyze shot via analyzeDownloaded — a throw here would blank the whole waveform.)
+        let closeUpBins = NanoDSPBridge.analyzeStereo(l: left, r: right, sampleRate: sr, binCount: closeUpCount) ?? []
         let lufs = NanoDSPBridge.integratedLUFS(l: left, r: right, sampleRate: sr)
         return AnalysisResult(key: key, bins: bins, closeUpBins: closeUpBins, integratedLUFS: lufs,
                               sampleRate: sr, durationSec: durationSec)
