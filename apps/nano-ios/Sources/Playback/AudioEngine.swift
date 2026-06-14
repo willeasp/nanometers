@@ -176,17 +176,39 @@ final class AudioEngine {
         next()                                           // Task 5
     }
 
-    /// Bundled samples resolve by name (no security scope); imported tracks via their bookmark.
+    /// Resolve a Track to a playable file URL, in priority order:
+    /// 1. Bundled sample by name (no security scope needed).
+    /// 2. Direct per-file security-scoped bookmark (TrackImporter imports).
+    /// 3. Root folder bookmark + relative providerFileId (enumerated local tracks, FIX d).
+    /// 4. nil → cloud track or unresolvable (handled upstream / by Phase 5 prep).
     private func resolveURL(_ track: Track) -> URL? {
+        // (1) Bundle resource
         if let name = track.bundledName,
            let url = Bundle.main.url(forResource: name, withExtension: nil) {
             return url
         }
-        guard let bm = track.bookmark else { return nil }
-        var stale = false
-        guard let url = try? URL(resolvingBookmarkData: bm, bookmarkDataIsStale: &stale) else { return nil }
-        if url.startAccessingSecurityScopedResource() { scopedURL = url }
-        return url
+
+        // (2) Direct per-file bookmark (TrackImporter path: bookmark is non-nil)
+        if let bm = track.bookmark {
+            var stale = false
+            guard let url = try? URL(resolvingBookmarkData: bm, bookmarkDataIsStale: &stale) else { return nil }
+            if url.startAccessingSecurityScopedResource() { scopedURL = url }
+            return url
+        }
+
+        // (3) Root folder bookmark + relative path (enumerated local/iCloud tracks).
+        // Cloud tracks have folderBookmark == nil, so they fall through to nil here.
+        if let fbm = track.folderBookmark, let rel = track.providerFileId, !rel.isEmpty {
+            var stale = false
+            guard let folderURL = try? URL(resolvingBookmarkData: fbm, bookmarkDataIsStale: &stale)
+            else { return nil }
+            // Hold the security scope on the FOLDER (not per-file); releaseScope() stops it.
+            if folderURL.startAccessingSecurityScopedResource() { scopedURL = folderURL }
+            return folderURL.appendingPathComponent(rel)
+        }
+
+        // (4) Cloud / unresolvable → nil (Phase 5 will prep the remote file before calling loadAndStart)
+        return nil
     }
 
     private func releaseScope() {
