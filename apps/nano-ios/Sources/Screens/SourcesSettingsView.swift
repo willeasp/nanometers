@@ -1,6 +1,11 @@
 import SwiftUI
 import SwiftData
 
+/// The OAuth config for a cloud source kind, or nil for non-OAuth kinds (local/iCloud/Dropbox).
+func oauthConfig(for kind: SourceKind) -> OAuthConfig? {
+    switch kind { case .gdrive: return .google; case .onedrive: return .microsoft; default: return nil }
+}
+
 // MARK: - Main List (embed in SettingsSheet as a Section)
 
 /// The "Library Sources" section that sits at the top of the SettingsSheet form.
@@ -97,7 +102,7 @@ struct SourceDetailView: View {
                     }
                     Spacer(minLength: 8)
                     // FIX E: Reconnect button appears only when the source needs re-authentication.
-                    if state == .needsReauth && kind == .gdrive && OAuthConfig.google.isConfigured {
+                    if state == .needsReauth, let cfg = oauthConfig(for: kind), cfg.isConfigured {
                         reconnectButton
                     }
                 }
@@ -173,10 +178,10 @@ struct SourceDetailView: View {
                     .listRowBackground(Color.clear)
                 } else {
                     Button {
-                        if kind == .gdrive {
-                            showDriveBrowser = true
+                        if oauthConfig(for: kind) != nil {
+                            showDriveBrowser = true   // any cloud kind → folder browser
                         } else {
-                            showFolderPicker = true
+                            showFolderPicker = true   // local / iCloud → system folder picker
                         }
                     } label: {
                         HStack(spacing: 12) {
@@ -285,12 +290,14 @@ struct SourceDetailView: View {
                 reconnectError = nil
                 Task { @MainActor in
                     defer { isReconnecting = false }
+                    // Only shown when oauthConfig(for: kind) exists + is configured; fall back defensively.
+                    let cfg = oauthConfig(for: kind) ?? .google
                     do {
                         try await manager.connectOAuth(
                             kind: kind,
-                            config: .google,
+                            config: cfg,
                             web: WebAuthSession(),
-                            client: OAuthClient(config: .google, http: URLSessionHTTPClient()),
+                            client: OAuthClient(config: cfg, http: URLSessionHTTPClient()),
                             tokenStore: KeychainTokenStore()
                         )
                     } catch WebAuthSession.Error.cancelled {
@@ -367,15 +374,16 @@ private struct AddSourceRow: View {
     let isConnected: Bool
     let manager: SourcesManager
 
-    // Local + iCloud are "connect directly" in Phase 4; gdrive is OAuth (Phase 5); others coming soon.
+    // Local + iCloud are "connect directly"; gdrive/onedrive are OAuth; Dropbox coming soon.
     private var isLocalAvailable: Bool { kind == .local || kind == .icloud }
-    private var isDriveConfigured: Bool { kind == .gdrive && OAuthConfig.google.isConfigured }
-    private var isDriveNotConfigured: Bool { kind == .gdrive && !OAuthConfig.google.isConfigured }
+    private var oauthCfg: OAuthConfig? { oauthConfig(for: kind) }
+    private var isOAuthConfigured: Bool { oauthCfg?.isConfigured == true }
+    private var isOAuthNotConfigured: Bool { oauthCfg != nil && oauthCfg?.isConfigured != true }
 
-    // Drive OAuth state
+    // OAuth state
     @State private var isConnecting = false
     @State private var connectError: String? = nil
-    @State private var navigateToDriveDetail = false
+    @State private var navigateToCloudDetail = false
 
     var body: some View {
         HStack(spacing: 12) {
@@ -398,9 +406,9 @@ private struct AddSourceRow: View {
             trailingControl
         }
         .frame(minHeight: Theme.Layout.rowMinHeight)
-        // Drive OAuth success → push detail via programmatic navigation
-        .navigationDestination(isPresented: $navigateToDriveDetail) {
-            ConnectDetailBridge(kind: .gdrive, manager: manager)
+        // OAuth success → push detail via programmatic navigation
+        .navigationDestination(isPresented: $navigateToCloudDetail) {
+            ConnectDetailBridge(kind: kind, manager: manager)
         }
     }
 
@@ -414,18 +422,20 @@ private struct AddSourceRow: View {
             Text("Local storage")
                 .font(Theme.mono(11.5))
                 .foregroundStyle(Theme.text3)
-        } else if isDriveConfigured {
+        } else if isOAuthConfigured {
             if let err = connectError {
                 Text(err)
                     .font(Theme.mono(11.5))
                     .foregroundStyle(.red)
             } else {
-                Text("Google account required")
+                Text(kind == .onedrive ? "Microsoft account required" : "Google account required")
                     .font(Theme.mono(11.5))
                     .foregroundStyle(Theme.text3)
             }
-        } else if isDriveNotConfigured {
-            Text("Add your Google client ID (see docs/google-drive-setup.md)")
+        } else if isOAuthNotConfigured {
+            Text(kind == .onedrive
+                 ? "Add your Microsoft client ID (see docs/onedrive-setup.md)"
+                 : "Add your Google client ID (see docs/google-drive-setup.md)")
                 .font(Theme.mono(11.5))
                 .foregroundStyle(Theme.text3)
         } else {
@@ -456,7 +466,7 @@ private struct AddSourceRow: View {
                 manager.connect(kind: kind)
             })
             .accessibilityIdentifier("connect-\(kind.rawValue)")
-        } else if isDriveConfigured {
+        } else if isOAuthConfigured, let cfg = oauthCfg {
             // Configured: show Connect pill that runs OAuth
             if isConnecting {
                 ProgressView()
@@ -471,13 +481,13 @@ private struct AddSourceRow: View {
                         defer { isConnecting = false }
                         do {
                             try await manager.connectOAuth(
-                                kind: .gdrive,
-                                config: .google,
+                                kind: kind,
+                                config: cfg,
                                 web: WebAuthSession(),
-                                client: OAuthClient(config: .google, http: URLSessionHTTPClient()),
+                                client: OAuthClient(config: cfg, http: URLSessionHTTPClient()),
                                 tokenStore: KeychainTokenStore()
                             )
-                            navigateToDriveDetail = true
+                            navigateToCloudDetail = true
                         } catch WebAuthSession.Error.cancelled {
                             // User cancelled — silent
                         } catch {
@@ -495,7 +505,7 @@ private struct AddSourceRow: View {
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("connect-\(kind.rawValue)")
             }
-        } else if isDriveNotConfigured {
+        } else if isOAuthNotConfigured {
             // Not configured: disabled pill with "Needs setup" copy
             Text("Needs setup")
                 .font(Theme.sans(13))
