@@ -195,10 +195,12 @@ private func makeRemoteURLProvider(ctx: ModelContext, index: LibraryIndex) -> (T
         }
 
         do {
-            let token = try await mgr.accessToken(for: kind, config: config,
-                                                   client: oauthClient,
-                                                   tokenStore: tokenStore)
+            // The token is fetched inside the downloader: a cache hit never runs it, so already-downloaded
+            // tracks still play when the source's refresh token is dead.
             let url = try await cache.localURL(sourceId: sourceId, fileId: fileId) {
+                let token = try await mgr.accessToken(for: kind, config: config,
+                                                       client: oauthClient,
+                                                       tokenStore: tokenStore)
                 do {
                     return try await download(accessToken: token)
                 } catch let err as NSError where err.code == 401 {
