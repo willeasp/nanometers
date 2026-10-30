@@ -143,6 +143,9 @@ final class AudioEngine {
         if let t = queue.load(list, startingAt: start) { loadAndStart(t) }
     }
 
+    /// Re-run the load for the current track (queue untouched) — e.g. after reconnecting its cloud source.
+    func reloadCurrent() { if let t = current { loadAndStart(t) } }
+
     func toggle() {
         guard current != nil, file != nil else { return }   // nothing loaded / unresolved file
         if isPlaying {

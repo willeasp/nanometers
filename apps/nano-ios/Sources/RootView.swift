@@ -18,6 +18,7 @@ struct RootView: View {
     @State private var npOpen = false
     @State private var deviceInsets = EdgeInsets()
     @State private var libNav = LibraryNav()
+    @State private var reauthTrack: Track?   // cloud track that failed on a dead sign-in → reconnect prompt
     @Namespace private var heroNS
     @Environment(\.modelContext) private var ctx
     @Environment(LibraryIndex.self) private var libIndex
@@ -48,7 +49,10 @@ struct RootView: View {
         .fullScreenCover(isPresented: $npOpen) {
             NowPlayingScreen(onClose: { npOpen = false }, safeArea: deviceInsets)
                 .navigationTransition(.zoom(sourceID: Self.artID, in: heroNS))
+                .modifier(ReauthPrompt(track: $reauthTrack))
         }
+        // Under the cover only while it's closed — Now Playing hosts its own copy (skip / auto-advance).
+        .modifier(ReauthPrompt(track: $reauthTrack, active: !npOpen))
         // Read the real device insets at the root (the cover's own insets are wrong — see type doc).
         // Outermost, so `.safeAreaInset(.bottom)` above doesn't shrink the bottom we capture.
         .onGeometryChange(for: EdgeInsets.self, of: { $0.safeAreaInsets }, action: { deviceInsets = $0 })
@@ -64,7 +68,8 @@ struct RootView: View {
             // Guard on isConfigured: if neither cloud client ID is set, cloud Connect is disabled
             // anyway, so we never get a cloud track with a providerFileId to resolve.
             if OAuthConfig.google.isConfigured || OAuthConfig.microsoft.isConfigured {
-                engine.remoteURLProvider = makeRemoteURLProvider(ctx: ctx, index: libIndex)
+                engine.remoteURLProvider = makeRemoteURLProvider(ctx: ctx, index: libIndex,
+                                                                  onNeedsReauth: { reauthTrack = $0 })
             }
         }
         // Rebuild on any SwiftData save — covers in-place Source.state flips, RootFolder add/remove,
@@ -135,8 +140,12 @@ struct RootView: View {
 /// Only assembled when a cloud provider is configured (`OAuthConfig.google` or `.microsoft`) so a
 /// placeholder client ID never triggers a live network call (no token exists, and cloud Connect is
 /// disabled until the user sets a real id).
+///
+/// `onNeedsReauth` fires when the failure is a dead refresh token (not a network blip), so the UI can
+/// prompt a reconnect instead of silently leaving the track unplayable.
 @MainActor
-private func makeRemoteURLProvider(ctx: ModelContext, index: LibraryIndex) -> (Track) async -> URL? {
+private func makeRemoteURLProvider(ctx: ModelContext, index: LibraryIndex,
+                                   onNeedsReauth: @escaping @MainActor (Track) -> Void) -> (Track) async -> URL? {
     // The cache directory lives in Caches/remote — eviction by the LRU (512 MB default).
     let cacheDir = (try? FileManager.default.url(
         for: .cachesDirectory, in: .userDomainMask, appropriateFor: nil, create: true))
@@ -215,6 +224,7 @@ private func makeRemoteURLProvider(ctx: ModelContext, index: LibraryIndex) -> (T
             return url
         } catch {
             NSLog("[remoteURLProvider] failed for \(track.title): \(error)")
+            if SourcesManager.degradedState(for: error) == .needsReauth { onNeedsReauth(track) }
             return nil
         }
     }

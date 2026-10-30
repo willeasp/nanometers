@@ -12,12 +12,18 @@ struct SettingsSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var ctx
     @Environment(LibraryIndex.self) private var index
+    @State private var path: NavigationPath
+
+    /// `openSource` lands directly on that source's detail page (where Reconnect lives); Back → Settings.
+    init(openSource: Source? = nil) {
+        _path = State(initialValue: NavigationPath(openSource.map { [SourceDetailDest(source: $0)] } ?? []))
+    }
 
     var body: some View {
         // Defer SourcesManager construction until the environment is available.
         let manager = SourcesManager(ctx: ctx, index: index)
 
-        NavigationStack {
+        NavigationStack(path: $path) {
             Form {
                 // Library Sources — above Waveform (Task 6)
                 SourcesSettingsSection(manager: manager)

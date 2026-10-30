@@ -67,6 +67,7 @@ private struct LibraryRootLevel: View {
     @Environment(LibraryNav.self) private var nav
     @Environment(LibraryIndex.self) private var index
     @State private var showSettings = false
+    @State private var reauthSource: Source?
     var onSearch: () -> Void = {}
 
     var body: some View {
@@ -129,7 +130,11 @@ private struct LibraryRootLevel: View {
                             SourceRow(
                                 source: source,
                                 counts: index.sourceCounts[source.id] ?? .init(),
-                                onTap: { if nav.isRoot { nav.openSource(source.id) } }
+                                onTap: {
+                                    // Dead sign-in → straight to the source's settings (Reconnect) instead of browsing.
+                                    if source.state == SourceState.needsReauth.rawValue { reauthSource = source }
+                                    else if nav.isRoot { nav.openSource(source.id) }
+                                }
                             )
                             if source.id != content.sources.last?.id {
                                 Divider().background(Theme.hair)
@@ -153,6 +158,7 @@ private struct LibraryRootLevel: View {
         .toolbar(.hidden, for: .navigationBar)
         .interactiveSwipeBack()
         .sheet(isPresented: $showSettings) { SettingsSheet() }
+        .sheet(item: $reauthSource) { SettingsSheet(openSource: $0) }
     }
 }
 
