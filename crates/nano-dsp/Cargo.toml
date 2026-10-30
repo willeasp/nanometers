@@ -23,6 +23,9 @@ ffi = []
 # lock-free atomics. `atomic_float` is platform-free pure Rust — it does NOT breach ADR 0008's
 # "no wgpu / no plugin host / no windowing" rule.
 atomic_float.workspace = true
+# Real-input FFT (rustfft wrapper) for the multi-resolution Spectrum core. Pure Rust, platform-free —
+# same rule as above. An exact FFT isn't worth hand-rolling the way the BS.1770 biquads were (ADR 0006).
+realfft.workspace = true
 
 [dev-dependencies]
 # Reference BS.1770 implementation, used only as a conformance oracle for the loudness core

@@ -88,7 +88,7 @@ mod tests {
         // [−1, 1) so each has zero mean (else a nonzero-mean pair would read correlated).
         let mut sl: u32 = 0x1234_5678;
         let mut sr: u32 = 0x9E37_79B9;
-        let mut noise = |s: &mut u32| {
+        let noise = |s: &mut u32| {
             *s = s.wrapping_mul(1_103_515_245).wrapping_add(12_345);
             (*s >> 9) as f32 / (1u32 << 22) as f32 - 1.0 // [−1, 1)
         };

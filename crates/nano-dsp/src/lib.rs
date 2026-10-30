@@ -22,6 +22,9 @@ pub mod waveform;
 /// Smoothed stereo phase-correlation for the Stereometer Module (shared so the TUI/iOS get it too).
 pub mod correlation;
 
+/// Multi-resolution FFT spectrum for the Spectrum Analyzer (shared so the TUI/iOS get it too).
+pub mod spectrum;
+
 /// C-ABI facade for the iOS app (ADR 0008 / 0009). Gated behind `ffi` so the plugin/TUI never
 /// compile it; cbindgen-equivalent header is hand-maintained at `include/nano_dsp.h` (Task 6).
 #[cfg(feature = "ffi")]
