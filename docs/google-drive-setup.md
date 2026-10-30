@@ -32,7 +32,9 @@ it takes about five minutes to create one. PKCE means there is no client secret 
    - **Developer contact email**: your email
 4. Click **Save and Continue** through the Scopes page.
 5. On the **Test users** page: click **Add Users**, add your own Google account email, click **Add**.
-   (Only test users can sign in while the app is in testing mode — you don't need to publish.)
+   (Only test users can sign in while the app is in testing mode — you don't need to publish.
+   Catch: in **Testing** status Google expires refresh tokens after **7 days**, so Drive needs a
+   Reconnect about weekly — see Troubleshooting.)
 6. Click **Save and Continue**, then **Back to Dashboard**.
 7. On the **Scopes** tab click **Add or Remove Scopes**, search for `drive.readonly`, check
    `https://www.googleapis.com/auth/drive.readonly`, and click **Update** → **Save and Continue**.
@@ -111,5 +113,12 @@ Google OAuth consent screen. After authorising, add a Drive folder as a root to 
   (Scopes live on the adjacent **Data Access** tab — add `…/auth/drive.readonly` there.) Then retry Connect.
 - **"Google hasn't verified this app" interstitial** (after you're a test user) — expected for a
   test-mode client. Tap **Advanced → Go to <app> → Continue** and grant access.
+- **"Google Drive needs reconnecting" / Drive tracks stop playing after about a week** — the refresh
+  token expired. Google issues 7-day refresh tokens to External apps in **Testing** publishing status,
+  and the token endpoint then answers `400 invalid_grant` (visible in the device log as
+  `Error Domain=OAuth Code=400 … body={"error":"invalid_grant"…}`). Tap **Reconnect** (the prompt, or
+  Settings → Google Drive). Already-downloaded tracks keep playing meanwhile. To stop the weekly
+  expiry, set the publishing status to **In production** (Audience → Publish app); unverified apps
+  still show the "hasn't verified this app" screen but get long-lived refresh tokens.
 - **Drive row shows "Add your Google client ID"** — `Secrets.xcconfig` is missing or still has the
   placeholder; fill it in and re-run `xcodegen generate`.
