@@ -28,7 +28,11 @@ struct OAuthClient {
         let formSafe = CharacterSet.alphanumerics.union(.init(charactersIn: "-._~"))
         req.httpBody = Data(form.map { "\($0)=\($1.addingPercentEncoding(withAllowedCharacters: formSafe) ?? $1)" }.joined(separator: "&").utf8)
         let resp = try await http.send(req)
-        guard resp.status == 200 else { throw NSError(domain: "OAuth", code: resp.status) }
+        // Keep the provider's error body (invalid_grant vs invalid_client) for the log; a custom key so the
+        // UI's localizedDescription stays the generic one.
+        guard resp.status == 200 else {
+            throw NSError(domain: "OAuth", code: resp.status, userInfo: ["body": String(decoding: resp.data, as: UTF8.self)])
+        }
         struct R: Decodable { var access_token: String; var refresh_token: String?; var expires_in: Double? }
         let r = try JSONDecoder().decode(R.self, from: resp.data)
         return OAuthToken(accessToken: r.access_token, refreshToken: r.refresh_token ?? existingRefresh,

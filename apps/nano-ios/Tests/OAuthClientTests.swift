@@ -17,6 +17,18 @@ final class OAuthClientTests: XCTestCase {
         XCTAssertTrue(body.contains("grant_type=authorization_code"))
         XCTAssertTrue(body.contains("code_verifier=VER")); XCTAssertTrue(body.contains("code=CODE"))
     }
+    func test_tokenError_keepsProviderBodyForTheLog() async {
+        let http = MockHTTPClient(responses: [.init(status: 400, json: #"{"error":"invalid_grant"}"#)])
+        let cfg = OAuthConfig(clientID: "cid", redirectURI: "s:/oauth", authEndpoint: URL(string: "https://a")!,
+                              tokenEndpoint: URL(string: "https://token")!, scopes: [])
+        do {
+            _ = try await OAuthClient(config: cfg, http: http).refresh(refreshToken: "RT")
+            XCTFail("expected a throw")
+        } catch let e as NSError {
+            XCTAssertEqual(e.domain, "OAuth"); XCTAssertEqual(e.code, 400)   // degradedState keys on these
+            XCTAssertEqual(e.userInfo["body"] as? String, #"{"error":"invalid_grant"}"#)
+        }
+    }
     func test_refresh_usesRefreshToken_keepsOldRefreshIfOmitted() async throws {
         let http = MockHTTPClient(responses: [.init(json: #"{"access_token":"AT2","expires_in":3600}"#)])
         let cfg = OAuthConfig(clientID: "cid", redirectURI: "s:/oauth", authEndpoint: URL(string: "https://a")!,
